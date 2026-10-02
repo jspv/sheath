@@ -1,3 +1,5 @@
+import importlib
+
 import pytest
 
 from tether import TetherConfig, PathEscapesRootError, Session
@@ -107,3 +109,50 @@ def test_invalid_regex_raises_valueerror(tmp_path):
     write_file(sess, "a.txt", "hello\n")
     with pytest.raises(ValueError):
         search(sess, "(unclosed")  # invalid on both rg and Python backends
+
+
+def test_search_refuses_a_fifo_base(tmp_path):
+    import os
+    import pytest
+    sess = _session(tmp_path)
+    os.mkfifo(sess.root / "pipe")
+    with pytest.raises(ValueError, match="not a regular file or directory"):
+        search(sess, "x", path="pipe")
+
+
+def test_search_clamps_max_matches(tmp_path):
+    sess = _session(tmp_path)
+    (sess.root / "big.txt").write_text("hit\n" * 5000)
+    assert len(search(sess, "hit", max_matches=10**9)) == 1000
+
+
+@pytest.mark.skipif(__import__("shutil").which("rg") is None, reason="ripgrep not on PATH")
+def test_rg_search_skips_links_fifos_and_oversized_files_and_stops_early(tmp_path, monkeypatch):
+    import os
+    search_mod = importlib.import_module("tether.tools.search")  # the package re-exports the function
+    monkeypatch.setattr(search_mod, "_MAX_SEARCH_FILE_BYTES", 1000)
+    sess = _session(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("needle outside\n")
+    (sess.root / "link.txt").symlink_to(outside)
+    os.mkfifo(sess.root / "pipe")
+    (sess.root / "big.txt").write_text("needle " + "x" * 2000 + "\n")
+    (sess.root / "real.txt").write_text("needle here\n" * 50)
+    hits = search(sess, "needle", max_matches=5)
+    assert len(hits) == 5 and {h["file"] for h in hits} == {"real.txt"}
+    with pytest.raises(ValueError):
+        search(sess, "(unclosed")
+
+
+def test_python_search_skips_links_fifos_and_bounds_lines(tmp_path, monkeypatch):
+    import os
+    search_mod = importlib.import_module("tether.tools.search")  # the package re-exports the function
+    monkeypatch.setattr(search_mod.shutil, "which", lambda name: None)   # force the fallback
+    sess = _session(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("needle outside\n")
+    (sess.root / "link.txt").symlink_to(outside)
+    os.mkfifo(sess.root / "pipe")
+    (sess.root / "real.txt").write_text("x" * 3_000_000 + " needle tail\nneedle here\n")
+    hits = search(sess, "needle")
+    assert [(h["file"], h["line"]) for h in hits] == [("real.txt", 2)]

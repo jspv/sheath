@@ -1,3 +1,7 @@
+import os
+import threading
+import time
+
 import pytest
 
 from tether import TetherConfig, PathEscapesRootError, Session
@@ -79,3 +83,81 @@ def test_list_files_rejects_path_outside_root(tmp_path):
     sess = _session(tmp_path)
     with pytest.raises(PathEscapesRootError):
         list_files(sess, "..")
+
+
+
+def test_read_file_rejects_binary(tmp_path):
+    sess = _session(tmp_path)
+    (sess.root / "blob.bin").write_bytes(b"\x00\x01\x02PK\x03\x04" * 100)
+    with pytest.raises(ValueError, match="binary file"):
+        read_file(sess, "blob.bin")
+
+
+def test_read_file_replaces_invalid_utf8_instead_of_raising(tmp_path):
+    sess = _session(tmp_path)
+    (sess.root / "latin.txt").write_bytes("caf\xe9\n".encode("latin-1"))
+    assert read_file(sess, "latin.txt") == "caf�\n"
+
+
+def test_read_file_refuses_a_fifo_without_blocking(tmp_path):
+    sess = _session(tmp_path)
+    os.mkfifo(sess.root / "pipe")
+    with pytest.raises(ValueError, match="not a regular file"):
+        read_file(sess, "pipe")
+
+
+def test_read_file_does_not_load_a_huge_line_whole(tmp_path, monkeypatch):
+    sess = _session(tmp_path)
+    (sess.root / "one_line.txt").write_text("x" * 5_000_000)
+    from pathlib import Path
+
+    def boom(self, *a, **k):
+        raise AssertionError("read_text must not be used")
+
+    monkeypatch.setattr(Path, "read_text", boom)
+    out = read_file(sess, "one_line.txt")
+    assert len(out) <= 50_000 + 200 and "truncated" in out.lower()
+
+
+@pytest.mark.parametrize("target", ["handles/h1.txt", "inputs/x/a.csv", ".scripts/s.py",
+                                    ".tether/manifest.json"])
+def test_write_file_refuses_protected_directories(tmp_path, target):
+    sess = _session(tmp_path)
+    with pytest.raises(ValueError, match="managed by tether"):
+        write_file(sess, target, "x")
+
+
+def test_write_file_refuses_a_link_into_a_protected_directory(tmp_path):
+    sess = _session(tmp_path)
+    (sess.root / "alias").symlink_to(sess.root / "handles")
+    with pytest.raises(ValueError, match="managed by tether"):
+        write_file(sess, "alias/h9.txt", "x")
+
+
+def test_list_files_skips_state_dir_and_links_and_is_capped(tmp_path):
+    sess = _session(tmp_path)
+    sess.store.put("x", source="t")
+    (sess.root / "a.txt").write_text("1")
+    (sess.root / "link").symlink_to(sess.root / "a.txt")
+    listed = list_files(sess)
+    assert "a.txt" in listed and "handles/h1.txt" in listed
+    assert "link" not in listed and not any(p.startswith(".tether") for p in listed)
+    (sess.root / "many").mkdir()
+    for i in range(2100):
+        (sess.root / "many" / f"f{i:04d}").write_text("")
+    listed = list_files(sess, "many")
+    assert len(listed) == 2001 and "100 more" in listed[-1]
+
+
+def test_file_tools_wait_for_the_sandbox_lock(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "a.txt", "hi\n")
+    done = []
+    sess.io_lock.acquire()
+    t = threading.Thread(target=lambda: done.append(read_file(sess, "a.txt")))
+    t.start()
+    time.sleep(0.2)
+    assert done == []                      # blocked while a run holds the lock
+    sess.io_lock.release()
+    t.join(timeout=5)
+    assert done == ["hi\n"]
