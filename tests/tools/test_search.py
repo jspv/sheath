@@ -156,3 +156,36 @@ def test_python_search_skips_links_fifos_and_bounds_lines(tmp_path, monkeypatch)
     (sess.root / "real.txt").write_text("x" * 3_000_000 + " needle tail\nneedle here\n")
     hits = search(sess, "needle")
     assert [(h["file"], h["line"]) for h in hits] == [("real.txt", 2)]
+
+
+def _force_fallback(monkeypatch):
+    importlib.import_module("tether.tools.search")
+    import sys
+    monkeypatch.setattr(sys.modules["tether.tools.search"].shutil, "which", lambda name: None)
+
+
+@pytest.mark.parametrize("glob", ["../*", "/etc/*", "a/../../*", "..\\*"])
+def test_search_rejects_escaping_globs(tmp_path, monkeypatch, glob):
+    _force_fallback(monkeypatch)
+    sess = _session(tmp_path)
+    (tmp_path / "secret.txt").write_text("needle top-secret\n")
+    with pytest.raises(ValueError, match="invalid glob"):
+        search(sess, "needle", glob=glob)
+
+
+def test_python_search_does_not_follow_a_linked_directory_out_of_the_root(tmp_path, monkeypatch):
+    _force_fallback(monkeypatch)
+    sess = _session(tmp_path)
+    outdir = tmp_path / "outdir"
+    outdir.mkdir()
+    (outdir / "s.txt").write_text("needle outside\n")
+    (sess.root / "linkdir").symlink_to(outdir)
+    assert search(sess, "needle") == []
+
+
+@pytest.mark.skipif(__import__("shutil").which("rg") is None, reason="ripgrep not on PATH")
+def test_rg_search_handles_non_utf8_lines_and_names(tmp_path):
+    sess = _session(tmp_path)
+    (sess.root / "latin.txt").write_bytes(b"caf\xe9 needle\n")
+    hits = search(sess, "needle")
+    assert len(hits) == 1 and "needle" in hits[0]["text"] and hits[0]["col"] == 5

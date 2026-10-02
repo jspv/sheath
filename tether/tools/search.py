@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -35,6 +36,19 @@ def _snippet(line: str, col: int) -> str:
     return ("…" if start > 0 else "") + line[start:end] + ("…" if end < len(line) else "")
 
 
+def _check_glob(glob: str | None) -> None:
+    if glob and (glob.startswith(("/", "\\")) or ".." in re.split(r"[/\\]", glob)
+                 or re.match(r"^[A-Za-z]:", glob)):
+        raise ValueError(f"invalid glob {glob!r}: must be relative and contain no '..'")
+
+
+def _rg_bytes(obj: dict) -> bytes:
+    """rg --json gives {"text": ...} for valid UTF-8, else {"bytes": <base64>}."""
+    if "text" in obj:
+        return obj["text"].encode("utf-8")
+    return base64.b64decode(obj.get("bytes", ""))
+
+
 def search(session: Session, pattern: str, path: str = ".", glob: str | None = None,
            ignore_case: bool = False, max_matches: int = 100) -> list[dict]:
     """Search for ``pattern`` (a regex) in files under ``path`` (a file or folder).
@@ -44,6 +58,7 @@ def search(session: Session, pattern: str, path: str = ".", glob: str | None = N
     scan. Links, special files and files over 50 MiB are skipped.
     """
     max_matches = max(1, min(int(max_matches), _MAX_MATCHES))
+    _check_glob(glob)
     with session.io_lock:
         base = safe_path(session.root, path or ".")  # "" / None -> the root
         mode = os.stat(base).st_mode
@@ -80,15 +95,15 @@ def _search_rg(rg: str, root: Path, base: Path, pattern: str, glob: str | None,
                 if evt.get("type") != "match":
                     continue
                 data = evt["data"]
-                abs_path = Path(data["path"]["text"])
+                abs_path = Path(_rg_bytes(data["path"]).decode("utf-8", errors="replace"))
                 rel = (abs_path.relative_to(root).as_posix() if abs_path.is_absolute()
                        else abs_path.as_posix())
                 # One hit per matching line (first submatch), with a CHARACTER column, to
                 # match the Python fallback exactly. rg reports a byte offset, so convert it.
-                line_text = data["lines"]["text"]
+                raw = _rg_bytes(data["lines"])
+                line_text = raw.decode("utf-8", errors="replace")
                 sub = data["submatches"][0]
-                char_col = len(line_text.encode("utf-8")[:sub["start"]]
-                               .decode("utf-8", errors="ignore"))
+                char_col = len(raw[:sub["start"]].decode("utf-8", errors="replace"))
                 hits.append({"file": rel, "line": data["line_number"], "col": char_col,
                              "text": _snippet(line_text, char_col)})
                 if len(hits) >= max_matches:
@@ -120,8 +135,11 @@ def _search_python(root: Path, base: Path, pattern: str, ignore_case: bool,
         raise ValueError(f"invalid search pattern: {e}") from e
     files = [base] if base.is_file() else sorted(base.rglob(glob or "*"))
     hits: list[dict] = []
+    real_root = root.resolve()
     for f in files:
         try:
+            if not f.resolve().is_relative_to(real_root):
+                continue                   # never read outside the root (links, odd globs)
             st = os.lstat(f)               # lstat: a link is skipped, never followed
             if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_SEARCH_FILE_BYTES:
                 continue

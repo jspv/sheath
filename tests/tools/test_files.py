@@ -161,3 +161,38 @@ def test_file_tools_wait_for_the_sandbox_lock(tmp_path):
     sess.io_lock.release()
     t.join(timeout=5)
     assert done == ["hi\n"]
+
+
+def test_read_file_refuses_a_symlink_swapped_in_after_the_check(tmp_path, monkeypatch):
+    sess = _session(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("top-secret\n")
+    (sess.root / "link.txt").symlink_to(outside)
+    monkeypatch.setattr("tether.tools.files.safe_path", lambda root, p: root / p)
+    with pytest.raises(ValueError, match="symlink"):
+        read_file(sess, "link.txt")
+
+
+def test_write_file_refuses_a_symlink_swapped_in_after_the_check(tmp_path, monkeypatch):
+    sess = _session(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("original\n")
+    (sess.root / "link.txt").symlink_to(outside)
+    monkeypatch.setattr("tether.tools.files.safe_path", lambda root, p: root / p)
+    with pytest.raises(ValueError, match="symlink"):
+        write_file(sess, "link.txt", "pwned")
+    assert outside.read_text() == "original\n"
+
+
+def test_write_file_to_a_fifo_fails_promptly(tmp_path):
+    sess = _session(tmp_path)
+    os.mkfifo(sess.root / "pipe")
+    with pytest.raises(ValueError, match="not a regular file"):
+        write_file(sess, "pipe", "x")
+
+
+def test_write_file_to_a_directory_is_refused(tmp_path):
+    sess = _session(tmp_path)
+    (sess.root / "d").mkdir()
+    with pytest.raises(ValueError):
+        write_file(sess, "d", "x")

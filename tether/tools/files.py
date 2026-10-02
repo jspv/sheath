@@ -6,6 +6,10 @@ its use, and reads only regular files with bounded memory.
 
 from __future__ import annotations
 
+import errno
+import os
+import stat
+
 from .. import workspace
 from ..paths import safe_path
 from ..session import Session
@@ -14,6 +18,23 @@ _DEFAULT_LIMIT = 2000
 _MAX_READ_CHARS = 50_000  # hard cap so a single huge line (e.g. minified HTML) can't flood context
 _BINARY_PROBE_BYTES = 8192
 _MAX_LISTED = 2000
+
+
+def _open_checked(target, flags: int, shown: str) -> int:
+    """Open ``target`` once, never following a final symlink and never blocking on a FIFO,
+    and confirm on the descriptor itself that it is a regular file."""
+    try:
+        fd = os.open(target, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise ValueError(f"{shown!r} is a symlink; refusing to follow it") from e
+        if e.errno in (errno.EISDIR, errno.ENXIO, errno.ENODEV):
+            raise ValueError(f"not a regular file: {shown!r}") from e
+        raise
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        raise ValueError(f"not a regular file: {shown!r}")
+    return fd
 
 
 def read_file(session: Session, path: str, offset: int = 0, limit: int = _DEFAULT_LIMIT,
@@ -28,15 +49,21 @@ def read_file(session: Session, path: str, offset: int = 0, limit: int = _DEFAUL
     if offset < 0 or limit < 0:
         raise ValueError("offset and limit must be non-negative")
     with session.io_lock:
-        target = workspace.require_regular(safe_path(session.root, path))
-        with target.open("rb") as probe:
-            if b"\0" in probe.read(_BINARY_PROBE_BYTES):
+        target = safe_path(session.root, path)
+        fd = _open_checked(target, os.O_RDONLY, path)
+        try:
+            if b"\0" in os.read(fd, _BINARY_PROBE_BYTES):
                 raise ValueError(f"{path!r} is a binary file; open it inside run_python "
                                  "instead of reading it as text")
+            os.lseek(fd, 0, os.SEEK_SET)
+            f = open(fd, encoding="utf-8", errors="replace", newline="")  # noqa: SIM115
+        except BaseException:
+            os.close(fd)
+            raise
         pieces: list[str] = []
         size = 0
         truncated = False
-        with target.open(encoding="utf-8", errors="replace", newline="") as f:
+        with f:
             for lineno, line in enumerate(workspace.iter_bounded_lines(f, max_chars + 1)):
                 if lineno < offset:
                     continue
@@ -67,11 +94,17 @@ def write_file(session: Session, path: str, content: str) -> str:
             raise ValueError(f"{path!r} is in a directory managed by tether; write elsewhere "
                              "(e.g. under outputs/) and use save() in run_python for handles")
         target.parent.mkdir(parents=True, exist_ok=True)
-        if target.exists():
-            workspace.require_regular(target)
-        target.write_text(content, encoding="utf-8")
+        fd = _open_checked(target, os.O_WRONLY | os.O_CREAT, path)
+        try:
+            os.ftruncate(fd, 0)
+            data = content.encode("utf-8")
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view):]
+        finally:
+            os.close(fd)
         rel = target.relative_to(session.root).as_posix()
-    return f"wrote {len(content.encode())} bytes to {rel}"
+    return f"wrote {len(data)} bytes to {rel}"
 
 
 def list_files(session: Session, path: str = ".") -> list[str]:
