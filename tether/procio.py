@@ -7,6 +7,8 @@ first and last halves of a byte cap and counts what it dropped.
 
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import threading
 from collections.abc import Callable
@@ -70,12 +72,14 @@ def run_bounded(argv: list[str], *, timeout: float, cap: int,
     """Run ``argv``; return its exit code and at most ``cap`` bytes of each output stream.
 
     On timeout the process is killed and whatever was captured is returned with
-    ``timed_out=True``. The drain threads are daemons and are joined with a bound, so a
-    grandchild that keeps a pipe open cannot hang the caller.
+    ``timed_out=True``. The process is started in its own session so that any child
+    processes spawned by the model code are killed when the run ends. The drain threads
+    are daemons and are joined with a bound so that even if a grandchild holds the pipes
+    open, the caller is not hung.
     """
     proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            preexec_fn=preexec_fn)
+                            preexec_fn=preexec_fn, start_new_session=True)
     out, err = _HeadTail(cap), _HeadTail(cap)
     threads = [threading.Thread(target=_drain, args=(proc.stdout, out), daemon=True),
                threading.Thread(target=_drain, args=(proc.stderr, err), daemon=True)]
@@ -83,11 +87,23 @@ def run_bounded(argv: list[str], *, timeout: float, cap: int,
         t.start()
     timed_out = False
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        proc.kill()
-        proc.wait()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc.kill()
+            proc.wait()
+    finally:
+        # Kill the entire process group (catches grandchildren spawned by model code).
+        # The child is in its own session, so killpg(proc.pid, ...) kills it and all
+        # descendants. This must happen even if wait() raises (e.g., KeyboardInterrupt).
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        # Ensure the child is reaped if not already.
+        if proc.poll() is None:
+            proc.wait()
     for t in threads:
         t.join(timeout=_JOIN_TIMEOUT_S)
     return BoundedRun(out.text(), err.text(), proc.returncode, timed_out)

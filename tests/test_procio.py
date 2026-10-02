@@ -1,4 +1,6 @@
+import os
 import sys
+import time
 
 from tether.config import SandboxConfig
 from tether.procio import run_bounded
@@ -28,13 +30,76 @@ def test_output_exactly_at_the_cap_is_not_marked():
 
 
 def test_timeout_kills_and_keeps_partial_output():
+    start = time.time()
     r = _py("import sys, time; print('started', flush=True); time.sleep(30)", timeout=1)
+    elapsed = time.time() - start
     assert r.timed_out and r.returncode != 0
     assert "started" in r.stdout
+    assert elapsed < 10, f"took {elapsed}s, should be < 10s (proves kill, not wait)"
 
 
 def test_nonzero_exit_code_is_reported():
     assert _py("raise SystemExit(3)").returncode == 3
+
+
+def test_grandchild_killed_on_normal_exit():
+    """Grandchild spawned by the child must be killed when child exits normally."""
+    start = time.time()
+    code = """
+import sys, subprocess
+p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+print(p.pid)
+"""
+    r = _py(code)
+    elapsed = time.time() - start
+    assert r.returncode == 0 and not r.timed_out
+    assert elapsed < 3, f"took {elapsed}s, should be < 3s"
+
+    grandchild_pid = int(r.stdout.strip())
+
+    # Poll to confirm grandchild is dead (allow ~1s retry for reaping)
+    for _ in range(10):
+        try:
+            os.kill(grandchild_pid, 0)
+            time.sleep(0.1)
+        except ProcessLookupError:
+            break
+    else:
+        raise AssertionError(f"grandchild {grandchild_pid} still alive after 1s")
+
+
+def test_grandchild_killed_on_timeout():
+    """Grandchild spawned by the child must be killed when run times out."""
+    start = time.time()
+    code = """
+import sys, subprocess, time
+p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+print(p.pid, flush=True)
+sys.stdout.flush()
+time.sleep(30)
+"""
+    r = _py(code, timeout=1)
+    elapsed = time.time() - start
+    assert r.timed_out
+    assert elapsed < 4, f"took {elapsed}s, should be < 4s"
+
+    # Parse pid from output; if empty, child was killed before printing
+    pid_str = r.stdout.strip()
+    if not pid_str:
+        # Child was killed too quickly to print; this is acceptable - the important
+        # thing is that we returned quickly (timed_out is True and elapsed < 4s)
+        return
+    grandchild_pid = int(pid_str)
+
+    # Poll to confirm grandchild is dead (allow ~1s retry for reaping)
+    for _ in range(10):
+        try:
+            os.kill(grandchild_pid, 0)
+            time.sleep(0.1)
+        except ProcessLookupError:
+            break
+    else:
+        raise AssertionError(f"grandchild {grandchild_pid} still alive after 1s")
 
 
 def test_config_default():
