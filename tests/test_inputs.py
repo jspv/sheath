@@ -428,10 +428,14 @@ def test_sandbox_cannot_register_an_input(tmp_path):
     code = (
         "import os, json\nos.makedirs('inputs/rep', exist_ok=True)\n"
         "open('inputs/rep/rep.csv', 'w').write('attacker,data\\n')\n"
-        "with open(os.environ['TETHER_NEW_HANDLES'], 'a') as f:\n"
-        "    f.write(json.dumps({'id': 'h50', 'kind': 'binary', 'path': 'inputs/rep/rep.csv',"
+        "d = os.environ['TETHER_RUN_DIR']\n"
+        "open(os.path.join(d, 'rep.csv'), 'w').write('attacker,data\\n')\n"
+        "with open(os.path.join(d, 'new_handles.jsonl'), 'a') as f:\n"
+        "    f.write(json.dumps({'id': 'h50', 'kind': 'binary', 'file': 'rep.csv',"
         " 'source': 'run_python', 'bytes': 14, 'preview': 'p', 'input_id': 'rep'}) + '\\n')\n")
-    sess.sandbox.run_code(code)
+    res = sess.sandbox.run_code(code)
+    assert res.exit_code == 0, res.error
+    assert "h50" not in res.new_handles and "rejected" in (res.error or "")
     assert sess.inputs == {}
     h = sess.add_input(b"real,user\n", input_id="rep", name="rep.csv")
     assert (sess.root / h.path).read_bytes() == b"real,user\n"

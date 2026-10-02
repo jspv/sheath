@@ -16,8 +16,8 @@ import tether_sandbox as _hs
 
 
 def _emit_already_written() -> bool:
-    path = os.environ.get("TETHER_EMIT")
-    return bool(path) and os.path.exists(path) and os.path.getsize(path) > 0
+    path = os.path.join(os.environ.get("TETHER_RUN_DIR", ""), "emit.json")
+    return os.path.exists(path) and os.path.getsize(path) > 0
 
 
 def main() -> None:

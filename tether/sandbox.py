@@ -11,9 +11,7 @@ from __future__ import annotations
 import json
 import os
 import resource
-import secrets
-import stat
-import subprocess
+import shutil
 import sys
 import tempfile
 import threading
@@ -21,9 +19,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from . import workspace
 from .config import SandboxConfig
 from .handles import HandleIdReuseError, HandleStore
-from .paths import safe_path
+from .paths import safe_path, validate_segment
+from .procio import run_bounded
+from .workspace import ControlFileError
 
 _RUNTIME_DIR = Path(__file__).resolve().parent / "runtime"
 _RUNNER = _RUNTIME_DIR / "_runner.py"
@@ -81,29 +82,31 @@ class _LaunchResult:
     stderr: str
     exit_code: int
     killed_by: str | None = None
+    # True when the backend could not confirm the sandbox stopped (a timed-out container it
+    # failed to remove). The child may still be writing, so nothing it produced is ingested.
+    orphaned: bool = False
 
 
 @dataclass
 class _RunContext:
-    """Everything a backend needs to launch one run. Control-file paths are HOST paths
-    (the parent reads/writes them); a backend translates them to its own namespace."""
+    """Everything a backend needs to launch one run. Paths are HOST paths; a backend
+    translates them to its own namespace."""
     script_rel: str          # user script path relative to root
     argv: list[str]          # user args (already str-coerced)
     root: Path
-    registry_file: Path      # host path
-    new_handles_file: Path   # host path
-    emit_file: Path          # host path
+    run_dir: Path            # per-run exchange directory (.tether/runs/<token>)
     config: SandboxConfig
-    publish_file: Path | None = None   # host path; None when publishing is disabled
+    publish_enabled: bool = False
 
 
 class _OrchestratedSandbox:
-    """Shared control-file orchestration. Subclasses implement ``_launch``.
+    """Shared run orchestration. Subclasses implement ``_launch``.
 
     Runs are serialized by ``self.lock`` (an ``RLock`` the Session also takes for its own file
-    work in the root -- publishing, input ingestion), so no sandboxed code is running while the
-    parent validates or writes paths under the child-writable root. Each run's control files use
-    a random token, so sandboxed code cannot pre-plant a link at a future run's control path.
+    work in the root), so no sandboxed code is running while the parent validates or writes
+    paths under the root. Each run gets a fresh exchange directory under ``.tether/runs/``;
+    it is the only place the parent reads sandbox-written data from, and every such read is
+    no-follow, regular-file-only and size-capped (``workspace.read_control_file``).
     """
 
     def __init__(self, root: Path | str, store: HandleStore,
@@ -118,12 +121,13 @@ class _OrchestratedSandbox:
 
     def run_code(self, code: str, args: list[str] | None = None) -> ExecResult:
         with self.lock:
+            workspace.verify_layout(self.root)   # .scripts/ must be a real directory
             scripts = self.root / _SCRIPTS_DIR
-            scripts.mkdir(exist_ok=True)
             # Collision-free across instances/processes; scripts persist as debuggable artifacts.
             fd, abspath = tempfile.mkstemp(prefix="inline_", suffix=".py", dir=scripts)
-            os.close(fd)
-            Path(abspath).write_text(code, encoding="utf-8")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(code)
+            os.chmod(abspath, 0o644)
             rel = str(Path(abspath).relative_to(self.root))
             return self.run_script(rel, args)
 
@@ -135,50 +139,33 @@ class _OrchestratedSandbox:
         script = safe_path(self.root, path)  # raises PathEscapesRootError if outside
         argv = [str(a) for a in (args or [])]  # coerce so non-str args fail clearly, not opaquely
 
-        token = secrets.token_hex(8)
-        new_handles_file = self.root / f"_new_handles_{token}.jsonl"
-        emit_file = self.root / f"_emit_{token}.json"
-        registry_file = self.root / f"_registry_{token}.json"
-        publish_file = self.root / f"_publish_{token}.jsonl" if self.publisher else None
-
+        workspace.verify_layout(self.root)
+        run_dir = workspace.new_run_dir(self.root)
         try:
-            new_handles_file.write_text("", encoding="utf-8")
-            if publish_file is not None:
-                # Exclusive + no-follow: never truncate or adopt something planted at this path.
-                os.close(os.open(publish_file,
-                                 os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600))
             registry = {hid: {"kind": h.kind, "path": h.path}
                         for hid, h in self.store.manifest_handles().items()}
-            registry_file.write_text(json.dumps(registry), encoding="utf-8")
+            (run_dir / "registry.json").write_text(json.dumps(registry), encoding="utf-8")
 
             ctx = _RunContext(
                 script_rel=str(script.relative_to(self.root)), argv=argv, root=self.root,
-                registry_file=registry_file, new_handles_file=new_handles_file,
-                emit_file=emit_file, config=self.config, publish_file=publish_file,
+                run_dir=run_dir, config=self.config,
+                publish_enabled=self.publisher is not None,
             )
             launched = self._launch(ctx)
 
-            result = None
-            emit_error = None
-            if launched.exit_code == 0 and emit_file.exists():
-                # Everything about this file is child-controlled: its bytes, its encoding,
-                # even whether it is a file at all (a child can leave a directory at the
-                # path). run_python has a documented return shape, so every one of those
-                # has to become an `error` string, not an exception unwinding through the
-                # tool layer. ``errors="replace"`` keeps a non-UTF-8 payload from raising
-                # before json.loads can reject it -- the size cap above already bounds it.
-                try:
-                    size = emit_file.stat().st_size
-                    if size > self.limits.max_emit_bytes:
-                        # Check the size BEFORE parsing: a hostile child must not be able to
-                        # flood context (or the parser) through the result channel.
-                        emit_error = (f"tether: emit payload too large ({size} bytes > "
-                                      f"{self.limits.max_emit_bytes}); save a handle instead")
-                    else:
-                        result = json.loads(
-                            emit_file.read_text(encoding="utf-8", errors="replace"))
-                except (json.JSONDecodeError, OSError) as e:
-                    emit_error = f"tether: malformed emit payload: {e}"
+            if launched.orphaned:
+                return ExecResult(
+                    stdout=launched.stdout, stderr=launched.stderr, result=None,
+                    error=((launched.stderr.strip() + "\n") if launched.stderr.strip() else "")
+                          + "tether: the sandbox could not be stopped; nothing it produced "
+                            "was ingested",
+                    exit_code=launched.exit_code, killed_by=launched.killed_by)
+
+            # The local tier cannot stop a script replacing a protected directory; refuse to
+            # ingest anything if one did. (In the container tier they are read-only mounts.)
+            workspace.verify_layout(self.root)
+
+            result, emit_error = self._read_emit(run_dir, launched.exit_code)
 
             # Ergonomic fallback: if the script neither emitted nor ended in an expression but
             # printed something, surface that so a model that just print()s an answer still gets one.
@@ -186,9 +173,8 @@ class _OrchestratedSandbox:
                     and launched.stdout.strip()):
                 result = launched.stdout.strip()
 
-            new_handles, ingest_error = self._ingest_new_handles(new_handles_file)
-            published, publish_error = self._process_publications(publish_file,
-                                                                  launched.exit_code)
+            new_handles, ingest_error = self._ingest_new_handles(run_dir)
+            published, publish_error = self._process_publications(run_dir, launched.exit_code)
             base_error = (launched.stderr.strip() or None) if launched.exit_code != 0 else None
             error = "\n".join(p for p in (base_error, emit_error, ingest_error, publish_error)
                                if p) or None
@@ -198,46 +184,46 @@ class _OrchestratedSandbox:
                               new_handles=new_handles, killed_by=launched.killed_by,
                               published=published)
         finally:
-            for f in (new_handles_file, emit_file, registry_file, publish_file):
-                if f is None:
-                    continue
-                try:
-                    f.unlink(missing_ok=True)
-                except OSError:
-                    # A child can leave a directory (or something else unlinkable) at a
-                    # control path. Cleanup must never raise while unwinding: that would
-                    # replace the run's real result -- or a real exception -- with a
-                    # cleanup failure. The stale entry is per-run-unique, so it is inert.
-                    pass
+            shutil.rmtree(run_dir, ignore_errors=True)   # rmtree never follows a link
 
-    def _ingest_new_handles(self, new_handles_file: Path) -> tuple[list[str], str | None]:
-        """Adopt handles the child wrote; return (ids, error).
+    def _read_emit(self, run_dir: Path, exit_code: int) -> tuple[Any | None, str | None]:
+        """Parse the child's emit payload; return (result, error). Everything about the file
+        is child-controlled, so every failure becomes an error string, never an exception."""
+        if exit_code != 0:
+            return None, None
+        try:
+            raw = workspace.read_control_file(run_dir, "emit.json", self.limits.max_emit_bytes)
+        except ControlFileError as e:
+            return None, f"tether: emit payload {e}; save a handle instead"
+        if raw is None:
+            return None, None
+        try:
+            return json.loads(raw.decode("utf-8", errors="replace")), None
+        except json.JSONDecodeError as e:
+            return None, f"tether: malformed emit payload: {e}"
 
-        Records are untrusted: ``adopt`` derives all metadata from the file itself and
-        refuses an id that already exists. Tolerant by design -- a rejected or corrupt
-        record is skipped, not fatal. Two hard bounds stop a hostile child from using this
-        channel as a flood: the file is read only up to ``max_control_bytes``, and at most
-        ``max_new_handles`` records are adopted. An id-reuse rejection is reported in the
-        returned error so the model learns the save did not take effect.
+    def _ingest_new_handles(self, run_dir: Path) -> tuple[list[str], str | None]:
+        """Adopt handles the child saved; return (ids, error).
+
+        Records are untrusted: the parent validates the id, picks the destination, moves the
+        payload out of the run directory and derives all metadata itself
+        (``HandleStore.adopt_file``). Tolerant by design -- a rejected record is counted and
+        reported, not fatal. The control file is read only up to ``max_control_bytes`` and at
+        most ``max_new_handles`` records are adopted.
         """
         ids: list[str] = []
-        if not new_handles_file.exists():
-            return ids, None
-        # As with the emit file, the child controls these bytes and may even replace the
-        # file with a directory, so stat + read are guarded and the decode replaces bad
-        # bytes rather than raising: a corrupt line must degrade that line, not the run.
         try:
-            size = new_handles_file.stat().st_size
-            if size > self.limits.max_control_bytes:
-                return ids, (f"tether: control file too large ({size} bytes > "
-                             f"{self.limits.max_control_bytes}); no handles ingested")
-            lines = new_handles_file.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError as e:
-            return ids, f"tether: could not read the new-handles control file: {e}"
+            raw = workspace.read_control_file(run_dir, "new_handles.jsonl",
+                                              self.limits.max_control_bytes)
+        except ControlFileError as e:
+            return ids, f"tether: control file {e}; no handles ingested"
+        if raw is None:
+            return ids, None
         reused: dict[str, None] = {}   # distinct rejected ids, insertion-ordered
         reused_count = 0
+        rejected = 0
         cap_error: str | None = None
-        for line in lines:
+        for line in raw.decode("utf-8", errors="replace").splitlines():
             line = line.strip()
             if not line:
                 continue
@@ -247,19 +233,18 @@ class _OrchestratedSandbox:
                 break
             try:
                 rec = json.loads(line)
-                # ``adopt`` takes only id/kind/path/source, so sandboxed code cannot set
-                # a parent-only field (``input_id``, ``content_type``, ``description``) --
-                # minting an input from inside the sandbox is impossible by signature, not
-                # by a denylist.
-                handle = self.store.adopt(id=rec["id"], kind=rec["kind"],
-                                          path=rec["path"], source=rec.get("source", "run_python"))
+                name = validate_segment(rec["file"], what="handle payload name")
+                handle = self.store.adopt_file(id=rec["id"], kind=rec["kind"],
+                                               src=run_dir / name,
+                                               source=rec.get("source", "run_python"))
                 ids.append(handle.id)
             except HandleIdReuseError as e:
                 reused_count += 1
                 if len(reused) <= _MAX_REPORTED_IDS:  # stop tracking once past the display cap
                     reused[str(e.handle_id)[:_MAX_REPORTED_ID_LEN]] = None
-            except (json.JSONDecodeError, ValueError, KeyError, TypeError, AttributeError):
-                continue
+            except (json.JSONDecodeError, ValueError, KeyError, TypeError, AttributeError,
+                    OSError):
+                rejected += 1
         parts = []
         if reused_count:
             shown = list(reused)[:_MAX_REPORTED_IDS]
@@ -268,45 +253,36 @@ class _OrchestratedSandbox:
             parts.append(f"tether: save rejected for {reused_count} record(s): handle id "
                          f"already exists and handles are immutable; ids: "
                          f"{', '.join(shown)}{more}")
+        if rejected:
+            parts.append(f"tether: {rejected} handle record(s) rejected (invalid id or kind, "
+                         f"or the saved file was missing or unreadable)")
         if cap_error:
             parts.append(cap_error)
         return ids, "\n".join(parts) or None
 
-    def _process_publications(self, publish_file: Path | None,
+    def _process_publications(self, run_dir: Path,
                               exit_code: int) -> tuple[list[dict], str | None]:
         """Hand the child's publish requests to the publisher; return (records, error).
 
         Runs only after the child has exited, and only on a clean exit, so published files are
         complete. Every request is untrusted: the publisher re-validates the path from scratch.
-        The file is read up to ``_MAX_PUBLISH_CONTROL_BYTES`` and at most
-        ``_MAX_PUBLISH_REQUESTS`` requests are honored; malformed lines are skipped.
         """
-        if publish_file is None or self.publisher is None:
+        if self.publisher is None:
             return [], None
-        replaced = ("tether: publish control file was replaced by the script; publication "
-                    "requests ignored")
         try:
-            # No-follow + non-blocking: a symlink or FIFO planted over the file must neither be
-            # followed nor hang the parent.
-            fd = os.open(publish_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-        except FileNotFoundError:
+            raw = workspace.read_control_file(run_dir, "publish.jsonl",
+                                              _MAX_PUBLISH_CONTROL_BYTES)
+        except ControlFileError as e:
+            return [], f"tether: publish control file {e}; publication requests ignored"
+        if raw is None:
             return [], None
-        except OSError:
-            return [], replaced
-        with os.fdopen(fd, "rb") as f:
-            if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                return [], replaced
-            raw = f.read(_MAX_PUBLISH_CONTROL_BYTES + 1)
-        lines = [ln for ln in raw[:_MAX_PUBLISH_CONTROL_BYTES].decode(
-            "utf-8", errors="replace").splitlines() if ln.strip()]
+        lines = [ln for ln in raw.decode("utf-8", errors="replace").splitlines() if ln.strip()]
         if not lines:
             return [], None
         if exit_code != 0:
             return [], (f"tether: {len(lines)} publication request(s) ignored because the "
                         "script did not exit cleanly")
         notes: list[str] = []
-        if len(raw) > _MAX_PUBLISH_CONTROL_BYTES:
-            notes.append("tether: publish control file truncated (too large)")
         if len(lines) > _MAX_PUBLISH_REQUESTS:
             notes.append(f"tether: too many publication requests (cap {_MAX_PUBLISH_REQUESTS}); "
                          "later requests dropped")
@@ -350,24 +326,18 @@ class LocalSubprocessSandbox(_OrchestratedSandbox):
             "HOME": str(ctx.root),
             "TMPDIR": str(ctx.root),
             "TETHER_ROOT": str(ctx.root),
-            "TETHER_REGISTRY": str(ctx.registry_file),
-            "TETHER_NEW_HANDLES": str(ctx.new_handles_file),
-            "TETHER_EMIT": str(ctx.emit_file),
+            "TETHER_RUN_DIR": str(ctx.run_dir),
             "PYTHONPATH": str(_RUNTIME_DIR),
         }
-        if ctx.publish_file is not None:
-            env["TETHER_PUBLISH"] = str(ctx.publish_file)
-        try:
-            proc = subprocess.run(
-                [sys.executable, str(_RUNNER), str(script_abs), *ctx.argv],
-                cwd=ctx.root, env=env, capture_output=True, text=True,
-                timeout=ctx.config.timeout_s, preexec_fn=self._limits(),
-            )
-            return _LaunchResult(proc.stdout, proc.stderr, proc.returncode)
-        except subprocess.TimeoutExpired as e:
-            return _LaunchResult(_as_text(e.stdout),
-                                 _as_text(e.stderr) + "\ntether: killed (timeout)",
+        if ctx.publish_enabled:
+            env["TETHER_PUBLISH_ENABLED"] = "1"
+        run = run_bounded([sys.executable, str(_RUNNER), str(script_abs), *ctx.argv],
+                          cwd=ctx.root, env=env, timeout=ctx.config.timeout_s,
+                          cap=ctx.config.max_output_bytes, preexec_fn=self._limits())
+        if run.timed_out:
+            return _LaunchResult(run.stdout, run.stderr + "\ntether: killed (timeout)",
                                  -1, killed_by="timeout")
+        return _LaunchResult(run.stdout, run.stderr, run.returncode)
 
     def _limits(self):
         cfg = self.config

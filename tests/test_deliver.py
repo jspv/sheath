@@ -228,15 +228,17 @@ def test_forged_publish_request_is_rejected(tmp_path):
     (tmp_path / "secret.txt").write_text("s")
     code = (
         "import json, os\n"
-        "with open(os.environ['TETHER_PUBLISH'], 'a') as f:\n"
+        "with open(os.path.join(os.environ['TETHER_RUN_DIR'], 'publish.jsonl'), 'a') as f:\n"
         f"    f.write(json.dumps({{'path': {str(tmp_path / 'secret.txt')!r}}}) + '\\n')\n"
         "    f.write(json.dumps({'path': '../secret.txt'}) + '\\n')\n"
         "    f.write(json.dumps({'path': 'handles/_manifest.json'}) + '\\n')\n"
+        "    f.write(json.dumps({'path': '.tether/manifest.json'}) + '\\n')\n"
         "    f.write('not json\\n')\n"
         "    f.write(json.dumps({'path': ['x']}) + '\\n')\n"
     )
     res = sess.sandbox.run_code(code)
     assert host.calls == []
+    assert len(res.published) == 5           # every well-formed request was considered
     assert all("error" in p for p in res.published)
 
 

@@ -11,10 +11,11 @@ def _run_child(tmp_path, body: str, registry: dict | None = None, args: list[str
     """Run a small script in a child process with the helper env wired up."""
     root = tmp_path
     (root / "handles").mkdir(exist_ok=True)
-    new_handles = root / "_new_handles.jsonl"
-    emit = root / "_emit.json"
-    registry_path = root / "_registry.json"
-    registry_path.write_text(json.dumps(registry or {}))
+    run_dir = root / ".tether" / "runs" / "t"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "registry.json").write_text(json.dumps(registry or {}))
+    new_handles = run_dir / "new_handles.jsonl"
+    emit = run_dir / "emit.json"
 
     script = root / "script.py"
     script.write_text(body)
@@ -22,9 +23,7 @@ def _run_child(tmp_path, body: str, registry: dict | None = None, args: list[str
     env = {
         "PATH": os.environ.get("PATH", ""),
         "TETHER_ROOT": str(root),
-        "TETHER_NEW_HANDLES": str(new_handles),
-        "TETHER_EMIT": str(emit),
-        "TETHER_REGISTRY": str(registry_path),
+        "TETHER_RUN_DIR": str(run_dir),
         "PYTHONPATH": str(RUNTIME_DIR),
     }
     proc = subprocess.run(
@@ -52,7 +51,8 @@ def test_helper_save_records_new_handle(tmp_path):
     line = json.loads(new_handles.read_text().strip())
     assert line["id"] == "h5"
     assert line["kind"] == "text"
-    assert (tmp_path / line["path"]).read_text() == "derived text"
+    assert "path" not in line                      # the child names a file, not a path
+    assert (new_handles.parent / line["file"]).read_text() == "derived text"
 
 
 def test_helper_load_reads_existing_text_handle(tmp_path):
@@ -175,7 +175,7 @@ def test_malformed_emit_payload_is_graceful(tmp_path):
     sb, _ = _sandbox(tmp_path)
     # Child exits 0 but writes garbage directly to the emit file.
     (tmp_path / "s.py").write_text(
-        "import os\nopen(os.environ['TETHER_EMIT'], 'w').write('{not json')\n"
+        "import os\nopen(os.path.join(os.environ['TETHER_RUN_DIR'], 'emit.json'), 'w').write('{not json')\n"
     )
     res = sb.run_script("s.py")  # must not raise
     assert res.exit_code == 0
@@ -190,7 +190,7 @@ def test_corrupt_handle_line_is_skipped_not_fatal(tmp_path):
         "import os\n"
         "from tether_sandbox import save\n"
         "save('h1', {'ok': 1})\n"
-        "open(os.environ['TETHER_NEW_HANDLES'], 'a').write('{bad json\\n')\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl'), 'a').write('{bad json\\n')\n"
     )
     res = sb.run_script("s.py")  # must not raise
     assert res.new_handles == ["h1"]      # good one reported
@@ -277,11 +277,11 @@ def test_child_record_carries_no_metadata(tmp_path):
     captured = []
     original_ingest = type(sb)._ingest_new_handles
 
-    def spy(self, new_handles_file):
-        for line in new_handles_file.read_text(encoding="utf-8").splitlines():
+    def spy(self, run_dir):
+        for line in (run_dir / "new_handles.jsonl").read_text(encoding="utf-8").splitlines():
             if line.strip():
                 captured.append(json.loads(line))
-        return original_ingest(self, new_handles_file)
+        return original_ingest(self, run_dir)
 
     type(sb)._ingest_new_handles = spy
     try:
@@ -293,7 +293,7 @@ def test_child_record_carries_no_metadata(tmp_path):
         type(sb)._ingest_new_handles = original_ingest
 
     assert res.error is None, res.error
-    assert [set(rec) for rec in captured] == [{"id", "kind", "path", "source"}]
+    assert [set(rec) for rec in captured] == [{"id", "kind", "file", "source"}]
     assert store.summary("h1")["n_rows"] == 3      # parent still derived the truth
 
 
@@ -303,11 +303,11 @@ def test_forged_child_metadata_is_overridden(tmp_path):
     res = sb.run_code(
         "import json, os\n"
         "import pandas as pd\n"
-        "pd.DataFrame({'a': range(1000)}).to_parquet(os.path.join('handles', 'h1.parquet'))\n"
-        "rec = {'id': 'h1', 'kind': 'dataframe', 'path': 'handles/h1.parquet',\n"
+        "pd.DataFrame({'a': range(1000)}).to_parquet(os.path.join(os.environ['TETHER_RUN_DIR'], 'h1.parquet'))\n"
+        "rec = {'id': 'h1', 'kind': 'dataframe', 'file': 'h1.parquet',\n"
         "       'source': 'run_python', 'n_rows': 2, 'preview': 'all clean!',\n"
         "       'bytes': 10, 'schema': {'a': 'string'}}\n"
-        "open(os.environ['TETHER_NEW_HANDLES'], 'a').write(json.dumps(rec) + '\\n')\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl'), 'a').write(json.dumps(rec) + '\\n')\n"
     )
     assert res.error is None, res.error
     summary = store.summary("h1")
@@ -323,10 +323,10 @@ def test_child_cannot_repoint_an_existing_handle(tmp_path):
     original = store.put({"trusted": True}, source="parent")
     res = sb.run_code(
         "import json, os\n"
-        f"rec = {{'id': {original.id!r}, 'kind': 'text', 'path': 'handles/evil.txt',\n"
+        f"rec = {{'id': {original.id!r}, 'kind': 'text', 'file': 'evil.txt',\n"
         "       'source': 'run_python'}\n"
-        "open(os.path.join('handles', 'evil.txt'), 'w').write('attacker data')\n"
-        "open(os.environ['TETHER_NEW_HANDLES'], 'a').write(json.dumps(rec) + '\\n')\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'evil.txt'), 'w').write('attacker data')\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl'), 'a').write(json.dumps(rec) + '\\n')\n"
     )
     assert "already exists" in (res.error or "")                   # refused and surfaced
     assert res.new_handles == []                                  # rejected
@@ -337,15 +337,18 @@ def test_one_corrupt_record_does_not_abort_ingestion(tmp_path):
     sb, store = _sandbox(tmp_path)
     res = sb.run_code(
         "import json, os\n"
-        "open(os.path.join('handles', 'a.txt'), 'w').write('a')\n"
-        "f = open(os.environ['TETHER_NEW_HANDLES'], 'a')\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'a.txt'), 'w').write('a')\n"
+        "f = open(os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl'), 'a')\n"
         "f.write('{not json\\n')\n"
-        "f.write(json.dumps({'id': 'h1', 'kind': 'text', 'path': 'handles/a.txt',\n"
+        "f.write(json.dumps({'id': 'h1', 'kind': 'text', 'file': 'a.txt',\n"
         "                    'source': 'run_python'}) + '\\n')\n"
         "f.close()\n"
     )
-    assert res.error is None, res.error
+    assert res.exit_code == 0
     assert res.new_handles == ["h1"]
+    # The corrupt line is reported, not silently dropped -- and only it.
+    assert res.error == ("tether: 1 handle record(s) rejected (invalid id or kind, or the "
+                         "saved file was missing or unreadable)")
 
 
 def _tiny_limits_sandbox(tmp_path, **kw):
@@ -362,7 +365,7 @@ def test_oversized_emit_is_rejected_not_parsed(tmp_path):
     # Invalid JSON: only passes if the size check runs before parsing.
     res = sb.run_code(
         "import os\n"
-        "open(os.environ['TETHER_EMIT'], 'w').write('{' * 50_000)\n")
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'emit.json'), 'w').write('{' * 50_000)\n")
     assert res.result is None
     assert "emit payload too large" in (res.error or "")
     assert "malformed" not in res.error
@@ -383,7 +386,7 @@ def test_oversized_new_handles_file_is_bounded(tmp_path):
     sb, _ = _tiny_limits_sandbox(tmp_path, max_new_handles=1000)
     res = sb.run_code(
         "import os\n"
-        "open(os.environ['TETHER_NEW_HANDLES'], 'a').write('x' * 20_000)\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl'), 'a').write('x' * 20_000)\n"
     )
     assert "control file too large" in (res.error or "")
 
@@ -404,10 +407,10 @@ def test_id_reuse_rejection_is_reported_not_silent(tmp_path):
     original = store.put({"trusted": True}, source="parent")
     res = sb.run_code(
         "import json, os\n"
-        "open(os.path.join('handles', 'evil.txt'), 'w').write('attacker data')\n"
-        f"rec = {{'id': {original.id!r}, 'kind': 'text', 'path': 'handles/evil.txt',\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'evil.txt'), 'w').write('attacker data')\n"
+        f"rec = {{'id': {original.id!r}, 'kind': 'text', 'file': 'evil.txt',\n"
         "       'source': 'run_python'}\n"
-        "open(os.environ['TETHER_NEW_HANDLES'], 'a').write(json.dumps(rec) + '\\n')\n")
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl'), 'a').write(json.dumps(rec) + '\\n')\n")
     assert res.new_handles == []
     assert "already exists" in (res.error or "")
     assert store.summary(original.id) == original.summary()
@@ -445,10 +448,10 @@ def test_id_reuse_reporting_is_bounded(tmp_path):
     original = store.put({"trusted": True}, source="parent")
     res = sb.run_code(
         "import json, os\n"
-        "open(os.path.join('handles', 'e.txt'), 'w').write('x')\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'e.txt'), 'w').write('x')\n"
         f"rec = json.dumps({{'id': {original.id!r}, 'kind': 'text',\n"
-        "                   'path': 'handles/e.txt', 'source': 'run_python'})\n"
-        "f = open(os.environ['TETHER_NEW_HANDLES'], 'a')\n"
+        "                   'file': 'e.txt', 'source': 'run_python'})\n"
+        "f = open(os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl'), 'a')\n"
         "for _ in range(5000):\n"
         "    f.write(rec + '\\n')\n"
         "f.close()\n")
@@ -463,11 +466,11 @@ def test_id_reuse_reporting_bounds_distinct_and_long_ids(tmp_path):
         store.put({"i": i}, source="parent", id=f"{'x' * 100}{i}")
     res = sb.run_code(
         "import json, os\n"
-        "open(os.path.join('handles', 'e.txt'), 'w').write('x')\n"
-        "f = open(os.environ['TETHER_NEW_HANDLES'], 'a')\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'e.txt'), 'w').write('x')\n"
+        "f = open(os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl'), 'a')\n"
         "for i in range(10):\n"
         "    f.write(json.dumps({'id': 'x' * 100 + str(i), 'kind': 'text',\n"
-        "                        'path': 'handles/e.txt', 'source': 's'}) + '\\n')\n"
+        "                        'file': 'e.txt', 'source': 's'}) + '\\n')\n"
         "f.close()\n")
     assert "10" in res.error
     assert len(res.error) < 1000
@@ -506,7 +509,7 @@ def test_non_utf8_emit_payload_is_reported_not_raised(tmp_path):
     sb, _ = _sandbox(tmp_path)
     res = sb.run_code(
         "import os\n"
-        "open(os.environ['TETHER_EMIT'], 'wb').write(b'\\xff\\xfe\\x00bad')\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'emit.json'), 'wb').write(b'\\xff\\xfe\\x00bad')\n"
     )
     _assert_is_exec_result(res)
     assert res.result is None
@@ -517,7 +520,7 @@ def test_non_utf8_new_handles_record_is_reported_not_raised(tmp_path):
     sb, _ = _sandbox(tmp_path)
     res = sb.run_code(
         "import os\n"
-        "open(os.environ['TETHER_NEW_HANDLES'], 'wb').write(b'\\xff\\xfe\\x00bad\\n')\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl'), 'wb').write(b'\\xff\\xfe\\x00bad\\n')\n"
     )
     _assert_is_exec_result(res)
     assert res.new_handles == []
@@ -528,10 +531,10 @@ def test_non_utf8_bytes_do_not_hide_a_valid_new_handle_record(tmp_path):
     sb, _ = _sandbox(tmp_path)
     res = sb.run_code(
         "import json, os\n"
-        "open(os.path.join('handles', 'ok.txt'), 'w').write('fine')\n"
-        "f = open(os.environ['TETHER_NEW_HANDLES'], 'ab')\n"
+        "open(os.path.join(os.environ['TETHER_RUN_DIR'], 'ok.txt'), 'w').write('fine')\n"
+        "f = open(os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl'), 'ab')\n"
         "f.write(b'\\xff\\xfe garbage\\n')\n"
-        "f.write((json.dumps({'id': 'h9', 'kind': 'text', 'path': 'handles/ok.txt',\n"
+        "f.write((json.dumps({'id': 'h9', 'kind': 'text', 'file': 'ok.txt',\n"
         "                     'source': 'run_python'}) + '\\n').encode())\n"
         "f.close()\n"
     )
@@ -545,22 +548,24 @@ def test_directory_at_the_emit_path_is_reported_not_raised(tmp_path):
     sb, _ = _sandbox(tmp_path)
     res = sb.run_code(
         "import os\n"
-        "os.mkdir(os.environ['TETHER_EMIT'])\n"
+        "os.mkdir(os.path.join(os.environ['TETHER_RUN_DIR'], 'emit.json'))\n"
     )
     _assert_is_exec_result(res)
     assert res.result is None
+    assert "emit payload not a regular file" in (res.error or "")
 
 
 def test_directory_at_the_new_handles_path_is_reported_not_raised(tmp_path):
     sb, _ = _sandbox(tmp_path)
     res = sb.run_code(
         "import os\n"
-        "p = os.environ['TETHER_NEW_HANDLES']\n"
-        "os.remove(p)\n"
+        "p = os.path.join(os.environ['TETHER_RUN_DIR'], 'new_handles.jsonl')\n"
         "os.mkdir(p)\n"
     )
     _assert_is_exec_result(res)
+    assert res.exit_code == 0, res.error
     assert res.new_handles == []
+    assert "control file not a regular file" in (res.error or "")
 
 
 def test_control_plane_limit_defaults_match_tether_config(tmp_path):

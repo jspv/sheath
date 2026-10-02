@@ -6,6 +6,7 @@ import re
 import subprocess
 import threading
 import time
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -130,20 +131,23 @@ def test_callback_receives_private_snapshot_removed_afterwards(tmp_path):
 # --- fix 4: the publish control file ------------------------------------------------------
 
 def test_control_file_name_is_unpredictable(tmp_path):
+    # The control files live in a per-run exchange directory named by a random token.
     sess = _session(tmp_path, lambda pf: {})
-    res = sess.sandbox.run_code("import os\nos.path.basename(os.environ['TETHER_PUBLISH'])")
-    assert re.fullmatch(r"_publish_[0-9a-f]{16}\.jsonl", res.result), res.result
+    res = sess.sandbox.run_code("import os\nos.environ['TETHER_RUN_DIR']")
+    run_dir = Path(res.result)
+    assert re.fullmatch(r"[0-9a-f]{16}", run_dir.name), res.result
+    assert run_dir.parent == sess.root / ".tether" / "runs"
 
 
 def test_fifo_control_file_does_not_hang_parent(tmp_path):
     sess = _session(tmp_path, lambda pf: {})
-    code = ("import os\np = os.environ['TETHER_PUBLISH']\nos.remove(p)\nos.mkfifo(p)\n")
+    code = ("import os\np = os.path.join(os.environ['TETHER_RUN_DIR'], 'publish.jsonl')\nos.mkfifo(p)\n")
     out = {}
     t = threading.Thread(target=lambda: out.update(res=sess.sandbox.run_code(code)), daemon=True)
     t.start()
     t.join(10)
     assert not t.is_alive(), "parent hung reading a FIFO control file"
-    assert "control file" in (out["res"].error or "")
+    assert "publish control file not a regular file" in (out["res"].error or "")
 
 
 def test_symlinked_control_file_is_not_followed(tmp_path):
@@ -153,11 +157,11 @@ def test_symlinked_control_file_is_not_followed(tmp_path):
     (sess.root / "outputs/a.csv").write_text("x")
     forged = tmp_path / "forged.jsonl"
     forged.write_text('{"path": "outputs/a.csv"}\n')
-    code = (f"import os\np = os.environ['TETHER_PUBLISH']\nos.remove(p)\n"
+    code = (f"import os\np = os.path.join(os.environ['TETHER_RUN_DIR'], 'publish.jsonl')\n"
             f"os.symlink({str(forged)!r}, p)\n")
     res = sess.sandbox.run_code(code)
     assert calls == []
-    assert "control file" in (res.error or "")
+    assert "publish control file not a regular file" in (res.error or "")
 
 
 # --- publication path errors never escape as exceptions ------------------------------------
@@ -171,7 +175,7 @@ def test_unencodable_paths_raise_publish_error(tmp_path, bad):
 
 def test_nul_path_from_sandbox_is_a_record_not_a_crash(tmp_path):
     sess = _session(tmp_path, lambda pf: {})
-    code = ("import json, os\nwith open(os.environ['TETHER_PUBLISH'], 'a') as f:\n"
+    code = ("import json, os\nwith open(os.path.join(os.environ['TETHER_RUN_DIR'], 'publish.jsonl'), 'a') as f:\n"
             "    f.write(json.dumps({'path': 'a\\u0000b'}) + '\\n')\n"
             "from tether_sandbox import save\nsave('h7', {'k': 1})\n")
     res = sess.sandbox.run_code(code)
