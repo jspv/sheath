@@ -151,7 +151,8 @@ def test_footer_stats_partial_missing_group_is_not_reported():
             def __init__(self, st): self._st = st
             def column(self, j): return type("C", (), {"statistics": self._st})()
         class MD:
-            num_columns = 1; num_row_groups = len(stats_per_group)
+            num_columns = 1
+            num_row_groups = len(stats_per_group)
             schema = type("Sc", (), {"column": lambda self, j: type("P", (), {"path": "a"})()})()
             def row_group(self, i): return RG(stats_per_group[i])
         return type("PF", (), {"metadata": MD()})()
