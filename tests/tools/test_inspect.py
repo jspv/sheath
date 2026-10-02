@@ -109,3 +109,54 @@ def test_inspect_skips_head_when_first_row_group_is_too_large(tmp_path, monkeypa
     assert out["head"] == []
     assert "first row group is" in out["head_omitted"]
     assert out["stats"]["a"]["max"] == 99
+
+
+def _adopt(sess, tmp_path, table, **kw):
+    import pyarrow.parquet as pq
+    src = sess.root / "mg_src.parquet"
+    pq.write_table(table, src, **kw)
+    return sess.store.adopt_file(id="mg", kind="dataframe", src=src, source="t")
+
+
+def test_footer_stats_aggregate_across_row_groups(tmp_path):
+    import pyarrow as pa
+    sess = _session(tmp_path)
+    h = _adopt(sess, tmp_path, pa.table({"a": [5, 1, 9, 3]}), row_group_size=2)
+    out = inspect_handle(sess, h.id, stats=True)
+    assert out["stats"]["a"] == {"min": 1, "max": 9, "null_count": 0}
+
+
+def test_footer_stats_missing_for_a_column_report_none(tmp_path):
+    import pyarrow as pa
+    sess = _session(tmp_path)
+    h = _adopt(sess, tmp_path, pa.table({"a": [5, 1, 9, 3], "b": [1, 2, 3, 4]}),
+               row_group_size=2, write_statistics=["a"])
+    st = inspect_handle(sess, h.id, stats=True)["stats"]
+    assert st["a"] == {"min": 1, "max": 9, "null_count": 0}
+    assert st["b"]["min"] is None and st["b"]["max"] is None
+
+
+def test_footer_stats_partial_missing_group_is_not_reported():
+    from tether.tools.inspect import _footer_stats
+    S = type("S", (), {})
+
+    def stat(lo, hi):
+        s = S()
+        s.min, s.max, s.has_min_max, s.null_count = lo, hi, True, 0
+        return s
+
+    def fake(stats_per_group):
+        class RG:
+            num_rows = 2
+            def __init__(self, st): self._st = st
+            def column(self, j): return type("C", (), {"statistics": self._st})()
+        class MD:
+            num_columns = 1; num_row_groups = len(stats_per_group)
+            schema = type("Sc", (), {"column": lambda self, j: type("P", (), {"path": "a"})()})()
+            def row_group(self, i): return RG(stats_per_group[i])
+        return type("PF", (), {"metadata": MD()})()
+
+    assert _footer_stats(fake([stat(1, 5), None, stat(0, 9)]))["a"]["min"] is None
+    # mixed types: the TypeError is sticky even though a later group is comparable
+    out = _footer_stats(fake([stat(1, 5), stat("x", "y"), stat("p", "q")]))
+    assert out["a"]["min"] is None and out["a"]["max"] is None

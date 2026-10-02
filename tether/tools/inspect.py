@@ -72,26 +72,42 @@ def _scalar(value: Any) -> Any:
 def _footer_stats(pf) -> dict[str, dict[str, Any]]:
     """Per-column min / max / null_count aggregated over row groups, from footer metadata.
 
-    No data page is read. A column whose row groups carry no statistics reports ``None``.
+    No data page is read. ``min``/``max`` are reported only when every non-empty row group
+    carries them (an all-null group contributes nothing) and they are comparable; otherwise
+    they are ``None`` rather than a partial answer. ``null_count`` is ``None`` when any
+    non-empty row group lacks it.
     """
     md = pf.metadata
     out: dict[str, dict[str, Any]] = {}
     for j in range(min(md.num_columns, _MAX_STATS_COLS)):
         name = str(md.schema.column(j).path)[:128]
         lo = hi = None
+        known = True                       # min/max still trustworthy (sticky once False)
         nulls: int | None = 0
         for i in range(md.num_row_groups):
-            st = md.row_group(i).column(j).statistics
+            rg = md.row_group(i)
+            if rg.num_rows == 0:
+                continue
+            st = rg.column(j).statistics
             if st is None:
+                known = False
                 nulls = None
                 continue
-            if nulls is not None and st.null_count is not None:
+            if st.null_count is None:
+                nulls = None
+            elif nulls is not None:
                 nulls += st.null_count
+            if not known:
+                continue
             if st.has_min_max:
                 try:
                     lo = st.min if lo is None or st.min < lo else lo
                     hi = st.max if hi is None or st.max > hi else hi
-                except TypeError:      # incomparable across row groups: report nothing
-                    lo = hi = None
+                except TypeError:          # incomparable across row groups
+                    known = False
+            elif st.null_count != rg.num_rows:   # not merely all-null: stats are missing
+                known = False
+        if not known:
+            lo = hi = None
         out[name] = {"min": _scalar(lo), "max": _scalar(hi), "null_count": nulls}
     return out
