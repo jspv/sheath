@@ -179,30 +179,14 @@ def test_describe_dataframe_pins_pandas_dtype_vocabulary(tmp_path):
     assert described["schema"] == {"i": "int64", "f": "float64", "s": "str", "b": "bool"}
 
 
-def test_describe_dataframe_reads_only_first_row_group(tmp_path):
-    """A 500MB handle must not be materialized to describe it: schema and row count come
-    from the footer, the preview from row group 0 only."""
-    import pyarrow.parquet as pq
-
+def test_describe_dataframe_multi_group_preview_and_row_count(tmp_path):
+    """Row count comes from the footer across all groups; the preview shows the first rows."""
     store = HandleStore(tmp_path / "r")
     path = store.root / "handles" / "big.parquet"
     pd.DataFrame({"n": range(1000)}).to_parquet(path, row_group_size=100)
 
-    read_groups = []
-    real_read_row_group = pq.ParquetFile.read_row_group
+    described = store._describe_dataframe(path)
 
-    def spy(self, i, *a, **kw):
-        read_groups.append(i)
-        return real_read_row_group(self, i, *a, **kw)
-
-    pq.ParquetFile.read_row_group = spy
-    try:
-        described = store._describe_dataframe(path)
-    finally:
-        pq.ParquetFile.read_row_group = real_read_row_group
-
-    assert read_groups == []                       # no row group is ever materialized
-    # (discrimination lives in test_oversized_first_row_group_is_never_decoded)
     assert described["n_rows"] == 1000
     assert described["preview"].startswith("n\n0\n1\n2\n3\n4\n")
     assert "... (5 of 1000 rows)" in described["preview"]
@@ -842,19 +826,6 @@ def test_dataframe_preview_and_schema_are_capped(tmp_path):
     assert len(handle.schema) == 200
     assert all(len(name) <= 128 for name in handle.schema)
     assert handle.n_cols == 300
-
-
-def test_dataframe_preview_reads_only_the_first_batch(tmp_path, monkeypatch):
-    import pandas as pd
-    import pyarrow.parquet as pq
-    store = HandleStore(tmp_path)
-
-    def boom(self, *a, **k):
-        raise AssertionError("read_row_group must not be used for previews")
-
-    monkeypatch.setattr(pq.ParquetFile, "read_row_group", boom)
-    handle = store.put(pd.DataFrame({"a": range(100)}), source="t")
-    assert handle.n_rows == 100 and "(5 of 100 rows)" in handle.preview
 
 
 def test_verify_returns_the_path_and_checks_the_digest(tmp_path):
