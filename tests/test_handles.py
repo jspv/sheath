@@ -202,6 +202,7 @@ def test_describe_dataframe_reads_only_first_row_group(tmp_path):
         pq.ParquetFile.read_row_group = real_read_row_group
 
     assert read_groups == []                       # no row group is ever materialized
+    # (discrimination lives in test_oversized_first_row_group_is_never_decoded)
     assert described["n_rows"] == 1000
     assert described["preview"].startswith("n\n0\n1\n2\n3\n4\n")
     assert "... (5 of 1000 rows)" in described["preview"]
@@ -868,3 +869,47 @@ def test_verify_returns_the_path_and_checks_the_digest(tmp_path):
         store.verify(handle.id)
     with pytest.raises(KeyError):
         store.verify("nope")
+
+
+def test_oversized_first_row_group_is_never_decoded(tmp_path, monkeypatch):
+    import pandas as pd
+    import pyarrow.parquet as pq
+    import tether.handles as handles_mod
+
+    def boom(self, *a, **k):
+        raise AssertionError("iter_batches must not run on an oversized first row group")
+
+    monkeypatch.setattr(handles_mod, "_MAX_PREVIEW_GROUP_BYTES", 100)
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", boom)   # before put: put describes too
+    store = HandleStore(tmp_path)
+    handle = store.put(pd.DataFrame({"a": range(1000), "b": ["x" * 50] * 1000}), source="t")
+    assert "preview omitted" in handle.preview
+    assert "(0 of 1000 rows)" in handle.preview
+    assert handle.n_rows == 1000 and handle.n_cols == 2
+    assert set(handle.schema) == {"a", "b"}
+
+
+def test_first_row_group_under_the_limit_still_previews(tmp_path):
+    import pandas as pd
+    store = HandleStore(tmp_path)
+    handle = store.put(pd.DataFrame({"a": range(50)}), source="t")
+    assert "preview omitted" not in handle.preview
+    assert handle.preview.startswith("a\n0\n1\n2\n3\n4\n")
+
+
+def test_first_group_too_large_helper(tmp_path):
+    import pandas as pd
+    import pyarrow.parquet as pq
+    from tether.handles import first_group_too_large
+    path = tmp_path / "f.parquet"
+    pd.DataFrame({"a": range(10)}).to_parquet(path)
+    pf = pq.ParquetFile(path)
+    assert first_group_too_large(pf) is None
+    size = pf.metadata.row_group(0).total_byte_size
+    import tether.handles as m
+    old = m._MAX_PREVIEW_GROUP_BYTES
+    m._MAX_PREVIEW_GROUP_BYTES = size - 1
+    try:
+        assert first_group_too_large(pf) == size
+    finally:
+        m._MAX_PREVIEW_GROUP_BYTES = old

@@ -24,6 +24,9 @@ _MAX_SCHEMA_COLS = 200
 _MAX_COL_NAME_CHARS = 128
 _MAX_SOURCE_CHARS = 200
 _DIGEST_BYTES = 64 * 1024
+# Arrow decodes a whole column chunk of the first row group to yield even one small batch, so
+# a preview is skipped when the footer says that group is larger than this.
+_MAX_PREVIEW_GROUP_BYTES = 16 * 1024 * 1024
 # Uploaded-input previews: raw first lines, for text-like extensions only. Never parsed.
 _TEXT_PREVIEW_EXTS = {".csv", ".tsv", ".txt", ".json", ".md"}
 _PREVIEW_LINES = 5
@@ -77,6 +80,18 @@ def _digest_file(path: Path) -> str:
             f.seek(size - _DIGEST_BYTES)
             h.update(f.read(_DIGEST_BYTES))
     return _DIGEST_TAG + h.hexdigest()
+
+
+def first_group_too_large(pf: Any) -> int | None:
+    """The footer's byte size of row group 0 if it exceeds ``_MAX_PREVIEW_GROUP_BYTES``,
+    else ``None``. Callers must not decode a preview from a file for which this returns a size.
+
+    The size is sandbox-authored footer metadata: a lying footer can defeat this guard.
+    """
+    if not pf.num_row_groups:
+        return None
+    size = int(pf.metadata.row_group(0).total_byte_size)
+    return size if size > _MAX_PREVIEW_GROUP_BYTES else None
 
 
 class HandleTamperedError(RuntimeError):
@@ -272,19 +287,30 @@ class HandleStore:
         file sandboxed code wrote can be arbitrarily large). The preview text and the
         schema listing are capped, because cell values and column names are untrusted and
         this summary goes into model context.
+
+        Bounded: the preview text, the schema listing, and (via the footer-size guard
+        ``first_group_too_large``) the memory spent on the preview -- a first row group over
+        ``_MAX_PREVIEW_GROUP_BYTES`` is not decoded at all. Not bounded: footer parsing
+        itself, and the footer's own claims -- sizes are sandbox-authored, so a footer that
+        understates its row group defeats the guard (a disclosed residual).
         """
         import pyarrow.parquet as pq
 
         pf = pq.ParquetFile(path)
         n_rows = int(pf.metadata.num_rows)
         schema_df = pf.schema_arrow.empty_table().to_pandas()
-        batch = next(pf.iter_batches(batch_size=_PREVIEW_ROWS), None)
+        too_large = first_group_too_large(pf)
+        batch = (None if too_large is not None
+                 else next(pf.iter_batches(batch_size=_PREVIEW_ROWS), None))
         shown = 0
         preview = ""
         if batch is not None:
             head = batch.to_pandas()
             shown = len(head)
             preview = head.to_csv(index=False)
+        elif too_large is not None:
+            preview = (f"<preview omitted: first row group is {too_large} bytes; "
+                       f"inspect it in run_python>")
         if len(preview) > _PREVIEW_CHARS:
             preview = preview[:_PREVIEW_CHARS] + "\n"
         # Caption the rows actually shown, not _PREVIEW_ROWS.
@@ -510,7 +536,8 @@ class HandleStore:
 
     def inputs(self) -> dict[str, Handle]:
         """Uploaded inputs, keyed by host-supplied ``input_id``."""
-        return {h.input_id: h for h in self._handles.values() if h.input_id is not None}
+        with self._lock:
+            return {h.input_id: h for h in self._handles.values() if h.input_id is not None}
 
     @property
     def _manifest_file(self) -> Path:
@@ -606,10 +633,13 @@ class HandleStore:
             raise HandleTamperedError(handle.id, handle.path)
 
     def summary(self, handle_id: str) -> dict[str, Any]:
-        return self._handles[handle_id].summary()
+        with self._lock:
+            return self._handles[handle_id].summary()
 
     def manifest(self) -> dict[str, Any]:
-        return {hid: h.summary() for hid, h in self._handles.items()}
+        with self._lock:
+            return {hid: h.summary() for hid, h in self._handles.items()}
 
     def manifest_handles(self) -> dict[str, Handle]:
-        return dict(self._handles)
+        with self._lock:
+            return dict(self._handles)
