@@ -85,11 +85,13 @@ def test_container_argv_hardening_flags(tmp_path):
     assert "--privileged" not in argv
 
 
-def test_container_mounts_only_root_and_runtime(tmp_path):
+def test_container_mounts_only_root_inputs_and_runtime(tmp_path):
+    # The store always creates inputs/, so it is always overlaid read-only on the root.
     mounts = _pairs(_argv(tmp_path), "-v")
-    assert len(mounts) == 2
+    assert len(mounts) == 3
     assert mounts[0] == f"{tmp_path}:/workspace:rw"
     assert mounts[1].endswith(":/runtime:ro")
+    assert mounts[2] == f"{tmp_path / 'inputs'}:/workspace/inputs:ro"
 
 
 def test_container_passes_no_host_env(tmp_path, monkeypatch):

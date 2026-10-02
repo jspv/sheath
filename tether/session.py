@@ -90,7 +90,7 @@ class Session:
                 continue
             rel = p.relative_to(self.root)
             top = rel.parts[0]
-            if top in ("handles", ".scripts") or top.startswith("_"):
+            if top in ("handles", ".scripts", ".tether") or top.startswith("_"):
                 continue
             out.append(rel.as_posix())
         return out

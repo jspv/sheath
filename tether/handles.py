@@ -6,19 +6,33 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
+import stat
+import tempfile
+import threading
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from . import workspace
 from .paths import PathEscapesRootError, safe_path
 
 _PREVIEW_CHARS = 800
 _PREVIEW_ROWS = 5
+_MAX_SCHEMA_COLS = 200
+_MAX_COL_NAME_CHARS = 128
+_MAX_SOURCE_CHARS = 200
 _DIGEST_BYTES = 64 * 1024
 # Uploaded-input previews: raw first lines, for text-like extensions only. Never parsed.
 _TEXT_PREVIEW_EXTS = {".csv", ".tsv", ".txt", ".json", ".md"}
 _PREVIEW_LINES = 5
 _PREVIEW_READ_BYTES = 4096
+
+# Ids that sandboxed code may name a handle with. One path segment, no leading dot, so the
+# id can be used directly as a filename stem under handles/.
+HANDLE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+_KIND_EXT = {"dataframe": ".parquet", "json": ".json", "text": ".txt"}
 
 
 _DIGEST_TAG = "v2:"
@@ -134,15 +148,38 @@ class HandleStore:
 
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root).resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+        # Creates handles/ and .tether/ as real directories, or refuses the root if either
+        # exists as a link: every write below lands inside one of them.
+        workspace.ensure_layout(self.root)
         self.dir = self.root / "handles"
-        self.dir.mkdir(parents=True, exist_ok=True)
+        self._state = workspace.state_dir(self.root)
         self._handles: dict[str, Handle] = {}
         self._counter = 0
+        # Tool calls in one turn run on worker threads in parallel; every mutation of the
+        # id counter, the handle map and the manifest happens under this lock.
+        self._lock = threading.RLock()
         self._load_manifest()
 
     def _new_id(self) -> str:
         self._counter += 1
         return f"h{self._counter}"
+
+    def _atomic(self, dst: Path, write: Callable[[Path], None]) -> None:
+        """Write ``dst`` via a unique temp file in the same directory, then rename.
+
+        ``os.replace`` swaps the directory entry, so a link planted at ``dst`` is replaced,
+        never written through, and a reader never sees a half-written file.
+        """
+        fd, tmp = tempfile.mkstemp(dir=dst.parent, prefix=".tmp_")
+        os.close(fd)
+        try:
+            write(Path(tmp))
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, dst)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
 
     @staticmethod
     def _detect_kind(obj: Any) -> str:
@@ -160,37 +197,38 @@ class HandleStore:
 
     def put(self, obj: Any, source: str, *, id: str | None = None,
             kind: str | None = None, ext: str | None = None) -> Handle:
-        hid = id or self._new_id()
-        if id is not None:
-            self._advance_counter(hid)  # keep auto-ids from colliding with an explicit id
         kind = kind or self._detect_kind(obj)
-        if kind == "dataframe":
-            handle = self._write_dataframe(hid, obj, source)
-        elif kind == "json":
-            handle = self._write_json(hid, obj, source)
-        elif kind == "text":
-            handle = self._write_text(hid, obj, source)
-        elif kind == "binary":
-            handle = self._write_binary(hid, obj, source, ext)
-        else:
-            raise ValueError(f"unknown handle kind: {kind!r}")
-        self._handles[hid] = handle
-        self._save_manifest()
-        return handle
+        with self._lock:
+            hid = id or self._new_id()
+            if id is not None:
+                self._advance_counter(hid)  # keep auto-ids from colliding with an explicit id
+            if kind == "dataframe":
+                handle = self._write_dataframe(hid, obj, source)
+            elif kind == "json":
+                handle = self._write_json(hid, obj, source)
+            elif kind == "text":
+                handle = self._write_text(hid, obj, source)
+            elif kind == "binary":
+                handle = self._write_binary(hid, obj, source, ext)
+            else:
+                raise ValueError(f"unknown handle kind: {kind!r}")
+            self._handles[hid] = handle
+            self._save_manifest()
+            return handle
 
     def _write_binary(self, hid: str, data: bytes, source: str, ext: str | None) -> Handle:
         # Store raw bytes intact so the file (xls/pdf/image/...) stays readable by pandas,
         # Docling, etc. The extension is preserved so libraries can infer the format.
         rel = f"handles/{hid}{ext or '.bin'}"
         path = self.root / rel
-        path.write_bytes(bytes(data))
+        self._atomic(path, lambda tmp: tmp.write_bytes(bytes(data)))
         return Handle(id=hid, kind="binary", path=rel, source=source,
                       **self._describe("binary", path))
 
     def _write_dataframe(self, hid: str, df: Any, source: str) -> Handle:
         rel = f"handles/{hid}.parquet"
         path = self.root / rel
-        df.to_parquet(path)
+        self._atomic(path, lambda tmp: df.to_parquet(tmp))
         return Handle(id=hid, kind="dataframe", path=rel, source=source,
                       **self._describe("dataframe", path))
 
@@ -199,14 +237,15 @@ class HandleStore:
         # crashing serialization, but they round-trip back as strings via get().
         rel = f"handles/{hid}.json"
         path = self.root / rel
-        path.write_text(json.dumps(obj, default=str), encoding="utf-8")
+        self._atomic(path, lambda tmp: tmp.write_text(json.dumps(obj, default=str),
+                                                     encoding="utf-8"))
         return Handle(id=hid, kind="json", path=rel, source=source,
                       **self._describe("json", path))
 
     def _write_text(self, hid: str, obj: str, source: str) -> Handle:
         rel = f"handles/{hid}.txt"
         path = self.root / rel
-        path.write_text(obj, encoding="utf-8")
+        self._atomic(path, lambda tmp: tmp.write_text(obj, encoding="utf-8"))
         return Handle(id=hid, kind="text", path=rel, source=source,
                       **self._describe("text", path))
 
@@ -228,34 +267,37 @@ class HandleStore:
     def _describe_dataframe(self, path: Path) -> dict[str, Any]:
         """Describe a parquet file without materializing it.
 
-        Schema and row count come from the footer; the preview reads only the first row
-        group. Row groups are ordered, so row group 0 holds the first ``_PREVIEW_ROWS``
-        rows. ``schema_arrow.empty_table().to_pandas()`` yields the pandas dtypes the
-        equivalent ``put()`` would report, without reading any data.
+        Schema and row count come from the footer; the preview decodes only the first
+        record batch of ``_PREVIEW_ROWS`` rows, never a whole row group (a row group in a
+        file sandboxed code wrote can be arbitrarily large). The preview text and the
+        schema listing are capped, because cell values and column names are untrusted and
+        this summary goes into model context.
         """
         import pyarrow.parquet as pq
 
         pf = pq.ParquetFile(path)
         n_rows = int(pf.metadata.num_rows)
         schema_df = pf.schema_arrow.empty_table().to_pandas()
+        batch = next(pf.iter_batches(batch_size=_PREVIEW_ROWS), None)
         shown = 0
-        if pf.num_row_groups:
-            head = pf.read_row_group(0).slice(0, _PREVIEW_ROWS).to_pandas()
+        preview = ""
+        if batch is not None:
+            head = batch.to_pandas()
             shown = len(head)
             preview = head.to_csv(index=False)
-        else:
-            preview = ""
-        # Caption the rows actually shown, not _PREVIEW_ROWS: row group 0 may hold fewer
-        # than five rows (a file written with row_group_size=1 holds exactly one), and
-        # claiming five would describe a preview that isn't there.
+        if len(preview) > _PREVIEW_CHARS:
+            preview = preview[:_PREVIEW_CHARS] + "\n"
+        # Caption the rows actually shown, not _PREVIEW_ROWS.
         if n_rows > shown:
             preview += f"... ({shown} of {n_rows} rows)"
+        dtypes = list(schema_df.dtypes.items())
         return {
             "bytes": path.stat().st_size,
             "preview": preview,
-            "schema": {c: str(t) for c, t in schema_df.dtypes.items()},
+            "schema": {str(c)[:_MAX_COL_NAME_CHARS]: str(t)
+                       for c, t in dtypes[:_MAX_SCHEMA_COLS]},
             "n_rows": n_rows,
-            "n_cols": int(len(schema_df.columns)),
+            "n_cols": int(len(dtypes)),
         }
 
     def _describe_textual(self, path: Path) -> dict[str, Any]:
@@ -339,9 +381,10 @@ class HandleStore:
 
     def register(self, record: dict[str, Any]) -> Handle:
         """Register a handle whose file already exists; persists the manifest."""
-        handle = self._register_record(record)
-        self._save_manifest()
-        return handle
+        with self._lock:
+            handle = self._register_record(record)
+            self._save_manifest()
+            return handle
 
     def adopt(self, *, id: str, kind: str, path: str, source: str) -> Handle:
         """Register a file written by sandboxed code, deriving its metadata here.
@@ -352,22 +395,64 @@ class HandleStore:
         falsely. Handles are immutable: adopting an id that already exists is refused, so
         the record for a handle the child did not create cannot be repointed.
         """
-        if id in self._handles:
-            raise HandleIdReuseError(id)
-        describer = self._DESCRIBERS.get(kind)
-        if describer is None:
-            raise ValueError(f"unknown handle kind: {kind!r}")
-        resolved = safe_path(self.root, path)  # raises PathEscapesRootError -> ValueError subclass
-        # A directory, symlink, FIFO or device would hang or mislead the describer. safe_path
-        # already resolved symlinks, so compare against the unresolved path to catch them.
-        if not resolved.is_file() or (self.root / path).is_symlink():
-            raise ValueError(f"handle record path is not a regular file: {path!r}")
-        described = self._describe(kind, resolved)
-        handle = Handle(id=id, kind=kind, path=path, source=source, **described)
-        self._handles[id] = handle
-        self._advance_counter(id)
-        self._save_manifest()
-        return handle
+        with self._lock:
+            if id in self._handles:
+                raise HandleIdReuseError(id)
+            describer = self._DESCRIBERS.get(kind)
+            if describer is None:
+                raise ValueError(f"unknown handle kind: {kind!r}")
+            resolved = safe_path(self.root, path)  # raises PathEscapesRootError -> ValueError subclass
+            # A directory, symlink, FIFO or device would hang or mislead the describer. safe_path
+            # already resolved symlinks, so compare against the unresolved path to catch them.
+            if not resolved.is_file() or (self.root / path).is_symlink():
+                raise ValueError(f"handle record path is not a regular file: {path!r}")
+            described = self._describe(kind, resolved)
+            handle = Handle(id=id, kind=kind, path=path, source=source, **described)
+            self._handles[id] = handle
+            self._advance_counter(id)
+            self._save_manifest()
+            return handle
+
+    def adopt_file(self, *, id: str, kind: str, src: Path, source: str) -> Handle:
+        """Move a payload sandboxed code wrote in its run directory into ``handles/`` and
+        register it, deriving every described field here.
+
+        The sandbox names only the id, the kind and which file it wrote. The parent picks
+        the destination (``handles/<id><ext>``), so no sandbox-supplied path is ever joined
+        to the root. ``src`` is ``lstat``-ed and must be a regular file; it is renamed, not
+        copied, so a multi-gigabyte save costs nothing. Call only when no sandboxed code is
+        running. A payload that cannot be described is deleted and the call raises.
+        """
+        with self._lock:
+            if not isinstance(id, str) or not HANDLE_ID_RE.match(id):
+                raise ValueError(f"invalid handle id {id!r}: use letters, digits, '_', '-', "
+                                 f"'.', starting with a letter or digit, at most 64 chars")
+            ext = _KIND_EXT.get(kind) if isinstance(kind, str) else None
+            if ext is None:
+                raise ValueError(f"unknown handle kind: {kind!r}")
+            rel = f"handles/{id}{ext}"
+            dst = self.root / rel
+            if id in self._handles or os.path.lexists(dst):
+                raise HandleIdReuseError(id)
+            try:
+                st = os.lstat(src)
+            except OSError as e:
+                raise ValueError(f"handle payload is missing: {e}") from e
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError("handle payload is not a regular file")
+            os.rename(src, dst)
+            try:
+                os.chmod(dst, 0o644)
+                described = self._describe(kind, dst)
+            except Exception as e:  # noqa: BLE001 - a describer may raise anything on hostile bytes
+                dst.unlink(missing_ok=True)
+                raise ValueError(f"unreadable {kind} handle payload: {e}") from e
+            handle = Handle(id=id, kind=kind, path=rel,
+                            source=str(source)[:_MAX_SOURCE_CHARS], **described)
+            self._handles[id] = handle
+            self._advance_counter(id)
+            self._save_manifest()
+            return handle
 
     def put_input(self, *, path: str, source: str, input_id: str,
                   size: int | None = None, preview: str | None = None,
@@ -385,20 +470,21 @@ class HandleStore:
         parity is what lets a reopened store reproduce the record exactly instead of
         believing the (child-writable) manifest.
         """
-        existing = self.inputs().get(input_id)
-        if existing is not None and not replace:
-            return existing
-        try:
-            resolved = safe_path(self.root, path)
-        except PathEscapesRootError as e:
-            raise ValueError(f"input path escapes root: {path!r}") from e
-        hid = existing.id if existing is not None else self._new_id()
-        handle = Handle(id=hid, kind="binary", path=path, source=source, input_id=input_id,
-                        description=description,
-                        **self._describe_input(resolved, content_type))
-        self._handles[handle.id] = handle
-        self._save_manifest()
-        return handle
+        with self._lock:
+            existing = self.inputs().get(input_id)
+            if existing is not None and not replace:
+                return existing
+            try:
+                resolved = safe_path(self.root, path)
+            except PathEscapesRootError as e:
+                raise ValueError(f"input path escapes root: {path!r}") from e
+            hid = existing.id if existing is not None else self._new_id()
+            handle = Handle(id=hid, kind="binary", path=path, source=source, input_id=input_id,
+                            description=description,
+                            **self._describe_input(resolved, content_type))
+            self._handles[handle.id] = handle
+            self._save_manifest()
+            return handle
 
     def _describe_input(self, path: Path, content_type: str | None) -> dict[str, Any]:
         """Derive an uploaded input's described fields from its bytes.
@@ -428,48 +514,70 @@ class HandleStore:
 
     @property
     def _manifest_file(self) -> Path:
+        return self._state / "manifest.json"
+
+    @property
+    def _legacy_manifest_file(self) -> Path:
         return self.dir / "_manifest.json"
 
     def _save_manifest(self) -> None:
         """Persist {id: summary} atomically so a new HandleStore on this root can rehydrate.
 
-        Rewrites the whole manifest on every put/register -- fine at handle frequency (handles are
-        coarse), and the atomic tmp+replace is worth it. Summaries drop None fields, which
-        re-default on ``Handle(**record)`` load, so the round-trip is lossless.
+        Lives under ``.tether/``, which sandboxed code cannot write in the container tier.
+        Rewrites the whole manifest on every mutation -- fine at handle frequency.
         """
-        tmp = self.dir / "_manifest.json.tmp"
-        tmp.write_text(json.dumps(self.manifest()), encoding="utf-8")
-        tmp.replace(self._manifest_file)
+        with self._lock:
+            payload = json.dumps(self.manifest())
+            self._atomic(self._manifest_file,
+                         lambda tmp: tmp.write_text(payload, encoding="utf-8"))
+
+    def _read_manifest_records(self, path: Path) -> dict | None:
+        """Parse a manifest file. ``None`` if absent, a link, unreadable or malformed."""
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                return None
+            records = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        return records if isinstance(records, dict) else None
 
     def _load_manifest(self) -> None:
         """Restore handles + the id counter from a prior session on this root.
 
-        The manifest is child-writable (see ``_register_record``), so nothing in it is
-        believed: each record is re-derived from its file. Tolerant by design -- a corrupt,
-        forged, or orphaned record is skipped, never fatal, and never aborts the records
-        after it.
+        Nothing in a manifest is believed: each record is re-derived from its file.
+        Tolerant by design -- a corrupt, forged, or orphaned record is skipped, never fatal.
+        A manifest left at the pre-trust-zone location (``handles/_manifest.json``) is read
+        once, rewritten at the new location and removed.
         """
-        if not self._manifest_file.exists():
-            return
-        try:
-            records = json.loads(self._manifest_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            return
-        if not isinstance(records, dict):
+        records = self._read_manifest_records(self._manifest_file)
+        migrating = False
+        if records is None:
+            records = self._read_manifest_records(self._legacy_manifest_file)
+            migrating = records is not None
+        if records is None:
             return
         for record in records.values():
             try:
                 self._register_record(record)
             except Exception:  # noqa: BLE001 - a describer may raise anything on a corrupt file
                 continue
+        if migrating:
+            self._save_manifest()
+            self._legacy_manifest_file.unlink(missing_ok=True)
 
-    def get(self, handle_id: str) -> Any:
+    def verify(self, handle_id: str) -> Path:
+        """Digest-check a handle and return its absolute path, without loading it."""
         try:
             handle = self._handles[handle_id]
         except KeyError:
             raise KeyError(f"no handle with id {handle_id!r}") from None
         path = safe_path(self.root, handle.path)  # defense-in-depth before any read
         self._verify_digest(handle, path)
+        return path
+
+    def get(self, handle_id: str) -> Any:
+        path = self.verify(handle_id)
+        handle = self._handles[handle_id]
         if handle.kind == "dataframe":
             import pandas as pd
             return pd.read_parquet(path)

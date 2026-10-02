@@ -133,7 +133,7 @@ def test_rehydrate_skips_corrupt_record(tmp_path):
     import json
     from tether.handles import HandleStore
     HandleStore(tmp_path).put({"a": 1}, source="t")   # valid h1, persists manifest
-    mf = tmp_path / "handles" / "_manifest.json"
+    mf = tmp_path / ".tether" / "manifest.json"
     data = json.loads(mf.read_text())
     data["bad"] = {"id": "bad"}                        # missing required Handle fields
     mf.write_text(json.dumps(data))
@@ -201,7 +201,7 @@ def test_describe_dataframe_reads_only_first_row_group(tmp_path):
     finally:
         pq.ParquetFile.read_row_group = real_read_row_group
 
-    assert read_groups == [0]                      # never touched groups 1..9
+    assert read_groups == []                       # no row group is ever materialized
     assert described["n_rows"] == 1000
     assert described["preview"].startswith("n\n0\n1\n2\n3\n4\n")
     assert "... (5 of 1000 rows)" in described["preview"]
@@ -378,7 +378,7 @@ def test_describe_textual_does_not_read_the_whole_file(tmp_path, monkeypatch):
 
 def _forge_manifest(root, records):
     import json
-    (root / "handles" / "_manifest.json").write_text(json.dumps(records), encoding="utf-8")
+    (root / ".tether" / "manifest.json").write_text(json.dumps(records), encoding="utf-8")
 
 
 def test_rehydrate_rederives_forged_metadata(tmp_path):
@@ -507,8 +507,8 @@ def test_digest_is_not_shown_to_the_model(tmp_path):
 
 
 def test_dataframe_preview_caption_counts_the_rows_actually_shown(tmp_path):
-    """The preview reads row group 0 only, which may hold fewer than _PREVIEW_ROWS rows.
-    The caption must describe the preview that is there, not the one usually there."""
+    """The preview is the first record batch (up to _PREVIEW_ROWS rows, spanning row groups).
+    The caption must describe the preview that is there, not a fixed number."""
     store = HandleStore(tmp_path / "r")
     path = store.root / "handles" / "tiny_groups.parquet"
     pd.DataFrame({"n": range(20)}).to_parquet(path, row_group_size=1)
@@ -517,7 +517,7 @@ def test_dataframe_preview_caption_counts_the_rows_actually_shown(tmp_path):
     body = described["preview"].split("...")[0]
     data_rows = [ln for ln in body.strip().splitlines()[1:] if ln]   # drop the CSV header
     assert f"({len(data_rows)} of 20 rows)" in described["preview"]
-    assert len(data_rows) == 1
+    assert len(data_rows) == 5      # one-row groups no longer shrink the preview
 
 
 # --- host-ingested inputs ----------------------------------------------------------------
@@ -719,3 +719,152 @@ def test_digest_from_before_the_format_change_is_not_accepted(tmp_path):
     h.digest = old
     with pytest.raises(HandleTamperedError):
         store.get(h.id)
+
+
+# --- trust zones: manifest location, atomic writes, adopt_file, bounded describers ---
+
+def test_manifest_lives_in_state_dir(tmp_path):
+    store = HandleStore(tmp_path)
+    store.put("hello", source="t")
+    assert (tmp_path / ".tether" / "manifest.json").is_file()
+    assert not (tmp_path / "handles" / "_manifest.json").exists()
+
+
+def test_legacy_manifest_is_migrated(tmp_path):
+    import json
+    (tmp_path / "handles").mkdir()
+    (tmp_path / "handles" / "h1.txt").write_text("old data")
+    (tmp_path / "handles" / "_manifest.json").write_text(json.dumps(
+        {"h1": {"id": "h1", "kind": "text", "path": "handles/h1.txt", "source": "old"}}))
+    store = HandleStore(tmp_path)
+    assert store.get("h1") == "old data"
+    assert (tmp_path / ".tether" / "manifest.json").is_file()
+    assert not (tmp_path / "handles" / "_manifest.json").exists()
+    assert HandleStore(tmp_path).get("h1") == "old data"      # survives a second reopen
+
+
+def test_store_refuses_a_symlinked_handles_dir(tmp_path):
+    import pytest
+    from tether.workspace import WorkspaceTamperedError
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "handles").symlink_to(outside)
+    with pytest.raises(WorkspaceTamperedError):
+        HandleStore(root)
+
+
+def test_put_replaces_a_planted_symlink_instead_of_writing_through_it(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("original")
+    root = tmp_path / "root"
+    store = HandleStore(root)
+    (root / "handles" / "h1.txt").symlink_to(victim)
+    handle = store.put("payload", source="t")
+    assert handle.id == "h1"
+    assert victim.read_text() == "original"
+    assert not (root / "handles" / "h1.txt").is_symlink()
+    assert store.get("h1") == "payload"
+
+
+def test_adopt_file_moves_the_payload_and_derives_metadata(tmp_path):
+    store = HandleStore(tmp_path)
+    src = tmp_path / "save_1.json"
+    src.write_text('{"a": 1}')
+    handle = store.adopt_file(id="sales_eu", kind="json", src=src, source="run_python")
+    assert handle.path == "handles/sales_eu.json"
+    assert not src.exists()
+    assert store.get("sales_eu") == {"a": 1}
+    assert handle.bytes == 8 and handle.digest
+
+
+def test_adopt_file_rejects_bad_ids_kinds_and_non_regular_sources(tmp_path):
+    import pytest
+    store = HandleStore(tmp_path)
+    src = tmp_path / "f.txt"
+    src.write_text("x")
+    for bad in ("", "a/b", "..", ".hidden", "x" * 65, "sp ace", 7):
+        with pytest.raises(ValueError):
+            store.adopt_file(id=bad, kind="text", src=src, source="s")
+    with pytest.raises(ValueError):
+        store.adopt_file(id="ok", kind="binary", src=src, source="s")
+    link = tmp_path / "link.txt"
+    link.symlink_to(src)
+    with pytest.raises(ValueError):
+        store.adopt_file(id="ok", kind="text", src=link, source="s")
+    with pytest.raises(ValueError):
+        store.adopt_file(id="ok", kind="text", src=tmp_path / "missing", source="s")
+    assert src.read_text() == "x"            # nothing was moved by a rejected call
+
+
+def test_adopt_file_refuses_reuse_of_an_id_or_destination(tmp_path):
+    import pytest
+    from tether.handles import HandleIdReuseError
+    store = HandleStore(tmp_path)
+    first = store.put("one", source="t")                 # h1
+    src = tmp_path / "f.txt"
+    src.write_text("two")
+    with pytest.raises(HandleIdReuseError):
+        store.adopt_file(id=first.id, kind="text", src=src, source="s")
+    (tmp_path / "handles" / "squat.txt").write_text("already here")
+    with pytest.raises(HandleIdReuseError):
+        store.adopt_file(id="squat", kind="text", src=src, source="s")
+    assert store.get(first.id) == "one"
+
+
+def test_adopt_file_deletes_a_payload_it_cannot_describe(tmp_path):
+    import pytest
+    store = HandleStore(tmp_path)
+    src = tmp_path / "f.parquet"
+    src.write_bytes(b"this is not parquet")
+    with pytest.raises(ValueError):
+        store.adopt_file(id="bad", kind="dataframe", src=src, source="s")
+    assert not (tmp_path / "handles" / "bad.parquet").exists()
+    assert "bad" not in store.manifest()
+
+
+def test_adopt_file_truncates_source(tmp_path):
+    store = HandleStore(tmp_path)
+    src = tmp_path / "f.txt"
+    src.write_text("x")
+    handle = store.adopt_file(id="a", kind="text", src=src, source="s" * 5000)
+    assert len(handle.source) == 200
+
+
+def test_dataframe_preview_and_schema_are_capped(tmp_path):
+    import pandas as pd
+    store = HandleStore(tmp_path)
+    wide = pd.DataFrame({f"{i}_{'c' * 300}": ["v" * 5000] for i in range(300)})
+    handle = store.put(wide, source="t")
+    assert len(handle.preview) <= 900
+    assert len(handle.schema) == 200
+    assert all(len(name) <= 128 for name in handle.schema)
+    assert handle.n_cols == 300
+
+
+def test_dataframe_preview_reads_only_the_first_batch(tmp_path, monkeypatch):
+    import pandas as pd
+    import pyarrow.parquet as pq
+    store = HandleStore(tmp_path)
+
+    def boom(self, *a, **k):
+        raise AssertionError("read_row_group must not be used for previews")
+
+    monkeypatch.setattr(pq.ParquetFile, "read_row_group", boom)
+    handle = store.put(pd.DataFrame({"a": range(100)}), source="t")
+    assert handle.n_rows == 100 and "(5 of 100 rows)" in handle.preview
+
+
+def test_verify_returns_the_path_and_checks_the_digest(tmp_path):
+    import pytest
+    from tether.handles import HandleTamperedError
+    store = HandleStore(tmp_path)
+    handle = store.put("abc", source="t")
+    path = store.verify(handle.id)
+    assert path == (tmp_path / "handles" / "h1.txt").resolve()
+    path.write_text("xyz!")
+    with pytest.raises(HandleTamperedError):
+        store.verify(handle.id)
+    with pytest.raises(KeyError):
+        store.verify("nope")
