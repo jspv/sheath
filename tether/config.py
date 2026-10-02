@@ -52,6 +52,7 @@ class SandboxConfig:
     require_isolation: bool = False        # refuse to run without a real boundary
     build_on_demand: bool | None = None    # None -> auto: build unless require_isolation
     build_timeout_s: float = 900.0         # bound on image build + pip layer provisioning
+    max_output_bytes: int = 8192           # per stream (stdout, stderr): head + tail kept
 
     @property
     def effective_build_on_demand(self) -> bool:
