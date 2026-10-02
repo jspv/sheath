@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .conversation import Conversation
-from .paths import safe_path
+from .paths import safe_path, validate_segment
 
 
 class ConversationStore(Protocol):
@@ -51,8 +51,7 @@ def _conv_root(config: Any, conv_id: str) -> Path:
     separators up front and run the result through ``safe_path`` as a containment backstop.
     """
     base = Path(config.root_dir) if config.root_dir else (Path.cwd() / ".tether" / "sessions")
-    if conv_id in ("", ".", "..") or "/" in conv_id or "\\" in conv_id:
-        raise ValueError(f"invalid conversation id (no path separators allowed): {conv_id!r}")
+    validate_segment(conv_id, what="conversation id")
     return safe_path(base, conv_id)
 
 
@@ -89,7 +88,7 @@ class SessionManager:
                 if existing is not None:               # expired -> reap before recreating
                     self._store.pop(session_id)
                     await existing.aclose()
-            conv_id = session_id or uuid.uuid4().hex
+            conv_id = session_id if session_id is not None else uuid.uuid4().hex
             config = dataclasses.replace(
                 self._tether.config, root_dir=str(_conv_root(self._tether.config, conv_id)))
             from .api import expand_tools

@@ -166,3 +166,13 @@ def test_symlink_loop_in_a_parent_component_is_a_publish_error(tmp_path):
     os.symlink(tmp_path / "b", tmp_path / "a")
     os.symlink(tmp_path / "a", tmp_path / "b")
     _reject(tmp_path, "a/x")
+
+
+def test_state_dir_is_not_publishable(tmp_path):
+    import pytest
+    from tether.publish import PublishError, validate_publication
+    (tmp_path / ".tether").mkdir()
+    (tmp_path / ".tether" / "manifest.json").write_text("{}")
+    with pytest.raises(PublishError, match="internal"):
+        validate_publication(tmp_path, ".tether/manifest.json", name=None, description=None,
+                             source="t", max_bytes=1000)

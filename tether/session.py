@@ -48,15 +48,13 @@ class Session:
                bundles: tuple[str, ...] | None = None) -> "Session":
         """Open the workspace. Sandbox ``publish()`` is enabled only when ``on_publish`` is set
         and the ``deliver`` bundle is selected (``bundles=None`` means all bundles)."""
-        root = _resolve_root(config)
+        root, pre_existing = _resolve_root(config)
         # The root has to exist before the HandleStore, which has to exist before the
         # sandbox -- so it cannot simply be created last. Instead, a root this call brought
         # into being is removed again if anything downstream fails. Without that, every
         # failed start on a machine with no container runtime left an empty
-        # .tether/sessions/N behind, one per attempt. A root that already existed (a pinned
+        # .tether/runs/run-XXXX behind, one per attempt. A root that already existed (a pinned
         # root_dir, a resumed thread) is never touched: it is not ours to delete.
-        pre_existing = root.exists()
-        root.mkdir(parents=True, exist_ok=True)
         try:
             store = HandleStore(root)
             limits = ControlPlaneLimits(max_emit_bytes=config.max_emit_bytes,
@@ -86,7 +84,7 @@ class Session:
         """User-meaningful files under root, excluding handle storage and scratch."""
         out: list[str] = []
         for p in sorted(self.root.rglob("*")):
-            if not p.is_file():
+            if p.is_symlink() or not p.is_file():
                 continue
             rel = p.relative_to(self.root)
             top = rel.parts[0]
@@ -325,14 +323,22 @@ class Session:
             shutil.rmtree(self.root)
 
 
-def _resolve_root(config: TetherConfig) -> Path:
+def _resolve_root(config: TetherConfig) -> tuple[Path, bool]:
+    """Return ``(root, pre_existing)``, creating the root.
+
+    A pinned ``root_dir`` is used verbatim. Otherwise a fresh directory is created under
+    ``./.tether/runs/`` with ``mkdtemp``, which is atomic: two threads or processes can
+    never be handed the same root. That base is deliberately not ``./.tether/sessions/``,
+    where conversation roots are named by a caller-supplied id.
+    """
     if config.root_dir is not None:
-        return Path(config.root_dir).resolve()
-    base = Path.cwd() / ".tether" / "sessions"
+        root = Path(config.root_dir).resolve()
+        pre_existing = root.exists()
+        root.mkdir(parents=True, exist_ok=True)
+        return root, pre_existing
+    base = Path.cwd() / ".tether" / "runs"
     base.mkdir(parents=True, exist_ok=True)
-    existing = [int(p.name) for p in base.iterdir() if p.name.isdigit()]
-    next_id = (max(existing) + 1) if existing else 1
-    return (base / str(next_id)).resolve()
+    return Path(tempfile.mkdtemp(prefix="run-", dir=base)).resolve(), False
 
 
 def _input_size(source: Path | bytes) -> int:

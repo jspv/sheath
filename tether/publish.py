@@ -17,7 +17,7 @@ from typing import Callable
 
 from .paths import safe_filename
 
-_INTERNAL_DIRS = ("handles", ".scripts")
+_INTERNAL_DIRS = ("handles", ".scripts", ".tether")
 _CHUNK = 1024 * 1024
 
 

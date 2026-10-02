@@ -114,3 +114,13 @@ def test_each_conversation_gets_its_own_tool_instance(tmp_path):
             await tether.aclose_sessions()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("bad", ["", ".", "..", "a/b", "a\\b", "x\x00y", "a\nb", "x" * 300])
+def test_conversation_ids_must_be_a_single_safe_segment(tmp_path, bad):
+    async def run():
+        m = SessionManager(_tether(tmp_path))
+        with pytest.raises(ValueError):
+            await m.aopen(bad)
+
+    asyncio.run(run())

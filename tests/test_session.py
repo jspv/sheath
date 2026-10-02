@@ -10,7 +10,7 @@ def test_session_creates_root_under_default_location(tmp_path, monkeypatch):
     sess = Session.create(TetherConfig())
     assert sess.root.exists()
     assert sess.root.is_dir()
-    assert ".tether/sessions" in str(sess.root)
+    assert ".tether/runs" in str(sess.root)
     sess.cleanup()
 
 
@@ -143,7 +143,7 @@ def test_session_unbinds_bus_on_exit(tmp_path):
 
 def test_failed_sandbox_build_leaves_no_orphan_session_dir(tmp_path, monkeypatch):
     """Session.create used to mkdir the root before _build_sandbox could refuse, so every
-    failed start on a runtime-less host left an empty .tether/sessions/N behind."""
+    failed start on a runtime-less host left an empty .tether/runs/run-XXXX behind."""
     import pytest
 
     from tether.config import TetherConfig
@@ -159,7 +159,7 @@ def test_failed_sandbox_build_leaves_no_orphan_session_dir(tmp_path, monkeypatch
         with pytest.raises(SandboxRuntimeUnavailable):
             Session.create(TetherConfig())
 
-    sessions = tmp_path / ".tether" / "sessions"
+    sessions = tmp_path / ".tether" / "runs"
     assert [p.name for p in sessions.iterdir()] == []
 
 
@@ -181,3 +181,42 @@ def test_a_pre_existing_pinned_root_survives_a_failed_build(tmp_path, monkeypatc
     with pytest.raises(SandboxRuntimeUnavailable):
         Session.create(TetherConfig(root_dir=root))
     assert (root / "keepme.txt").read_text() == "precious"
+
+
+def test_default_roots_are_unique_and_outside_the_conversation_namespace(tmp_path, monkeypatch):
+    from tether import Session, TetherConfig
+    monkeypatch.chdir(tmp_path)
+    a = Session.create(TetherConfig())
+    b = Session.create(TetherConfig())
+    assert a.root != b.root
+    for s in (a, b):
+        assert s.root.parent == (tmp_path / ".tether" / "runs").resolve()
+        assert s.root.name.startswith("run-")
+    assert not (tmp_path / ".tether" / "sessions").exists()
+
+
+def test_default_root_allocation_is_safe_across_threads(tmp_path, monkeypatch):
+    import threading
+    from tether import Session, TetherConfig
+    monkeypatch.chdir(tmp_path)
+    roots = []
+
+    def make():
+        roots.append(Session.create(TetherConfig()).root)
+
+    threads = [threading.Thread(target=make) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(set(roots)) == 8
+
+
+def test_artifacts_exclude_internal_trees_and_links(tmp_path):
+    from tether import Session, TetherConfig
+    s = Session.create(TetherConfig(root_dir=tmp_path / "root"))
+    s.store.put("x", source="t")
+    (s.root / "outputs").mkdir()
+    (s.root / "outputs" / "a.csv").write_text("1\n")
+    (s.root / "link.txt").symlink_to(s.root / "outputs" / "a.csv")
+    assert s.artifacts == ["outputs/a.csv"]
