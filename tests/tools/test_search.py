@@ -189,3 +189,12 @@ def test_rg_search_handles_non_utf8_lines_and_names(tmp_path):
     (sess.root / "latin.txt").write_bytes(b"caf\xe9 needle\n")
     hits = search(sess, "needle")
     assert len(hits) == 1 and "needle" in hits[0]["text"] and hits[0]["col"] == 5
+
+
+def test_search_result_is_capped_by_total_size(tmp_path):
+    import json
+    sess = _session(tmp_path)
+    (sess.root / "big.txt").write_text(("needle " + "y" * 2000 + "\n") * 1000)
+    hits = search(sess, "needle", max_matches=1000)
+    assert len(json.dumps(hits)) <= 61_000
+    assert "more matches omitted" in hits[-1]["note"]

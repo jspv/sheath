@@ -43,3 +43,28 @@ def test_run_python_requires_code_or_path(tmp_path):
     sess = _session(tmp_path)
     with pytest.raises(ValueError, match="code.*or.*path"):
         run_python(sess)
+
+
+def test_large_emitted_result_is_spilled_to_a_handle(tmp_path):
+    import json
+    sess = _session(tmp_path)
+    out = run_python(sess, code="from tether_sandbox import emit\nemit(list(range(20000)))\n")
+    assert out["result"]["spilled"] is True
+    hid = out["result"]["handle"]["id"]
+    assert hid in out["new_handles"]
+    assert sess.store.get(hid) == list(range(20000))
+    assert len(json.dumps(out)) < 20_000
+
+
+def test_small_result_is_returned_inline(tmp_path):
+    sess = _session(tmp_path)
+    out = run_python(sess, code="6 * 7\n")
+    assert out["result"] == 42
+
+
+def test_printed_output_is_capped_not_spilled(tmp_path):
+    import json
+    sess = _session(tmp_path)
+    out = run_python(sess, code="print('A' * 5_000_000)\n")
+    assert len(json.dumps(out)) < 30_000
+    assert isinstance(out["result"], str)

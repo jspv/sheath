@@ -52,7 +52,8 @@ def build_tools(session: Session) -> list:
         return _run_python(session, code, path, args)
 
     def inspect_handle(handle_id: str, rows: int = 20, stats: bool = False) -> dict:
-        """Deeper look at a handle: more preview / head rows (and describe() if stats=True)."""
+        """Deeper look at a handle: up to `rows` (max 100) preview lines or head rows; for a
+        dataframe, stats=True adds per-column min/max/null_count."""
         return _inspect_handle(session, handle_id, rows, stats)
 
     def web_search(query: str, max_results: int = 5) -> dict:

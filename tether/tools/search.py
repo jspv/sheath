@@ -22,6 +22,8 @@ _MAX_SEARCH_FILE_BYTES = 50 * 1024 * 1024
 _MAX_LINE_CHARS = 1_000_000
 _RG_TIMEOUT_S = 30.0
 
+_MAX_SEARCH_RESULT_CHARS = 60_000
+
 _SNIPPET_WIDTH = 240  # cap each hit's text so a single huge line can't flood context
 
 
@@ -34,6 +36,17 @@ def _snippet(line: str, col: int) -> str:
     start = max(0, col - _SNIPPET_WIDTH // 2)
     end = start + _SNIPPET_WIDTH
     return ("…" if start > 0 else "") + line[start:end] + ("…" if end < len(line) else "")
+
+
+def _fit(hits: list[dict]) -> list[dict]:
+    """Keep the longest prefix of ``hits`` whose JSON stays under the result budget."""
+    size = 0
+    for i, hit in enumerate(hits):
+        size += len(json.dumps(hit)) + 2
+        if size > _MAX_SEARCH_RESULT_CHARS:
+            return hits[:i] + [{"note": f"{len(hits) - i} more matches omitted; narrow the "
+                                        "pattern or the path"}]
+    return hits
 
 
 def _check_glob(glob: str | None) -> None:
@@ -66,8 +79,10 @@ def search(session: Session, pattern: str, path: str = ".", glob: str | None = N
             raise ValueError(f"not a regular file or directory: {path!r}")
         rg = shutil.which("rg")
         if rg:
-            return _search_rg(rg, session.root, base, pattern, glob, ignore_case, max_matches)
-        return _search_python(session.root, base, pattern, ignore_case, max_matches, glob)
+            return _fit(_search_rg(rg, session.root, base, pattern, glob, ignore_case,
+                                   max_matches))
+        return _fit(_search_python(session.root, base, pattern, ignore_case, max_matches,
+                                   glob))
 
 
 def _search_rg(rg: str, root: Path, base: Path, pattern: str, glob: str | None,
