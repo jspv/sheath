@@ -60,12 +60,48 @@ def ensure_layout(root: Path | str) -> None:
 
 
 def is_protected(root: Path | str, resolved: Path) -> bool:
-    """Whether an already-resolved path lies in (or is) a protected directory of ``root``."""
+    """Whether an already-resolved path lies in (or is) a protected directory of ``root``.
+
+    Decides by filesystem identity (st_dev, st_ino) rather than spelling, to catch
+    case-variant paths on case-insensitive filesystems.
+    """
+    root = Path(root).resolve()
+    resolved = Path(resolved)
+
+    # Try the cheap path check first
     try:
-        parts = Path(resolved).relative_to(Path(root).resolve()).parts
+        parts = resolved.relative_to(root).parts
     except ValueError:
         return False
-    return bool(parts) and parts[0] in PROTECTED_DIRS
+
+    if not parts:
+        return False
+
+    # Cheap check: if the first component matches by name, it's protected
+    if parts[0] in PROTECTED_DIRS:
+        return True
+
+    # Expensive check: if the first component is the same inode as a protected dir,
+    # it's protected (handles case-insensitive filesystems)
+    first_component = root / parts[0]
+
+    # If the path doesn't exist, it's not protected
+    try:
+        first_st = os.lstat(first_component)
+    except OSError:
+        return False
+
+    # Compare inode identity against each protected directory
+    for protected_name in PROTECTED_DIRS:
+        try:
+            protected_st = os.lstat(root / protected_name)
+            if (first_st.st_dev == protected_st.st_dev and
+                first_st.st_ino == protected_st.st_ino):
+                return True
+        except OSError:
+            continue
+
+    return False
 
 
 def state_dir(root: Path | str) -> Path:

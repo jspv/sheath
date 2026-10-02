@@ -48,6 +48,27 @@ def test_is_protected(tmp_path):
     assert not is_protected(root, root)
 
 
+def test_is_protected_case_variant_on_case_insensitive_fs(tmp_path):
+    """On case-insensitive filesystems, must decide by inode identity, not spelling."""
+    ensure_layout(tmp_path)
+    root = tmp_path.resolve()
+    # On case-insensitive FS, HANDLES and handles refer to the same directory
+    if (tmp_path / "HANDLES").exists():
+        # Case-insensitive filesystem (e.g., macOS APFS)
+        assert is_protected(root, root / "HANDLES" / "x")
+        assert is_protected(root, root / ".TETHER")
+    else:
+        # Case-sensitive filesystem
+        pytest.skip("case-sensitive filesystem")
+
+
+def test_is_protected_nonexistent_first_component(tmp_path):
+    """A path with non-existent first component (not a protected dir) is not protected."""
+    ensure_layout(tmp_path)
+    root = tmp_path.resolve()
+    assert not is_protected(root, root / "outputs" / "new.txt")
+
+
 def test_run_dirs_are_unique_and_under_state(tmp_path):
     ensure_layout(tmp_path)
     a, b = new_run_dir(tmp_path), new_run_dir(tmp_path)
