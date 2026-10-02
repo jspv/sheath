@@ -65,9 +65,7 @@ def _argv(tmp_path, monkeypatch=None, **cfg):
     sb = ContainerSandbox(root=tmp_path, store=store,
                           config=SandboxConfig(backend="container", **cfg), runtime="podman")
     ctx = _RunContext(script_rel=".scripts/x.py", argv=[], root=tmp_path,
-                      registry_file=tmp_path / "_registry_t.json",
-                      new_handles_file=tmp_path / "_new_handles_t.jsonl",
-                      emit_file=tmp_path / "_emit_t.json", config=sb.config)
+                      run_dir=tmp_path / ".tether" / "runs" / "tok", config=sb.config)
     return sb._build_run_argv(ctx, "img:abc", layer=None)
 
 
@@ -86,12 +84,19 @@ def test_container_argv_hardening_flags(tmp_path):
 
 
 def test_container_mounts_only_root_inputs_and_runtime(tmp_path):
-    # The store always creates inputs/, so it is always overlaid read-only on the root.
+    # Exactly: the rw root, the ro runtime, the four parent-owned trees overlaid read-only
+    # (inputs/ among them), and this run's exchange directory. Nothing else of the host.
     mounts = _pairs(_argv(tmp_path), "-v")
-    assert len(mounts) == 3
-    assert mounts[0] == f"{tmp_path}:/workspace:rw"
+    assert mounts == [
+        f"{tmp_path}:/workspace:rw",
+        mounts[1],
+        f"{tmp_path / 'handles'}:/workspace/handles:ro",
+        f"{tmp_path / 'inputs'}:/workspace/inputs:ro",
+        f"{tmp_path / '.scripts'}:/workspace/.scripts:ro",
+        f"{tmp_path / '.tether'}:/workspace/.tether:ro",
+        f"{tmp_path / '.tether' / 'runs' / 'tok'}:/tether-run:rw",
+    ]
     assert mounts[1].endswith(":/runtime:ro")
-    assert mounts[2] == f"{tmp_path / 'inputs'}:/workspace/inputs:ro"
 
 
 def test_container_passes_no_host_env(tmp_path, monkeypatch):

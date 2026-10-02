@@ -12,6 +12,7 @@ from tether.conversation import Conversation
 from tether.handles import HandleStore
 from tether.sandbox import _RunContext
 from tether.sandbox_container import ContainerSandbox
+from tether.workspace import WorkspaceTamperedError
 from tether.testing import StubChatClient, text
 
 
@@ -208,8 +209,7 @@ def _argv(root, store=None):
     sb = ContainerSandbox(root=root, store=store or HandleStore(root), runtime="podman",
                           config=SandboxConfig(backend="container"))
     ctx = _RunContext(script_rel=".scripts/x.py", argv=[], root=sb.root,
-                      registry_file=sb.root / "_r.json", new_handles_file=sb.root / "_n.jsonl",
-                      emit_file=sb.root / "_e.json", config=sb.config)
+                      run_dir=sb.root / ".tether" / "runs" / "tok", config=sb.config)
     return sb._build_run_argv(ctx, "img:abc", layer=None)
 
 
@@ -223,7 +223,10 @@ def test_container_mounts_inputs_read_only(tmp_path):
     assert f"{tmp_path.resolve() / 'inputs'}:/workspace/inputs:ro" in mounts
 
 
-def test_container_does_not_mount_symlinked_inputs(tmp_path):
+def test_container_does_not_mount_symlinked_inputs(tmp_path, monkeypatch):
+    # The backend mounts every protected dir unconditionally, so the guarantee lives in the
+    # orchestrator: a run on a root whose inputs/ was swapped for a link is refused before
+    # any container (and so any bind mount of the link's target) is launched.
     root = tmp_path / "root"
     root.mkdir()
     secret_dir = tmp_path / "host-secrets"
@@ -231,8 +234,14 @@ def test_container_does_not_mount_symlinked_inputs(tmp_path):
     store = HandleStore(root)                  # creates inputs/ as a real directory
     (root / "inputs").rmdir()
     os.symlink(secret_dir, root / "inputs")    # planted after the store was opened
-    mounts = _mounts(_argv(root, store))
-    assert not any("host-secrets" in m or "/workspace/inputs" in m for m in mounts)
+    sb = ContainerSandbox(root=root, store=store, runtime="podman",
+                          config=SandboxConfig(backend="container"))
+    launched = []
+    monkeypatch.setattr(sb, "_launch", lambda ctx: launched.append(ctx))
+    (root / ".scripts" / "x.py").write_text("1\n")
+    with pytest.raises(WorkspaceTamperedError):
+        sb.run_script(".scripts/x.py")
+    assert launched == []
 
 
 def test_preview_bounded_for_single_huge_line_and_bad_utf8(tmp_path):

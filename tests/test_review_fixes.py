@@ -85,15 +85,20 @@ def test_timed_out_container_is_removed(tmp_path, monkeypatch):
     import tether.container_runtime as cr
     import tether.sandbox_container as sc
 
+    from tether.procio import BoundedRun
+
     monkeypatch.setattr(cr, "ensure_image", lambda *a, **k: None)
     calls = []
 
+    def fake_bounded(argv, **kw):
+        calls.append(argv)
+        return BoundedRun("", "", -9, True)          # the runtime CLI timed out
+
     def fake_run(argv, **kw):
         calls.append(argv)
-        if argv[1] == "run":
-            raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
+    monkeypatch.setattr(sc, "run_bounded", fake_bounded)
     monkeypatch.setattr(sc.subprocess, "run", fake_run)
     sb = ContainerSandbox(root=tmp_path, store=HandleStore(tmp_path), runtime="podman",
                           config=SandboxConfig(backend="container", timeout_s=1))

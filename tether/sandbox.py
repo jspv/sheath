@@ -360,11 +360,3 @@ class LocalSubprocessSandbox(_OrchestratedSandbox):
 
 def _minimal_path() -> str:
     return "/usr/bin:/bin:/usr/local/bin"
-
-
-def _as_text(value: str | bytes | None) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, bytes):
-        return value.decode(errors="replace")
-    return value

@@ -196,3 +196,89 @@ def test_timed_out_container_is_not_left_running(croot):
         [_RUNTIME, "ps", "-q", "--filter", f"ancestor={image_tag(sb.config.preinstalled)}"],
         capture_output=True, text=True).stdout.split()
     assert running == [], "a timed-out sandbox container is still running"
+
+
+# --- trust zones: the reproduced escapes, against a real container ---
+
+def _sentinels(croot):
+    outside = croot.parent / (croot.name + "-outside")
+    outside.mkdir()
+    secret = outside / "secret.json"
+    secret.write_text('{"key": "HOST-SECRET"}')
+    victim = outside / "victim.txt"
+    victim.write_text("original")
+    return outside, secret, victim
+
+
+def test_protected_dirs_are_read_only_and_cannot_be_replaced(croot):
+    sb, _ = _container(croot)
+    res = sb.run_code(
+        "import os\n"
+        "out = {}\n"
+        "for d in ('handles', 'inputs', '.scripts', '.tether'):\n"
+        "    for label, fn in (\n"
+        "        ('write', lambda d=d: open(os.path.join(d, 'x'), 'w')),\n"
+        "        ('symlink', lambda d=d: os.symlink('/etc/passwd', os.path.join(d, 'l'))),\n"
+        "        ('rename', lambda d=d: os.rename(d, d + '_moved')),\n"
+        "        ('rmdir', lambda d=d: os.rmdir(d)),\n"
+        "    ):\n"
+        "        try:\n"
+        "            fn(); out[d + ':' + label] = 'ALLOWED'\n"
+        "        except OSError as e:\n"
+        "            out[d + ':' + label] = 'denied'\n"
+        "from tether_sandbox import emit\nemit(out)\n")
+    assert res.error is None, res.error
+    assert res.result and set(res.result.values()) == {"denied"}, res.result
+
+
+def test_emit_symlink_escape_is_closed(croot):
+    outside, secret, _ = _sentinels(croot)
+    try:
+        sb, _ = _container(croot)
+        res = sb.run_code(
+            "import os\n"
+            f"os.symlink({str(secret)!r}, os.path.join(os.environ['TETHER_RUN_DIR'], 'emit.json'))\n")
+        assert res.result is None
+        assert "HOST-SECRET" not in repr((res.result, res.error, res.stdout))
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
+
+
+def test_handle_write_escape_is_closed(croot):
+    outside, _, victim = _sentinels(croot)
+    try:
+        sb, store = _container(croot)
+        res = sb.run_code(
+            "import os\n"
+            "errs = []\n"
+            "for name in ('handles/h1.txt', '.tether/manifest.json', '.tether/.tmp_x'):\n"
+            "    try:\n"
+            f"        os.symlink({str(victim)!r}, name)\n"
+            "    except OSError as e:\n"
+            "        errs.append(name)\n"
+            "from tether_sandbox import emit\nemit(errs)\n")
+        assert res.result == ["handles/h1.txt", ".tether/manifest.json", ".tether/.tmp_x"]
+        handle = store.put("ATTACKER TEXT", source="fetch_url(http://example.invalid)")
+        assert handle.id == "h1" and store.get("h1") == "ATTACKER TEXT"
+        assert victim.read_text() == "original"
+    finally:
+        shutil.rmtree(outside, ignore_errors=True)
+
+
+def test_save_round_trips_through_the_run_dir(croot):
+    sb, store = _container(croot)
+    res = sb.run_code(
+        "import pandas as pd\n"
+        "from tether_sandbox import save\n"
+        "save('df1', pd.DataFrame({'a': [1, 2, 3]}))\n")
+    assert res.error is None, res.error
+    assert res.new_handles == ["df1"] and len(store.get("df1")) == 3
+    res = sb.run_code("from tether_sandbox import load\nint(load('df1')['a'].sum())\n")
+    assert res.result == 6
+
+
+def test_direct_write_into_handles_fails_clearly(croot):
+    sb, _ = _container(croot)
+    res = sb.run_code("open('handles/mine.txt', 'w').write('x')\n")
+    assert res.exit_code != 0
+    assert "Read-only file system" in res.error or "Permission denied" in res.error

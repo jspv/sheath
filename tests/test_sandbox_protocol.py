@@ -176,3 +176,31 @@ def test_publish_is_unavailable_without_a_publisher(tmp_path):
     sb, _ = _sandbox(tmp_path / "root")
     res = sb.run_code("from tether_sandbox import publish\npublish('x')\n")
     assert res.exit_code != 0 and "publishing is not enabled" in res.error
+
+
+def test_orphaned_launch_ingests_nothing(tmp_path):
+    from tether.sandbox import _LaunchResult, _OrchestratedSandbox
+
+    class _Fake(_OrchestratedSandbox):
+        orphaned = True
+
+        def _launch(self, ctx):
+            (ctx.run_dir / "p.json").write_text(json.dumps({"x": 1}))
+            (ctx.run_dir / "new_handles.jsonl").write_text(
+                json.dumps({"id": "h9", "kind": "json", "file": "p.json"}) + "\n")
+            (ctx.run_dir / "emit.json").write_text(json.dumps("emitted"))
+            if self.orphaned:
+                return _LaunchResult("", "", -1, killed_by="timeout", orphaned=True)
+            return _LaunchResult("", "", 0)
+
+    root = tmp_path / "root"
+    store = HandleStore(root)
+    sb = _Fake(root=root, store=store, config=SandboxConfig(backend="local"))
+    res = sb.run_code("1\n")
+    assert res.new_handles == [] and res.result is None
+    assert "could not be stopped" in res.error and res.killed_by == "timeout"
+    assert store.manifest() == {} and list((root / "handles").iterdir()) == []
+
+    sb.orphaned = False                    # control: the same records are ingested normally
+    res = sb.run_code("1\n")
+    assert res.new_handles == ["h9"] and store.get("h9") == {"x": 1}

@@ -1,10 +1,17 @@
 """ContainerSandbox: run agent code in a hardened OCI container (podman/docker).
 
-Reuses the shared orchestration in ``_OrchestratedSandbox`` (control files, ExecResult parsing)
-and only differs in ``_launch``: it bind-mounts the session root at /workspace and the tether
-runtime/ at /runtime (read-only), translates the control-file paths into the container, and runs
-``python /runtime/_runner.py <script-rel> <args>`` with network off (by default), a read-only
-root filesystem, dropped capabilities, and memory/cpu/pid limits.
+Reuses the shared orchestration in ``_OrchestratedSandbox`` (run directory, ExecResult parsing)
+and only differs in ``_launch``. Mounts:
+
+- the session root at /workspace (read-write);
+- the parent-owned trees ``handles/``, ``inputs/``, ``.scripts/`` and ``.tether/`` overlaid on it
+  read-only, so sandboxed code can neither write into them nor replace them;
+- this run's exchange directory (``.tether/runs/<token>``) at /tether-run (read-write) -- the
+  only place the parent reads sandbox-written data from;
+- the tether runtime/ at /runtime (read-only).
+
+It runs ``python /runtime/_runner.py <script-rel> <args>`` with network off (by default), a
+read-only root filesystem, dropped capabilities, and memory/cpu/pid limits.
 """
 
 from __future__ import annotations
@@ -14,14 +21,15 @@ import secrets
 import subprocess
 from pathlib import Path
 
+from . import workspace
 from .config import SandboxConfig
+from .procio import run_bounded
 from .sandbox import (
     _RUNTIME_DIR,
     ControlPlaneLimits,
     _LaunchResult,
     _OrchestratedSandbox,
     _RunContext,
-    _as_text,
 )
 
 _PIDS_LIMIT = 256
@@ -64,12 +72,14 @@ class ContainerSandbox(_OrchestratedSandbox):
             "-v", f"{_RUNTIME_DIR}:/runtime:ro",
             "-w", "/workspace",
         ]
-        inputs = ctx.root / "inputs"
-        # Uploaded inputs are read-only to sandboxed code: overlay them :ro on the rw workspace.
-        # Only a real directory is mounted -- a symlink planted by an earlier run would make the
-        # runtime bind-mount whatever host path it points at.
-        if inputs.is_dir() and not inputs.is_symlink():
-            argv += ["-v", f"{inputs}:/workspace/inputs:ro"]
+        # Parent-owned trees are overlaid read-only on the rw workspace. Sandboxed code can
+        # then neither write inside them nor replace them (a mount point cannot be renamed
+        # or removed from inside the container). The orchestrator has already verified that
+        # each is a real directory, so none of these mounts a link's target.
+        for name in workspace.PROTECTED_DIRS:
+            argv += ["-v", f"{ctx.root / name}:/workspace/{name}:ro"]
+        # The one writable channel back to the parent: this run's exchange directory.
+        argv += ["-v", f"{ctx.run_dir}:/tether-run:rw"]
         if not cfg.network:
             argv += ["--network", "none"]
         pythonpath = "/runtime"
@@ -78,16 +88,14 @@ class ContainerSandbox(_OrchestratedSandbox):
             pythonpath = "/runtime:/pkgs"
         env = {
             "TETHER_ROOT": "/workspace",
-            "TETHER_REGISTRY": f"/workspace/{ctx.registry_file.name}",
-            "TETHER_NEW_HANDLES": f"/workspace/{ctx.new_handles_file.name}",
-            "TETHER_EMIT": f"/workspace/{ctx.emit_file.name}",
+            "TETHER_RUN_DIR": "/tether-run",
             "PYTHONPATH": pythonpath,
             "HOME": "/workspace",
             "TMPDIR": "/tmp",
             "PATH": "/usr/local/bin:/usr/bin:/bin",
         }
-        if ctx.publish_file is not None:
-            env["TETHER_PUBLISH"] = f"/workspace/{ctx.publish_file.name}"
+        if ctx.publish_enabled:
+            env["TETHER_PUBLISH_ENABLED"] = "1"
         for key, value in env.items():
             argv += ["-e", f"{key}={value}"]
         argv += [tag, "python", "/runtime/_runner.py", ctx.script_rel, *ctx.argv]
@@ -101,19 +109,18 @@ class ContainerSandbox(_OrchestratedSandbox):
         layer = ensure_layer(self._runtime, self.config) if self.config.pip_packages else None
         name = f"tether-{secrets.token_hex(8)}"
         argv = self._build_run_argv(ctx, tag, layer, name=name)
-        try:
-            proc = subprocess.run(argv, capture_output=True, text=True,
-                                  timeout=ctx.config.timeout_s)
-            # 137 == 128 + SIGKILL: the runtime killed the container, typically the memory cap.
-            killed_by = "killed" if proc.returncode == 137 else None
-            return _LaunchResult(proc.stdout, proc.stderr, proc.returncode, killed_by=killed_by)
-        except subprocess.TimeoutExpired as e:
-            # Killing the runtime CLI does not stop the container: remove it by name, or it would
-            # keep running in the bind-mounted root after this run (and the run lock) is over.
+        run = run_bounded(argv, timeout=ctx.config.timeout_s,
+                          cap=ctx.config.max_output_bytes)
+        if run.timed_out:
+            # Killing the runtime CLI does not stop the container: remove it by name. If that
+            # fails the container may still be running in the bind-mounted root, so the run
+            # is reported as orphaned and the orchestrator ingests nothing from it.
             note = self._remove_container(name)
-            return _LaunchResult(_as_text(e.stdout),
-                                 _as_text(e.stderr) + "\ntether: killed (timeout)" + note,
-                                 -1, killed_by="timeout")
+            return _LaunchResult(run.stdout, run.stderr + "\ntether: killed (timeout)" + note,
+                                 -1, killed_by="timeout", orphaned=bool(note))
+        # 137 == 128 + SIGKILL: the runtime killed the container, typically the memory cap.
+        killed_by = "killed" if run.returncode == 137 else None
+        return _LaunchResult(run.stdout, run.stderr, run.returncode, killed_by=killed_by)
 
     def _remove_container(self, name: str) -> str:
         """Force-remove a container by name; returns a warning suffix if that failed."""
