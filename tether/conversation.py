@@ -9,6 +9,7 @@ is False. Async-first: a persistent agent + MCP connections require one stable e
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 import shutil
 import time
 from typing import TYPE_CHECKING, Any, AsyncIterator
@@ -90,9 +91,11 @@ class Conversation:
         async with self._lock:
             self.last_activity = time.monotonic()
             try:
-                async for event in agui.agui_event_stream(
-                        self.agent, self.session.status_bus, input_data, **agui_kwargs):
-                    yield event
+                async with aclosing(agui.agui_event_stream(
+                        self.agent, self.session.status_bus, input_data,
+                        **agui_kwargs)) as events:
+                    async for event in events:
+                        yield event
             finally:
                 self.last_activity = time.monotonic()
 

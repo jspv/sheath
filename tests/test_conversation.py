@@ -146,3 +146,26 @@ def test_abandoned_agui_stream_releases_the_lock(tmp_path, monkeypatch):
         await conv.aclose()
 
     asyncio.run(run())
+
+
+def test_closing_agui_stream_tears_down_inner_stream_while_lock_held(tmp_path, monkeypatch):
+    async def run():
+        conv = await _conv(tmp_path)()
+        seen = []
+
+        async def fake(agent, bus, input_data, **kwargs):
+            try:
+                yield "a"
+                yield "b"
+            finally:
+                seen.append(conv.busy)
+
+        monkeypatch.setattr("tether.agui.agui_event_stream", fake)
+        stream = conv.astream_agui({"messages": []})
+        assert await stream.__anext__() == "a"
+        await stream.aclose()
+        assert seen == [True]
+        assert not conv.busy
+        await conv.aclose()
+
+    asyncio.run(run())

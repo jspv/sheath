@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
@@ -160,8 +161,9 @@ class Tether:
             raise ValueError("agui_stream requires input_data['threadId']")
         conv = await self._sessions().aopen(thread_id, tools=tools)
         # The conversation serializes turns and stamps activity; see Conversation.astream_agui.
-        async for event in conv.astream_agui(input_data, **agui_kwargs):
-            yield event
+        async with aclosing(conv.astream_agui(input_data, **agui_kwargs)) as events:
+            async for event in events:
+                yield event
 
     def solve(self, problem: str, tools: list | None = None, *,
               on_status: _StatusSink | None = None, keep: bool = False,

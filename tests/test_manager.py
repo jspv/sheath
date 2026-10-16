@@ -176,3 +176,23 @@ def test_agui_stream_keeps_an_active_thread_alive_past_its_ttl(tmp_path, monkeyp
         await h.aclose_sessions()
 
     asyncio.run(run())
+
+
+def test_closing_agui_stream_leaves_conversation_idle_immediately(tmp_path, monkeypatch):
+    async def run():
+        h = Tether(TetherConfig(root_dir=tmp_path / "base"), client=StubChatClient([text("x")]))
+
+        async def fake(agent, bus, input_data, **kwargs):
+            yield "a"
+            yield "b"
+
+        monkeypatch.setattr("tether.agui.agui_event_stream", fake)
+        stream = h.agui_stream({"threadId": "t1", "messages": []})
+        assert await stream.__anext__() == "a"
+        await stream.aclose()
+        conv = h._sessions().get("t1")
+        assert not conv.busy
+        conv.add_input(b"x", input_id="i1", name="a.txt")   # must not raise
+        await h.aclose_sessions()
+
+    asyncio.run(run())
