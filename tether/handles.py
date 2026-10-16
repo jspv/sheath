@@ -24,6 +24,7 @@ _MAX_SCHEMA_COLS = 200
 _MAX_COL_NAME_CHARS = 128
 _MAX_SOURCE_CHARS = 200
 _DIGEST_BYTES = 64 * 1024
+_MAX_LEGACY_MANIFEST_BYTES = 8 * 1024 * 1024   # migration reads the old, sandbox-writable file
 # Arrow decodes a whole column chunk of the first row group to yield even one small batch, so
 # a preview is skipped when the footer says that group is larger than this.
 _MAX_PREVIEW_GROUP_BYTES = 16 * 1024 * 1024
@@ -354,10 +355,10 @@ class HandleStore:
     def _register_record(self, record: dict[str, Any]) -> Handle:
         """Register a handle whose file already exists (manifest rehydration, or ``register``).
 
-        **The record is untrusted.** The manifest lives at ``<root>/handles/_manifest.json``,
-        inside the session root that the container tier bind-mounts rw into the sandbox, so
-        sandboxed code can rewrite it and the next ``HandleStore(root)`` would read it back.
-        Only ``id``, ``kind``, ``path`` and ``source`` are taken from the record -- the
+        **The record is untrusted.** The manifest lives at ``<root>/.tether/manifest.json``,
+        which the container tier mounts read-only, but the local tier gives sandboxed code
+        no such barrier, and a manifest migrated from the pre-trust-zone location
+        (``handles/_manifest.json``) was sandbox-writable. Only ``id``, ``kind``, ``path`` and ``source`` are taken from the record -- the
         things the writer alone knows. Every described field (``preview``, ``bytes``,
         ``schema``, ``n_rows``, ``n_cols``) is re-derived from the file by the same
         ``_describe`` that ``put`` and ``adopt`` use, so a forged manifest cannot make the
@@ -558,13 +559,22 @@ class HandleStore:
             self._atomic(self._manifest_file,
                          lambda tmp: tmp.write_text(payload, encoding="utf-8"))
 
-    def _read_manifest_records(self, path: Path) -> dict | None:
-        """Parse a manifest file. ``None`` if absent, a link, unreadable or malformed."""
+    def _read_manifest_records(self, path: Path, max_bytes: int | None = None) -> dict | None:
+        """Parse a manifest file. ``None`` if absent, a link, unreadable, malformed or (with
+        ``max_bytes``) larger than that."""
         try:
-            if not stat.S_ISREG(os.lstat(path).st_mode):
-                return None
-            records = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            if max_bytes is not None:
+                # No-follow, regular-file-only and size-capped: the legacy location was
+                # writable by sandboxed code.
+                raw = workspace.read_control_file(path.parent, path.name, max_bytes)
+                if raw is None:
+                    return None
+                records = json.loads(raw.decode("utf-8"))
+            else:
+                if not stat.S_ISREG(os.lstat(path).st_mode):
+                    return None
+                records = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):   # incl. JSON/Unicode/ControlFileError
             return None
         return records if isinstance(records, dict) else None
 
@@ -579,7 +589,8 @@ class HandleStore:
         records = self._read_manifest_records(self._manifest_file)
         migrating = False
         if records is None:
-            records = self._read_manifest_records(self._legacy_manifest_file)
+            records = self._read_manifest_records(self._legacy_manifest_file,
+                                                  max_bytes=_MAX_LEGACY_MANIFEST_BYTES)
             migrating = records is not None
         if records is None:
             return

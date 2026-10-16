@@ -241,3 +241,23 @@ def test_python_fallback_worker_keeps_confinement_and_results(tmp_path, monkeypa
                                                               ("sub/b.txt", 2, 0)]
     with pytest.raises(ValueError, match="invalid search pattern"):
         search(sess, "(unclosed")
+
+
+@pytest.mark.skipif(__import__("shutil").which("rg") is None, reason="ripgrep not on PATH")
+def test_rg_error_text_never_contains_the_host_root(tmp_path):
+    import os
+    sess = _session(tmp_path)
+    locked = sess.root / "sub" / "locked.txt"
+    locked.parent.mkdir()
+    locked.write_text("needle\n")
+    os.chmod(locked, 0)
+    try:
+        with pytest.raises(ValueError) as ei:
+            search(sess, "needle", path="sub")
+    finally:
+        os.chmod(locked, 0o644)
+    assert str(sess.root) not in str(ei.value) and str(tmp_path) not in str(ei.value)
+    assert "locked.txt" in str(ei.value)
+    (sess.root / "sub" / "ok.txt").write_text("needle\n")
+    assert [h["file"] for h in search(sess, "needle", path="sub")] == ["sub/locked.txt",
+                                                                       "sub/ok.txt"]

@@ -214,8 +214,8 @@ class _OrchestratedSandbox:
             return None, None
         try:
             return json.loads(raw.decode("utf-8", errors="replace")), None
-        except json.JSONDecodeError as e:
-            return None, f"tether: malformed emit payload: {e}"
+        except (ValueError, RecursionError) as e:   # JSONDecodeError is a ValueError
+            return None, f"tether: malformed emit payload: {type(e).__name__}: {e}"
 
     def _ingest_new_handles(self, run_dir: Path) -> tuple[list[str], str | None]:
         """Adopt handles the child saved; return (ids, error).

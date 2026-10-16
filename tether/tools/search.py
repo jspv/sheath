@@ -97,7 +97,10 @@ def _search_rg(rg: str, root: Path, base: Path, pattern: str, glob: str | None,
         cmd.append("-i")
     if glob:
         cmd += ["-g", glob]
-    cmd += ["--", pattern, str(base)]
+    # Run in the root with a root-relative base, so neither rg's error text nor its result
+    # paths ever contain the absolute host path of the session root.
+    rel_base = base.relative_to(root).as_posix() if base != root else "."
+    cmd += ["--", pattern, rel_base]
     hits: list[dict] = []
     stopped_early = False
     # stderr goes to a file so a noisy rg can never fill a pipe and deadlock the read loop.

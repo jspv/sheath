@@ -196,3 +196,18 @@ def test_write_file_to_a_directory_is_refused(tmp_path):
     (sess.root / "d").mkdir()
     with pytest.raises(ValueError):
         write_file(sess, "d", "x")
+
+
+def test_read_file_splits_bare_carriage_return_lines(tmp_path):
+    sess = _session(tmp_path)
+    (sess.root / "mac.txt").write_bytes(b"one\rtwo\rthree\r")
+    assert read_file(sess, "mac.txt", offset=1, limit=1) == "two\r"
+    assert read_file(sess, "mac.txt", offset=2, limit=5) == "three\r"
+
+
+def test_write_file_with_unencodable_content_leaves_the_file_intact(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "keep.txt", "precious")
+    with pytest.raises(UnicodeEncodeError):
+        write_file(sess, "keep.txt", "bad \ud800 surrogate")
+    assert (sess.root / "keep.txt").read_text() == "precious"

@@ -93,11 +93,11 @@ def write_file(session: Session, path: str, content: str) -> str:
         if workspace.is_protected(session.root, target):
             raise ValueError(f"{path!r} is in a directory managed by tether; write elsewhere "
                              "(e.g. under outputs/) and use save() in run_python for handles")
+        data = content.encode("utf-8")   # before truncating: a bad string must not empty it
         target.parent.mkdir(parents=True, exist_ok=True)
         fd = _open_checked(target, os.O_WRONLY | os.O_CREAT, path)
         try:
             os.ftruncate(fd, 0)
-            data = content.encode("utf-8")
             view = memoryview(data)
             while view:
                 view = view[os.write(fd, view):]

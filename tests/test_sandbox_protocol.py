@@ -204,3 +204,19 @@ def test_orphaned_launch_ingests_nothing(tmp_path):
     sb.orphaned = False                    # control: the same records are ingested normally
     res = sb.run_code("1\n")
     assert res.new_handles == ["h9"] and store.get("h9") == {"x": 1}
+
+
+def test_deeply_nested_emit_payload_is_an_error_not_a_crash(tmp_path):
+    from tether.sandbox import _LaunchResult, _OrchestratedSandbox
+
+    depth = 200_000                         # 400 KB: under the 1 MiB emit cap
+
+    class _Fake(_OrchestratedSandbox):
+        def _launch(self, ctx):
+            (ctx.run_dir / "emit.json").write_text("[" * depth + "]" * depth)
+            return _LaunchResult("", "", 0)
+
+    root = tmp_path / "root"
+    sb = _Fake(root=root, store=HandleStore(root), config=SandboxConfig(backend="local"))
+    res = sb.run_code("1\n")
+    assert res.result is None and "malformed emit payload" in res.error

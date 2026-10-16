@@ -884,3 +884,26 @@ def test_first_group_too_large_helper(tmp_path):
         assert first_group_too_large(pf) == size
     finally:
         m._MAX_PREVIEW_GROUP_BYTES = old
+
+
+def test_legacy_manifest_read_is_capped(tmp_path, monkeypatch):
+    import json
+
+    import tether.handles as handles_mod
+    (tmp_path / "handles").mkdir()
+    (tmp_path / "handles" / "h1.txt").write_text("old data")
+    payload = json.dumps({"h1": {"id": "h1", "kind": "text", "path": "handles/h1.txt",
+                                 "source": "old", "pad": "x" * 500}})
+    (tmp_path / "handles" / "_manifest.json").write_text(payload)
+    reads = []
+    real_read_text = handles_mod.Path.read_text
+
+    def spy(self, *a, **k):
+        reads.append(self.name)
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(handles_mod.Path, "read_text", spy)
+    monkeypatch.setattr(handles_mod, "_MAX_LEGACY_MANIFEST_BYTES", 100)
+    store = HandleStore(tmp_path)
+    assert "h1" not in store.manifest()          # oversized legacy manifest is not read
+    assert "_manifest.json" not in reads          # and never slurped unbounded

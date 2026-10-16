@@ -200,7 +200,8 @@ def iter_bounded_lines(f, max_line_chars: int, chunk: int = 65536) -> Iterator[s
         if not piece:
             return
         kept = piece[:max_line_chars]
-        while not piece.endswith("\n"):
+        # newline="" streams end a line at "\n", "\r\n" or a bare "\r".
+        while piece[-1] not in "\r\n":
             piece = f.readline(chunk)
             if not piece:
                 break
