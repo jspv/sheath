@@ -5,9 +5,10 @@ so egress is a model-controlled capability. This module denies the internal addr
 and cloud instance-metadata endpoints by default. Metadata endpoints are checked
 unconditionally and cannot be overridden by the allowlist.
 
-When following redirects, guarded_get re-validates each hop against egress policy, because
-httpx's redirect-following happens without consulting policy. Without this, a public URL
-could 302 straight into the internal network or metadata endpoints.
+When following redirects, guarded_fetch re-validates each hop (address and scheme) against
+egress policy, because httpx's redirect-following happens without consulting policy. Without
+this, a public URL could 302 straight into the internal network or metadata endpoints. It
+also streams the body with a byte cap and bounds the whole fetch with a total deadline.
 
 Known residual risk: validation resolves the hostname and then hands the URL to httpx,
 which resolves it again -- a DNS entry that changes in between (rebinding) is not caught.
@@ -19,7 +20,9 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from urllib.parse import urljoin, urlparse
 
 import httpx
@@ -121,24 +124,68 @@ def validate_url(url: str, cfg: FetchConfig, *,
 _REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
 
 
-def guarded_get(url: str, cfg: FetchConfig, *, client: httpx.Client,
-                resolve: Callable[[str], list[str]] | None = None) -> httpx.Response:
-    """GET ``url``, validating the initial address and every redirect hop.
+class FetchDeadlineExceeded(httpx.HTTPError):
+    """A fetch ran past ``FetchConfig.total_timeout_s`` (all redirect hops included)."""
+
+
+@dataclass
+class FetchedBody:
+    """A fetched response whose body was read with a byte cap."""
+    status_code: int
+    url: str                 # final URL, after redirects
+    headers: httpx.Headers
+    encoding: str            # charset from the headers, else utf-8
+    body: bytes              # at most max_bytes
+    truncated: bool          # the server had more than max_bytes to send
+
+    @property
+    def is_error(self) -> bool:
+        return self.status_code >= 400
+
+
+def guarded_fetch(url: str, cfg: FetchConfig, *, client: httpx.Client, max_bytes: int,
+                  resolve: Callable[[str], list[str]] | None = None,
+                  clock: Callable[[], float] = time.monotonic) -> FetchedBody:
+    """GET ``url``, validating the initial address and every redirect hop, and read at most
+    ``max_bytes`` of the body.
 
     Redirects are followed here rather than by httpx, because httpx would follow them
-    without consulting egress policy -- a public URL could then 302 straight into the
-    internal network. We force ``follow_redirects=False`` per request to ensure this
-    safety property holds regardless of how the caller configured their client. The
-    caller owns the client's lifecycle.
+    without consulting egress policy; ``follow_redirects=False`` is forced per request.
+    Every hop's scheme must be in ``cfg.allowed_schemes``. The body is streamed: reading
+    stops at ``max_bytes`` (the response is then closed, so the remainder is never pulled),
+    and the whole operation is bounded by ``cfg.total_timeout_s`` -- the client's own
+    timeout only bounds each read, which a slow drip never trips. The caller owns the
+    client's lifecycle.
     """
+    deadline = clock() + cfg.total_timeout_s
+
+    def check_deadline() -> None:
+        if clock() > deadline:
+            raise FetchDeadlineExceeded(
+                f"fetch exceeded the {cfg.total_timeout_s:.0f}s total deadline: {url!r}")
+
     current = url
     for _ in range(cfg.max_redirects + 1):
+        check_deadline()
+        scheme = urlparse(current).scheme
+        if scheme not in cfg.allowed_schemes:
+            raise BlockedAddressError(
+                f"scheme {scheme!r} not allowed for {current!r} (allowed: {cfg.allowed_schemes})")
         validate_url(current, cfg, resolve=resolve)
-        resp = client.get(current, follow_redirects=False)
-        if resp.status_code not in _REDIRECT_CODES:
-            return resp
-        location = resp.headers.get("location")
-        if not location:
-            return resp
-        current = urljoin(current, location)  # relative Location -> absolute, then re-validate
+        with client.stream("GET", current, follow_redirects=False) as resp:
+            location = resp.headers.get("location")
+            if resp.status_code in _REDIRECT_CODES and location:
+                current = urljoin(current, location)  # relative -> absolute, then re-validate
+                continue
+            body = bytearray()
+            truncated = False
+            for chunk in resp.iter_bytes():
+                body += chunk
+                if len(body) > max_bytes:
+                    del body[max_bytes:]
+                    truncated = True
+                    break
+                check_deadline()
+            return FetchedBody(resp.status_code, str(resp.url), resp.headers,
+                               resp.encoding or "utf-8", bytes(body), truncated)
     raise httpx.HTTPError(f"too many redirects (> {cfg.max_redirects}) starting at {url!r}")

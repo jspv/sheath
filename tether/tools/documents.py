@@ -1,8 +1,10 @@
 """read_document: convert a PDF/Office/spreadsheet to clean markdown (with tables) via Docling.
 
 The source may be a workspace-relative path (resolved + jailed by safe_path) or an http(s)
-URL (downloaded through the egress guard into the session root first, so Docling only ever
-receives a local path and never makes its own network requests). The markdown is stored as a text handle
+URL (downloaded through the egress guard into the harness-private scratch directory
+``.tether/tmp/`` first, so Docling only ever receives a local path and never makes its own
+network requests). A workspace file is likewise snapshotted into scratch under the session
+lock, so sandboxed code cannot swap it while it is being read. The markdown is stored as a text handle
 and only the summary is returned, keeping large document text out of the model's context.
 
 Following the fetch_url/web convention, every failure -- a path escaping the root, an unknown
@@ -22,10 +24,12 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ..egress import BlockedAddressError, guarded_get
+from .. import workspace
+from ..egress import BlockedAddressError, guarded_fetch
 from ..paths import PathEscapesRootError, safe_path
 from ..session import Session
 from ..status import report_progress
+from .files import _open_checked
 
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -67,30 +71,66 @@ def _safe_suffix(url: str) -> str:
     return suffix if _SAFE_SUFFIX.match(suffix) else ".bin"
 
 
-def _download(session: Session, url: str) -> Path:
-    """Fetch ``url`` through the egress guard into the session root; return the local path.
+def _scratch_file(session: Session, suffix: str) -> Path:
+    """A fresh file in the parent-only scratch directory (never in the model's work area)."""
+    fd, abspath = tempfile.mkstemp(prefix="doc_", suffix=suffix,
+                                   dir=workspace.scratch_dir(session.root))
+    os.close(fd)
+    return Path(abspath)
 
-    The filename keeps the URL's extension so Docling can infer the format, and lands under
-    a dedicated subdirectory so downloads are not mistaken for user artifacts.
+
+def _download(session: Session, url: str) -> Path:
+    """Fetch ``url`` through the egress guard into private scratch; return the local path.
+
+    The filename keeps the URL's extension so Docling can infer the format. A download
+    that hits the byte cap is refused: converting a partial document yields garbage.
     """
     cfg = session.config.fetch
-    suffix = _safe_suffix(url)
-    dest_dir = session.root / "_documents"
-    dest_dir.mkdir(exist_ok=True)
-
     client = httpx.Client(timeout=cfg.timeout_s, follow_redirects=False,
                           headers={"User-Agent": _USER_AGENT})
     try:
-        resp = guarded_get(url, cfg, client=client)
-        if resp.is_error:  # 4xx/5xx -> reported as a download failure by the caller
-            raise httpx.HTTPError(f"HTTP {resp.status_code}")
-        fd, abspath = tempfile.mkstemp(prefix="doc_", suffix=suffix, dir=dest_dir)
-        os.close(fd)
-        dest = Path(abspath)
-        dest.write_bytes(resp.content[:cfg.max_bytes])
-        return dest
+        got = guarded_fetch(url, cfg, client=client, max_bytes=cfg.max_bytes)
     finally:
         client.close()
+    if got.is_error:  # 4xx/5xx -> reported as a download failure by the caller
+        raise httpx.HTTPError(f"HTTP {got.status_code}")
+    if got.truncated:
+        raise httpx.HTTPError(f"document is larger than FetchConfig.max_bytes ({cfg.max_bytes})")
+    dest = _scratch_file(session, _safe_suffix(url))
+    dest.write_bytes(got.body)
+    return dest
+
+
+def _snapshot(session: Session, source: str) -> Path:
+    """Copy a workspace file into private scratch under the session lock.
+
+    The model's work area is writable by sandboxed code, so the file is opened once
+    (never following a final symlink, never blocking on a FIFO), checked to be a regular
+    file on the descriptor itself, and copied from that descriptor while no sandboxed code
+    can run; conversion (slow) then happens on the private copy, outside the lock.
+    """
+    limit = session.config.max_input_bytes
+    with session.io_lock:
+        target = safe_path(session.root, source)
+        fd = _open_checked(target, os.O_RDONLY, source)
+        with open(fd, "rb") as src:
+            size = os.fstat(src.fileno()).st_size   # the opened file, not the name
+            if size > limit:
+                raise ValueError(f"document too large ({size} bytes > {limit})")
+            suffix = target.suffix if _SAFE_SUFFIX.match(target.suffix) else ".bin"
+            dest = _scratch_file(session, suffix)
+            try:
+                with dest.open("wb") as out:
+                    copied = 0
+                    while chunk := src.read(1024 * 1024):
+                        copied += len(chunk)
+                        if copied > limit:
+                            raise ValueError(f"document too large (more than {limit} bytes)")
+                        out.write(chunk)
+            except BaseException:
+                dest.unlink(missing_ok=True)
+                raise
+    return dest
 
 
 def read_document(session: Session, source: str,
@@ -102,32 +142,32 @@ def read_document(session: Session, source: str,
     ``config.documents.ocr``) for testing.
     """
     cfg = session.config.fetch
-    downloaded: Path | None = None
+    scratch: Path | None = None
     scheme = urlparse(source).scheme
     # The session's allowed schemes, not a hard-coded pair: narrowing
-    # FetchConfig.allowed_schemes to ("https",) was honored by fetch_url and silently
-    # ignored here, so the one lever that tightens egress worked on one of its two tools.
+    # FetchConfig.allowed_schemes to ("https",) must bind this tool as well as fetch_url.
     if scheme in cfg.allowed_schemes:
         # Docling fetches URLs itself and follows its own redirects, which egress policy
-        # cannot see. Download through the guard instead and convert the local file, so
-        # every hop is validated and Docling has exactly one input shape: a local path.
+        # cannot see. Download through the guard instead and convert the local file.
         try:
-            downloaded = _download(session, source)
+            scratch = _download(session, source)
         except BlockedAddressError as e:
             return {"error": f"blocked by egress policy: {e}", "source": source}
         except httpx.HTTPError as e:
             return {"error": f"could not download {source!r}: {e}", "source": source}
         except OSError as e:
             return {"error": f"could not store {source!r}: {e}", "source": source}
-        target = str(downloaded)
     elif scheme == "":
         try:
-            target = str(safe_path(session.root, source))
+            scratch = _snapshot(session, source)
         except PathEscapesRootError:
             return {"error": f"path escapes the workspace root: {source!r}", "source": source}
+        except (OSError, ValueError) as e:
+            return {"error": f"could not read {source!r}: {e}", "source": source}
     else:
         return {"error": f"unsupported source scheme {scheme!r}; pass a workspace path or a "
                          f"URL with one of {cfg.allowed_schemes}", "source": source}
+    target = str(scratch)
 
     if convert is None:
         ocr = session.config.documents.ocr
@@ -143,12 +183,9 @@ def read_document(session: Session, source: str,
     except Exception as e:  # noqa: BLE001 - unsupported/corrupt file etc. -> structured error
         return {"error": f"could not read document: {e}", "source": source}
     finally:
-        if downloaded is not None:
-            # The download is scratch: once converted (or once conversion has failed) it has
-            # no further use, and the markdown lives in a handle. Leaving it behind gave a
-            # model looping on read_document an unbounded disk-growth primitive -- up to
-            # max_bytes (10 MB by default) per call, forever, in a long-lived conversation.
-            downloaded.unlink(missing_ok=True)
+        # Scratch only: the markdown lives in a handle, and leaving these behind would give
+        # a model looping on read_document an unbounded disk-growth primitive.
+        scratch.unlink(missing_ok=True)
 
     handle = session.store.put(markdown, source=f"read_document({source})", kind="text")
     return handle.summary()

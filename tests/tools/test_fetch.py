@@ -102,7 +102,7 @@ def test_fetch_follows_redirects(tmp_path):
 
 
 def test_default_client_has_user_agent_and_does_not_follow_redirects(tmp_path):
-    """_default_client sets follow_redirects=False so guarded_get can handle redirects
+    """_default_client sets follow_redirects=False so guarded_fetch can handle redirects
     with re-validation against egress policy for each hop."""
     from tether.tools.fetch import _default_client
 
@@ -245,3 +245,75 @@ def test_fetch_url_blocks_a_redirect_into_an_internal_address(tmp_path):
     assert out["status"] is None
     assert "blocked by egress policy" in out["error"]
     assert "127.0.0.1" in out["error"]
+
+
+def test_fetch_url_clamps_model_supplied_max_bytes(tmp_path):
+    sess = _session(tmp_path, max_bytes_ceiling=5000)
+
+    def handler(request):
+        return httpx.Response(200, content=b"a" * 20_000,
+                              headers={"content-type": "text/plain"})
+
+    summary = fetch_url(sess, "https://example.com/big", max_bytes=10**12,
+                        client=_client(handler))
+    assert summary["truncated"] is True and summary["bytes"] == 5000
+
+
+def test_fetch_url_does_not_buffer_past_the_limit(tmp_path):
+    sess = _session(tmp_path, max_bytes=3000)
+    pulled = []
+
+    def stream():
+        for _ in range(500):
+            pulled.append(1)
+            yield b"z" * 1000
+
+    def handler(request):
+        return httpx.Response(200, content=stream(), headers={"content-type": "text/plain"})
+
+    summary = fetch_url(sess, "https://example.com/big", client=_client(handler))
+    assert summary["truncated"] is True and len(pulled) < 500
+
+
+def test_fetch_url_reports_full_size_from_content_length(tmp_path):
+    sess = _session(tmp_path, max_bytes=10)
+
+    def handler(request):
+        return httpx.Response(200, content=b"a" * 100, headers={"content-type": "text/plain"})
+
+    summary = fetch_url(sess, "https://example.com/x", client=_client(handler))
+    assert summary["truncated"] is True and summary["full_bytes"] == 100
+
+
+def test_fetch_url_binary_over_limit_is_an_error(tmp_path):
+    sess = _session(tmp_path, max_bytes=10)
+
+    def handler(request):
+        return httpx.Response(200, content=b"\x89PNG\x00\xff" * 100,
+                              headers={"content-type": "image/png"})
+
+    out = fetch_url(sess, "https://example.com/i.png", client=_client(handler))
+    assert "exceeds max_bytes" in out["error"]
+
+
+def test_fetch_url_deadline_is_a_structured_error(tmp_path, monkeypatch):
+    from tether.egress import FetchDeadlineExceeded
+    sess = _session(tmp_path)
+
+    def late(*a, **k):
+        raise FetchDeadlineExceeded("fetch exceeded the 120s total deadline")
+
+    monkeypatch.setattr("tether.tools.fetch.guarded_fetch", late)
+    out = fetch_url(sess, "https://example.com/x")
+    assert "total deadline" in out["error"]
+
+
+def test_fetch_url_survives_an_unknown_charset(tmp_path):
+    sess = _session(tmp_path)
+
+    def handler(request):
+        return httpx.Response(200, content=b"plain",
+                              headers={"content-type": "text/plain; charset=x-nonsense"})
+
+    summary = fetch_url(sess, "https://example.com/x", client=_client(handler))
+    assert sess.store.get(summary["id"]) == "plain"

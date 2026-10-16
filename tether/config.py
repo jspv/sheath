@@ -70,6 +70,8 @@ class FetchConfig:
     # internal data sources are a legitimate use case, but they must be named explicitly.
     allow_private_hosts: tuple[str, ...] = ()
     max_redirects: int = 5
+    total_timeout_s: float = 120.0        # wall-clock bound on one fetch, all hops included
+    max_bytes_ceiling: int = 100_000_000  # hard cap on a per-call max_bytes the model supplies
 
 
 @dataclass

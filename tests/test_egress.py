@@ -2,7 +2,12 @@ import httpx
 import pytest
 
 from tether.config import FetchConfig
-from tether.egress import BlockedAddressError, guarded_get, validate_url
+from tether.egress import (
+    BlockedAddressError,
+    FetchDeadlineExceeded,
+    guarded_fetch,
+    validate_url,
+)
 
 
 def _resolver(mapping):
@@ -167,7 +172,7 @@ def test_allowlisted_host_with_mixed_private_addresses():
                      resolve=_resolver({"internal.corp": ["10.1.2.3", "172.16.0.1"]}))
 
 
-# Tests for guarded_get
+# Tests for guarded_fetch
 
 def _client(handler):
     return httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=False)
@@ -177,52 +182,52 @@ def _public(*hosts):
     return lambda host: ["93.184.216.34"] if host in hosts else ["127.0.0.1"]
 
 
-def test_guarded_get_returns_a_direct_response():
+def test_guarded_fetch_returns_a_direct_response():
     def handler(request):
         return httpx.Response(200, text="hello")
 
     with _client(handler) as c:
-        resp = guarded_get("https://example.com/x", FetchConfig(), client=c,
+        resp = guarded_fetch("https://example.com/x", FetchConfig(), client=c, max_bytes=10_000,
                            resolve=_public("example.com"))
     assert resp.status_code == 200
-    assert resp.text == "hello"
+    assert resp.body.decode() == "hello"
 
 
-def test_guarded_get_follows_a_public_redirect():
+def test_guarded_fetch_follows_a_public_redirect():
     def handler(request):
         if request.url.path == "/start":
             return httpx.Response(302, headers={"Location": "https://example.com/end"})
         return httpx.Response(200, text="arrived")
 
     with _client(handler) as c:
-        resp = guarded_get("https://example.com/start", FetchConfig(), client=c,
+        resp = guarded_fetch("https://example.com/start", FetchConfig(), client=c, max_bytes=10_000,
                            resolve=_public("example.com"))
-    assert resp.text == "arrived"
+    assert resp.body.decode() == "arrived"
 
 
-def test_guarded_get_blocks_a_redirect_into_loopback():
+def test_guarded_fetch_blocks_a_redirect_into_loopback():
     """The attack this exists to stop: a public URL 302-ing to an internal address."""
     def handler(request):
         return httpx.Response(302, headers={"Location": "http://127.0.0.1:8080/admin"})
 
     with _client(handler) as c:
         with pytest.raises(BlockedAddressError, match="127.0.0.1"):
-            guarded_get("https://example.com/start", FetchConfig(), client=c,
+            guarded_fetch("https://example.com/start", FetchConfig(), client=c, max_bytes=10_000,
                         resolve=_public("example.com"))
 
 
-def test_guarded_get_blocks_a_redirect_to_the_metadata_ip():
+def test_guarded_fetch_blocks_a_redirect_to_the_metadata_ip():
     def handler(request):
         return httpx.Response(302,
                               headers={"Location": "http://169.254.169.254/latest/meta-data/"})
 
     with _client(handler) as c:
         with pytest.raises(BlockedAddressError):
-            guarded_get("https://example.com/start", FetchConfig(), client=c,
+            guarded_fetch("https://example.com/start", FetchConfig(), client=c, max_bytes=10_000,
                         resolve=_public("example.com"))
 
 
-def test_guarded_get_resolves_a_relative_redirect_before_validating():
+def test_guarded_fetch_resolves_a_relative_redirect_before_validating():
     """A relative Location must be joined against the current URL, or the host check
     would run against an empty host and the hop would escape validation."""
     seen = []
@@ -234,23 +239,23 @@ def test_guarded_get_resolves_a_relative_redirect_before_validating():
         return httpx.Response(200, text="ok")
 
     with _client(handler) as c:
-        resp = guarded_get("https://example.com/start", FetchConfig(), client=c,
+        resp = guarded_fetch("https://example.com/start", FetchConfig(), client=c, max_bytes=10_000,
                            resolve=_public("example.com"))
-    assert resp.text == "ok"
+    assert resp.body.decode() == "ok"
     assert seen == ["https://example.com/start", "https://example.com/next"]
 
 
-def test_guarded_get_enforces_max_redirects():
+def test_guarded_fetch_enforces_max_redirects():
     def handler(request):
         return httpx.Response(302, headers={"Location": "https://example.com/loop"})
 
     with _client(handler) as c:
         with pytest.raises(httpx.HTTPError, match="too many redirects"):
-            guarded_get("https://example.com/loop", FetchConfig(max_redirects=3), client=c,
+            guarded_fetch("https://example.com/loop", FetchConfig(max_redirects=3), client=c, max_bytes=10_000,
                         resolve=_public("example.com"))
 
 
-def test_guarded_get_blocks_the_initial_url_before_any_request():
+def test_guarded_fetch_blocks_the_initial_url_before_any_request():
     called = []
 
     def handler(request):
@@ -259,11 +264,12 @@ def test_guarded_get_blocks_the_initial_url_before_any_request():
 
     with _client(handler) as c:
         with pytest.raises(BlockedAddressError):
-            guarded_get("http://10.0.0.1/x", FetchConfig(), client=c, resolve=_public())
+            guarded_fetch("http://10.0.0.1/x", FetchConfig(), client=c, max_bytes=10_000,
+                          resolve=_public())
     assert called == []          # never left the process
 
 
-def test_guarded_get_validates_hops_even_if_client_follows_redirects():
+def test_guarded_fetch_validates_hops_even_if_client_follows_redirects():
     """The guarantee must not depend on how the caller built their client.
 
     A client with follow_redirects=True would otherwise let httpx walk the chain
@@ -276,11 +282,11 @@ def test_guarded_get_validates_hops_even_if_client_follows_redirects():
 
     with httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True) as c:
         with pytest.raises(BlockedAddressError, match="127.0.0.1"):
-            guarded_get("https://example.com/start", FetchConfig(), client=c,
+            guarded_fetch("https://example.com/start", FetchConfig(), client=c, max_bytes=10_000,
                         resolve=_public("example.com"))
 
 
-def test_guarded_get_enforces_max_redirects_with_exact_count():
+def test_guarded_fetch_enforces_max_redirects_with_exact_count():
     """Verify the redirect budget is exactly max_redirects (initial + redirects, not off-by-one)."""
     requests_made = []
 
@@ -290,25 +296,25 @@ def test_guarded_get_enforces_max_redirects_with_exact_count():
 
     with _client(handler) as c:
         with pytest.raises(httpx.HTTPError, match="too many redirects"):
-            guarded_get("https://example.com/loop", FetchConfig(max_redirects=3), client=c,
+            guarded_fetch("https://example.com/loop", FetchConfig(max_redirects=3), client=c, max_bytes=10_000,
                         resolve=_public("example.com"))
     # Expect exactly 4 requests: initial + 3 allowed redirects
     assert len(requests_made) == 4
 
 
 @pytest.mark.parametrize("status_code", [303, 307, 308])
-def test_guarded_get_blocks_non_302_redirect_into_loopback(status_code):
+def test_guarded_fetch_blocks_non_302_redirect_into_loopback(status_code):
     """Verify all redirect codes (not just 302) trigger hop validation."""
     def handler(request):
         return httpx.Response(status_code, headers={"Location": "http://127.0.0.1:8080/admin"})
 
     with _client(handler) as c:
         with pytest.raises(BlockedAddressError, match="127.0.0.1"):
-            guarded_get("https://example.com/start", FetchConfig(), client=c,
+            guarded_fetch("https://example.com/start", FetchConfig(), client=c, max_bytes=10_000,
                         resolve=_public("example.com"))
 
 
-def test_guarded_get_blocks_redirect_to_public_metadata_address():
+def test_guarded_fetch_blocks_redirect_to_public_metadata_address():
     """Test that 302 to a public metadata address (Azure wireserver) is blocked."""
     def handler(request):
         return httpx.Response(302,
@@ -316,5 +322,59 @@ def test_guarded_get_blocks_redirect_to_public_metadata_address():
 
     with _client(handler) as c:
         with pytest.raises(BlockedAddressError, match="blocked cloud metadata endpoint"):
-            guarded_get("https://example.com/start", FetchConfig(), client=c,
+            guarded_fetch("https://example.com/start", FetchConfig(), client=c, max_bytes=10_000,
                         resolve=_public("example.com"))
+
+
+def test_guarded_fetch_stops_reading_at_max_bytes():
+    served = []
+
+    def stream():
+        for _ in range(1000):
+            served.append(1)
+            yield b"x" * 1000
+
+    def handler(request):
+        return httpx.Response(200, content=stream())
+
+    with _client(handler) as c:
+        got = guarded_fetch("https://example.com/big", FetchConfig(), client=c,
+                            max_bytes=2500, resolve=_public("example.com"))
+    assert got.truncated and len(got.body) == 2500
+    assert len(served) < 1000                       # the rest was never pulled
+
+
+def test_guarded_fetch_enforces_a_total_deadline():
+    ticks = iter(range(0, 10_000, 50))              # each clock() call advances 50 s
+
+    def handler(request):
+        return httpx.Response(200, content=(b"x" for _ in range(100)))
+
+    with _client(handler) as c:
+        with pytest.raises(FetchDeadlineExceeded):
+            guarded_fetch("https://example.com/slow", FetchConfig(total_timeout_s=120),
+                          client=c, max_bytes=10_000, resolve=_public("example.com"),
+                          clock=lambda: next(ticks))
+
+
+def test_guarded_fetch_rejects_a_redirect_to_a_disallowed_scheme():
+    def handler(request):
+        return httpx.Response(302, headers={"location": "http://example.org/plain"})
+
+    with _client(handler) as c:
+        with pytest.raises(BlockedAddressError, match="scheme"):
+            guarded_fetch("https://example.com/start", FetchConfig(allowed_schemes=("https",)),
+                          client=c, max_bytes=10_000,
+                          resolve=_public("example.com", "example.org"))
+
+
+def test_guarded_fetch_reports_encoding_and_final_url():
+    def handler(request):
+        return httpx.Response(200, content="é".encode("latin-1"),
+                              headers={"content-type": "text/plain; charset=latin-1"})
+
+    with _client(handler) as c:
+        got = guarded_fetch("https://example.com/x", FetchConfig(), client=c,
+                            max_bytes=100, resolve=_public("example.com"))
+    assert got.encoding == "latin-1" and got.url == "https://example.com/x"
+    assert got.body.decode(got.encoding) == "é" and not got.truncated and not got.is_error
