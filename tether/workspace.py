@@ -21,6 +21,7 @@ from .paths import validate_segment
 
 PROTECTED_DIRS: tuple[str, ...] = ("handles", "inputs", ".scripts", ".tether")
 _STATE = ".tether"
+_STATE_SUBDIRS: tuple[str, ...] = ("tmp", "runs")
 
 
 class WorkspaceTamperedError(RuntimeError):
@@ -39,23 +40,36 @@ def _is_real_dir(path: Path) -> bool:
         return False
 
 
+def _require_real_dir(path: Path, shown: str, root: Path) -> None:
+    if not _is_real_dir(path):
+        raise WorkspaceTamperedError(
+            f"workspace directory {shown!r} under {root} is missing or is not a real "
+            f"directory; refusing to use this workspace")
+
+
 def verify_layout(root: Path | str) -> None:
-    """Raise unless every protected directory is a real directory (never follows a link)."""
+    """Raise unless every protected directory, and the parent's own ``.tether/tmp`` and
+    ``.tether/runs``, is a real directory (never follows a link)."""
     root = Path(root)
     for name in PROTECTED_DIRS:
-        if not _is_real_dir(root / name):
-            raise WorkspaceTamperedError(
-                f"workspace directory {name!r} under {root} is missing or is not a real "
-                f"directory; refusing to use this workspace")
+        _require_real_dir(root / name, name, root)
+    for sub in _STATE_SUBDIRS:
+        _require_real_dir(root / _STATE / sub, f"{_STATE}/{sub}", root)
 
 
 def ensure_layout(root: Path | str) -> None:
-    """Create the protected directories; refuse a root where one exists as anything else."""
+    """Create the protected directories (and ``.tether/tmp``, ``.tether/runs``); refuse a
+    root where one exists as anything else."""
     root = Path(root)
     for name in PROTECTED_DIRS:
         path = root / name
         if not os.path.lexists(path):
             path.mkdir()
+    if _is_real_dir(root / _STATE):
+        for sub in _STATE_SUBDIRS:
+            path = root / _STATE / sub
+            if not os.path.lexists(path):
+                path.mkdir()          # no parents: .tether was just proven a real directory
     verify_layout(root)
 
 
@@ -108,18 +122,30 @@ def state_dir(root: Path | str) -> Path:
     return Path(root).resolve() / _STATE
 
 
+def _state_subdir(root: Path | str, sub: str) -> Path:
+    """``.tether/<sub>``, created if missing, refused if it is a link or not a directory.
+
+    Never ``mkdir(parents=True, exist_ok=True)``: that would follow a planted link at either
+    level and put parent-owned files wherever it points.
+    """
+    root = Path(root).resolve()
+    state = root / _STATE
+    _require_real_dir(state, _STATE, root)
+    path = state / sub
+    if not os.path.lexists(path):
+        path.mkdir()
+    _require_real_dir(path, f"{_STATE}/{sub}", root)
+    return path
+
+
 def scratch_dir(root: Path | str) -> Path:
     """Parent-only scratch space (downloads, snapshots). Created on demand."""
-    path = state_dir(root) / "tmp"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return _state_subdir(root, "tmp")
 
 
 def new_run_dir(root: Path | str) -> Path:
     """Create and return a fresh per-run exchange directory under ``.tether/runs/``."""
-    runs = state_dir(root) / "runs"
-    runs.mkdir(parents=True, exist_ok=True)
-    path = runs / secrets.token_hex(8)
+    path = _state_subdir(root, "runs") / secrets.token_hex(8)
     path.mkdir()
     return path
 

@@ -131,3 +131,49 @@ def test_iter_bounded_lines_truncates_long_lines_without_miscounting():
     f = io.StringIO("a\n" + "b" * 200_000 + "\nc")
     lines = list(iter_bounded_lines(f, max_line_chars=10))
     assert lines == ["a\n", "b" * 10, "c"]
+
+
+def test_ensure_layout_creates_real_state_subdirs(tmp_path):
+    ensure_layout(tmp_path)
+    for sub in ("tmp", "runs"):
+        p = tmp_path / ".tether" / sub
+        assert p.is_dir() and not p.is_symlink()
+
+
+@pytest.mark.parametrize("sub", ["tmp", "runs"])
+def test_layout_refuses_a_planted_state_subdir_link(tmp_path, sub):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    root = tmp_path / "root"
+    (root / ".tether").mkdir(parents=True)
+    os.symlink(elsewhere, root / ".tether" / sub)      # e.g. carried over from an old root
+    with pytest.raises(WorkspaceTamperedError):
+        ensure_layout(root)
+    with pytest.raises(WorkspaceTamperedError):
+        verify_layout(root)
+    with pytest.raises(WorkspaceTamperedError):
+        scratch_dir(root) if sub == "tmp" else new_run_dir(root)
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.parametrize("sub", ["tmp", "runs"])
+def test_verify_layout_refuses_a_file_state_subdir(tmp_path, sub):
+    ensure_layout(tmp_path)
+    (tmp_path / ".tether" / sub).rmdir()
+    (tmp_path / ".tether" / sub).write_text("x")
+    with pytest.raises(WorkspaceTamperedError):
+        verify_layout(tmp_path)
+
+
+def test_scratch_and_run_dir_never_follow_a_link_planted_after_layout(tmp_path):
+    ensure_layout(tmp_path)
+    elsewhere = tmp_path.parent / (tmp_path.name + "-elsewhere")
+    elsewhere.mkdir()
+    for sub in ("tmp", "runs"):
+        (tmp_path / ".tether" / sub).rmdir()
+        os.symlink(elsewhere, tmp_path / ".tether" / sub)
+    with pytest.raises(WorkspaceTamperedError):
+        scratch_dir(tmp_path)
+    with pytest.raises(WorkspaceTamperedError):
+        new_run_dir(tmp_path)
+    assert list(elsewhere.iterdir()) == []
