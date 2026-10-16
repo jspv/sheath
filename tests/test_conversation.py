@@ -201,3 +201,117 @@ def test_closing_agui_stream_closes_agent_stream_and_status_merge_under_lock(tmp
         await conv.aclose()
 
     asyncio.run(run())
+
+
+class _GatedAgent:
+    """Stands in for the MAF agent: a turn that blocks until ``gate`` is set."""
+
+    def __init__(self, root):
+        self.root = root
+        self.gate = asyncio.Event()
+        self.started = asyncio.Event()
+        self.root_seen_during_turn = None
+
+    async def run(self, question, session=None):
+        self.started.set()
+        await self.gate.wait()
+        self.root_seen_during_turn = self.root.exists()
+
+        class _R:
+            text = "ok"
+        return _R()
+
+
+def test_aclose_waits_for_a_running_turn(tmp_path):
+    async def run():
+        conv = await _conv(tmp_path)()
+        root = conv.session.root
+        agent = conv.agent = _GatedAgent(root)
+        turn = asyncio.create_task(conv.aask("go"))
+        await agent.started.wait()
+        closing = asyncio.create_task(conv.aclose())
+        await asyncio.sleep(0.05)
+        assert root.exists() and not closing.done()   # teardown waits for the turn
+        agent.gate.set()
+        result = await turn
+        await closing
+        return result, agent, root
+
+    result, agent, root = asyncio.run(run())
+    assert result.error is None and agent.root_seen_during_turn is True
+    assert not root.exists()                         # reaped once the turn finished
+
+
+def test_turn_queued_behind_aclose_sees_closed(tmp_path):
+    async def run():
+        conv = await _conv(tmp_path)()
+        agent = conv.agent = _GatedAgent(conv.session.root)
+        first = asyncio.create_task(conv.aask("go"))
+        await agent.started.wait()
+        closing = asyncio.create_task(conv.aclose())
+        await asyncio.sleep(0.01)
+        queued = asyncio.create_task(conv.aask("after close"))
+        await asyncio.sleep(0.01)
+        agent.gate.set()
+        await first
+        await closing
+        return await queued
+
+    late = asyncio.run(run())
+    assert late.error is not None and "closed" in late.error
+
+
+def test_agui_turn_survives_concurrent_aclose_and_later_turns_refuse(tmp_path, monkeypatch):
+    import pytest
+
+    async def run():
+        conv = await _conv(tmp_path)()
+        root = conv.session.root
+        gate = asyncio.Event()
+        seen_root = []
+
+        async def fake(agent, bus, input_data, **kwargs):
+            yield "a"
+            await gate.wait()
+            seen_root.append(root.exists())
+            yield "b"
+
+        monkeypatch.setattr("tether.agui.agui_event_stream", fake)
+        events = []
+
+        async def consume():
+            async for e in conv.astream_agui({"messages": []}):
+                events.append(e)
+
+        stream = asyncio.create_task(consume())
+        await asyncio.sleep(0.02)
+        closing = asyncio.create_task(conv.aclose())
+        await asyncio.sleep(0.05)
+        assert root.exists() and not closing.done()
+        gate.set()
+        await stream
+        await closing
+        assert events == ["a", "b"] and seen_root == [True] and not root.exists()
+        with pytest.raises(RuntimeError, match="closed"):
+            async for _ in conv.astream_agui({"messages": []}):
+                pass
+
+    asyncio.run(run())
+
+
+def test_aclose_wait_is_bounded(tmp_path, monkeypatch):
+    import tether.conversation as conversation_mod
+
+    monkeypatch.setattr(conversation_mod, "_CLOSE_WAIT_S", 0.05)
+
+    async def run():
+        conv = await _conv(tmp_path)()
+        agent = conv.agent = _GatedAgent(conv.session.root)
+        turn = asyncio.create_task(conv.aask("go"))
+        await agent.started.wait()
+        await asyncio.wait_for(conv.aclose(), timeout=5)   # proceeds despite the stuck turn
+        assert not conv.session.root.exists()
+        agent.gate.set()
+        await turn
+
+    asyncio.run(run())

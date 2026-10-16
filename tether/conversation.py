@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import aclosing
+import logging
 import shutil
 import time
 from typing import TYPE_CHECKING, Any, AsyncIterator
@@ -23,6 +24,13 @@ if TYPE_CHECKING:
 
     from .api import Result
     from .handles import Handle
+
+
+_log = logging.getLogger(__name__)
+
+# How long ``aclose`` waits for a running turn before tearing down anyway.
+_CLOSE_WAIT_S = 30.0
+_CLOSED = "conversation is closed"
 
 
 class Conversation:
@@ -64,6 +72,9 @@ class Conversation:
         from .api import Result
 
         async with self._lock:
+            if self._closed:   # e.g. queued behind aclose(): the workspace is gone
+                return Result(final_text="", handles={}, files=[],
+                              session_dir=self.session.root, error=f"RuntimeError: {_CLOSED}")
             final_text, error = "", None
             try:
                 response = await self.agent.run(question, session=self.agent_session)
@@ -89,6 +100,8 @@ class Conversation:
         from . import agui
 
         async with self._lock:
+            if self._closed:
+                raise RuntimeError(_CLOSED)
             self.last_activity = time.monotonic()
             try:
                 async with aclosing(agui.agui_event_stream(
@@ -111,6 +124,8 @@ class Conversation:
 
         Raises ``RuntimeError`` while a turn is running; use ``aadd_input`` to wait instead.
         """
+        if self._closed:
+            raise RuntimeError(_CLOSED)
         if self._lock.locked():
             raise RuntimeError("cannot add an input while a turn is running; use aadd_input()")
         return self.session.add_input(source, input_id=input_id, name=name,
@@ -122,17 +137,36 @@ class Conversation:
         """Ingest a user upload, waiting for any running turn to finish first. The copy runs
         in a worker thread so a large upload does not stall the event loop."""
         async with self._lock:
+            if self._closed:
+                raise RuntimeError(_CLOSED)
             return await asyncio.to_thread(
                 self.session.add_input, source, input_id=input_id, name=name,
                 content_type=content_type, description=description)
 
     async def aclose(self) -> None:
-        """Tear down the workspace (MCP + bus), then reap the root unless retained. Idempotent."""
+        """Tear down the workspace (MCP + bus), then reap the root unless retained. Idempotent.
+
+        Waits (up to ``_CLOSE_WAIT_S``) for a running turn to finish first, so the root is
+        never removed under a turn that is still using it; turns queued behind the close see
+        the conversation closed and do not run. If the wait times out, teardown proceeds
+        anyway (logged), since a host closing a conversation must be able to reclaim it.
+        """
         if self._closed:
             return
         self._closed = True   # mark closed up front: a teardown failure isn't retried
+        acquired = False
+        try:
+            await asyncio.wait_for(self._lock.acquire(), timeout=_CLOSE_WAIT_S)
+            acquired = True
+        except TimeoutError:
+            _log.warning("conversation %s: a turn was still running after %.0fs; closing "
+                         "anyway", self.id, _CLOSE_WAIT_S)
         try:
             await self.session.__aexit__(None, None, None)
         finally:
-            if self.reap_on_close and self.session.root.exists():
-                shutil.rmtree(self.session.root, ignore_errors=True)
+            try:
+                if self.reap_on_close and self.session.root.exists():
+                    shutil.rmtree(self.session.root, ignore_errors=True)
+            finally:
+                if acquired:
+                    self._lock.release()

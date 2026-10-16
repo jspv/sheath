@@ -196,3 +196,24 @@ def test_closing_agui_stream_leaves_conversation_idle_immediately(tmp_path, monk
         await h.aclose_sessions()
 
     asyncio.run(run())
+
+
+def test_manager_close_waits_for_a_running_turn(tmp_path):
+    from tests.test_conversation import _GatedAgent
+
+    async def run():
+        m = SessionManager(_tether(tmp_path))
+        c = await m.aopen("t1")
+        root = c.session.root
+        agent = c.agent = _GatedAgent(root)
+        turn = asyncio.create_task(c.aask("go"))
+        await agent.started.wait()
+        closing = asyncio.create_task(m.close("t1"))
+        await asyncio.sleep(0.05)
+        assert root.exists() and not closing.done()
+        agent.gate.set()
+        await turn
+        await closing
+        assert agent.root_seen_during_turn is True and not root.exists()
+
+    asyncio.run(run())
