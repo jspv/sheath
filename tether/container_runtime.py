@@ -141,6 +141,7 @@ def ensure_image(runtime: str, tag: str, config: SandboxConfig,
             f"sandbox image {tag} is not present and build_on_demand is disabled. "
             f"Pre-build it with: {build_command_hint(config)}")
     build = [runtime, "build", "-t", tag,
+             "--build-arg", f"PYTHON_VERSION={sys.version_info.major}.{sys.version_info.minor}",
              "--build-arg", f"PREINSTALLED={' '.join(config.preinstalled)}",
              "-f", str(_CONTAINERFILE), str(_RUNTIME_DIR)]
     budget = config.build_timeout_s if timeout_s is None else timeout_s

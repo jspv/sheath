@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import os
 from contextlib import aclosing
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,6 +57,13 @@ def expand_tools(tools: list | None) -> list:
     return [t.build() if isinstance(t, ToolFactory) else t for t in (tools or [])]
 
 
+def _dotenv_value(name: str) -> str | None:
+    """Read one value from ./.env without touching os.environ."""
+    from dotenv import dotenv_values
+
+    return dotenv_values(".env").get(name)
+
+
 class Tether:
     """Reusable tether: builds a Session per run via the composable create_agent path."""
 
@@ -64,7 +73,15 @@ class Tether:
                  on_status: _StatusSink | None = None,
                  agent_instructions: str | None = None,
                  on_publish: OnPublish | None = None) -> None:
-        self.config = config or TetherConfig()
+        cfg = config or TetherConfig()
+        if cfg.search.api_key is None:
+            key = os.environ.get("TAVILY_API_KEY") or _dotenv_value("TAVILY_API_KEY")
+            if key:
+                # A copy: constructing a Tether must not rewrite the caller's config, and
+                # must not export a .env file into this process's environment.
+                cfg = dataclasses.replace(
+                    cfg, search=dataclasses.replace(cfg.search, api_key=key))
+        self.config = cfg
         self._agent_instructions = agent_instructions
         self._on_publish = on_publish
         self._client = client
@@ -72,12 +89,6 @@ class Tether:
         self._bundles = bundles
         self._on_status = on_status
         self._manager = None
-        if self.config.search.api_key is None:
-            import os
-
-            from dotenv import load_dotenv
-            load_dotenv()
-            self.config.search.api_key = os.environ.get("TAVILY_API_KEY")
 
     def _make_client(self):
         if self._client is not None:

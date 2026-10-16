@@ -2718,6 +2718,7 @@ dependencies = [
     { name = "mcp" },
     { name = "pandas" },
     { name = "pyarrow" },
+    { name = "python-dotenv" },
     { name = "trafilatura" },
 ]
 
@@ -2745,6 +2746,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=1.27" },
     { name = "pandas", specifier = ">=2.0" },
     { name = "pyarrow", specifier = ">=15.0" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "trafilatura", specifier = ">=2.0.0" },
 ]
 provides-extras = ["agui", "docling"]

@@ -298,3 +298,31 @@ def test_a_failed_probe_is_not_cached(monkeypatch):
         require_usable_runtime(None, run=run)
     state["up"] = True                                  # the user starts their VM
     assert require_usable_runtime(None, run=run) == "podman"
+
+
+def test_image_build_targets_the_host_python_version():
+    import sys
+    import types
+    from tether.config import SandboxConfig
+    from tether.container_runtime import ensure_image
+
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv)
+        missing = argv[1:3] == ["image", "inspect"]
+        return types.SimpleNamespace(returncode=1 if missing else 0, stdout="", stderr="")
+
+    ensure_image("podman", "tether-sandbox:x",
+                 SandboxConfig(backend="container", build_on_demand=True), run)
+    build = calls[-1]
+    assert build[:2] == ["podman", "build"]
+    want = f"PYTHON_VERSION={sys.version_info.major}.{sys.version_info.minor}"
+    assert want in build and build[build.index(want) - 1] == "--build-arg"
+
+
+def test_containerfile_takes_the_python_version_as_an_argument():
+    from tether.container_runtime import _CONTAINERFILE
+    text = _CONTAINERFILE.read_text()
+    assert "ARG PYTHON_VERSION=3.12" in text
+    assert "FROM python:${PYTHON_VERSION}-slim" in text

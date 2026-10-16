@@ -185,3 +185,31 @@ def test_asolve_expands_factories_per_call(tmp_path):
 
     asyncio.run(run())
     assert len(built) == 2           # one instance per one-shot conversation
+
+
+def test_constructor_reads_dotenv_without_exporting_it(tmp_path, monkeypatch):
+    import os
+    from tether import Tether, TetherConfig
+    from tether.testing import StubChatClient, text
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("SOME_OTHER_SECRET", raising=False)
+    (tmp_path / ".env").write_text("TAVILY_API_KEY=tvly-from-file\nSOME_OTHER_SECRET=s3cret\n")
+    cfg = TetherConfig()
+    h = Tether(cfg, client=StubChatClient([text("x")]))
+    assert h.config.search.api_key == "tvly-from-file"
+    assert cfg.search.api_key is None                  # the caller's object is untouched
+    assert "TAVILY_API_KEY" not in os.environ and "SOME_OTHER_SECRET" not in os.environ
+
+
+def test_environment_key_wins_over_dotenv_and_explicit_key_wins_over_both(tmp_path, monkeypatch):
+    from tether import Tether, TetherConfig
+    from tether.config import SearchConfig
+    from tether.testing import StubChatClient, text
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("TAVILY_API_KEY=from-file\n")
+    monkeypatch.setenv("TAVILY_API_KEY", "from-env")
+    client = StubChatClient([text("x")])
+    assert Tether(TetherConfig(), client=client).config.search.api_key == "from-env"
+    explicit = TetherConfig(search=SearchConfig(api_key="explicit"))
+    assert Tether(explicit, client=client).config is explicit
