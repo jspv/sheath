@@ -10,6 +10,7 @@ imports it (and ``ag_ui``) lazily so the tether core never depends on it.
 from __future__ import annotations
 
 import asyncio
+from contextlib import aclosing, nullcontext
 from typing import Any, AsyncIterator, Callable
 
 from .status import StatusBus, StatusEvent
@@ -46,10 +47,13 @@ async def merge_status(events: AsyncIterator[Any], bus: StatusBus,
 
     unsubscribe = bus.subscribe(_sink)
     try:
-        async for event in events:
-            while not queue.empty():
-                yield queue.get_nowait()
-            yield event
+        # Close the source deterministically on early exit (it may be a plain async iterable).
+        with_close = aclosing(events) if hasattr(events, "aclose") else nullcontext(events)
+        async with with_close as source:
+            async for event in source:
+                while not queue.empty():
+                    yield queue.get_nowait()
+                yield event
         await asyncio.sleep(0)          # let any last call_soon_threadsafe put land
         while not queue.empty():
             yield queue.get_nowait()
@@ -126,5 +130,6 @@ async def agui_event_stream(agent: Any, bus: StatusBus, input_data: dict[str, An
     if messages:
         input_data = {**input_data, "messages": repair_tool_message_order(messages)}
     afa = AgentFrameworkAgent(agent, **agui_kwargs)
-    async for event in merge_status(afa.run(input_data), bus, status_to_agui):
-        yield event
+    async with aclosing(merge_status(afa.run(input_data), bus, status_to_agui)) as merged:
+        async for event in merged:
+            yield event

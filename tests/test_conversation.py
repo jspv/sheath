@@ -169,3 +169,35 @@ def test_closing_agui_stream_tears_down_inner_stream_while_lock_held(tmp_path, m
         await conv.aclose()
 
     asyncio.run(run())
+
+
+def test_closing_agui_stream_closes_agent_stream_and_status_merge_under_lock(tmp_path, monkeypatch):
+    import pytest
+    agui_pkg = pytest.importorskip("agent_framework_ag_ui")
+
+    async def run():
+        conv = await _conv(tmp_path)()
+        seen = []
+
+        class FakeAFA:
+            def __init__(self, agent, **kwargs):
+                pass
+
+            async def run(self, input_data):
+                try:
+                    yield "a"
+                    yield "b"
+                finally:
+                    seen.append((conv.busy, len(conv.session.status_bus._subscribers)))
+
+        monkeypatch.setattr(agui_pkg, "AgentFrameworkAgent", FakeAFA)
+        stream = conv.astream_agui({"messages": []})
+        assert await stream.__anext__() == "a"
+        assert len(conv.session.status_bus._subscribers) == 1
+        await stream.aclose()
+        assert seen == [(True, 1)]               # agent stream closed while lock held
+        assert conv.session.status_bus._subscribers == []
+        assert not conv.busy
+        await conv.aclose()
+
+    asyncio.run(run())
