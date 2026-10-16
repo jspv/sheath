@@ -4,6 +4,60 @@ All changes are additive: existing call sites keep working with the defaults.
 
 ## Unreleased
 
+### Workspace trust zones and bounded I/O
+- **Security fix:** sandboxed code could plant a symlink in the session root that the
+  harness then read or wrote through, reaching host files outside the root from the
+  container tier. `handles/`, `inputs/`, `.scripts/` and the new `.tether/` are now mounted
+  read-only into the container; sandbox-to-harness data travels only through a per-run
+  exchange directory read with no-follow, size-capped opens; saved payloads are moved into
+  `handles/` by the harness. A replaced protected directory raises `WorkspaceTamperedError`.
+- **Behavior change:** scripts can no longer write into `handles/`, `inputs/` or `.scripts/`
+  directly (container tier); use `save(id, obj)`. `save()` ids must match
+  `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. `write_file` refuses those directories.
+- **Behavior change:** the manifest moved to `.tether/manifest.json` (an existing
+  `handles/_manifest.json` is migrated on open). `read_document` scratch files moved to
+  `.tether/tmp/`.
+- **Behavior change:** one-shot roots are `./.tether/runs/run-XXXXXXXX` (atomic allocation),
+  no longer `./.tether/sessions/<N>`.
+- `HandleStore` is thread-safe and writes atomically; parallel tool calls in one turn no
+  longer fail on the manifest.
+- File tools hold the session lock, read only regular files, and are bounded; `read_file`
+  rejects binary files with a clear error.
+- `run_python` output is capped (`SandboxConfig.max_output_bytes`, default 8192 per stream)
+  and a large emitted result is stored as a handle (the tool returns
+  `{"spilled": true, "note": ..., "handle": {...}}`). When a run ends, normally or by
+  timeout, the local tier kills the child's whole process group.
+- `inspect_handle` is capped, clamps `rows` to 100, reads text/JSON previews raw and
+  bounded (JSON is no longer pretty-printed), and `stats=True` now returns footer
+  min/max/null_count instead of `describe()`; min/max are null when any non-empty row group
+  lacks them. A first row group over 16 MiB yields no head rows (`head_omitted`), and the
+  same guard omits the handle-summary preview. `publish_handle` converts dataframes inside
+  the sandbox.
+- **API change:** `egress.guarded_get` is replaced by `egress.guarded_fetch`, which streams
+  with a byte cap, enforces `FetchConfig.total_timeout_s` (120 s), checks each hop's scheme,
+  and returns a `FetchedBody`. The deadline is enforced by a watchdog that shuts down the
+  connections opened during the call and raises `FetchDeadlineExceeded` (an
+  `httpx.HTTPError`); it does not bound DNS resolution in `validate_url`, and the TCP/TLS
+  connect is bounded only by the client's per-phase timeout (`FetchConfig.timeout_s`). New
+  `FetchConfig.max_bytes_ceiling` (100 MB) clamps a model-supplied `max_bytes`.
+- `read_document` refuses (rather than truncates) a URL download larger than
+  `FetchConfig.max_bytes`, and caps a workspace path at `TetherConfig.max_input_bytes`
+  while copying it privately.
+- AG-UI turns take the conversation lock and count as activity, so `idle_ttl_s` no longer
+  reaps an active thread (a stream a server never closes keeps the conversation exempt);
+  conversation ids are validated as a single safe path segment (`aopen("")` is rejected).
+  Sync `Conversation.add_input` raises while an AG-UI stream or `aask` turn is open; use
+  `aadd_input`.
+- **Behavior change:** `Tether(...)` no longer calls `load_dotenv()` or mutates the config
+  passed in. `TAVILY_API_KEY` is read from the environment, then from `./.env` in the
+  current working directory; other `.env` values (such as `OPENAI_API_KEY`) are no longer
+  exported into `os.environ` -- the built-in OpenAI client reads `.env` itself.
+  `python-dotenv` is a declared dependency.
+- The sandbox image is built for the host's Python `major.minor`.
+- CI runs lint and tests on push and pull request; publishing requires them. The
+  container-tier tests run in CI when a runtime is usable (ubuntu-latest has one) and
+  build the sandbox image there.
+
 ### Isolation is on by default
 - **Behavior change:** `SandboxConfig.backend` now defaults to `"container"`, not `"local"`.
   `run_python` executes model-authored code, so the shipped default is a real boundary.
@@ -22,8 +76,7 @@ All changes are additive: existing call sites keep working with the defaults.
 - Handle records are immutable: reusing an id is refused (`HandleIdReuseError`) and reported
   back to the model.
 - A content digest is recorded when metadata is derived and checked on every read; a
-  mismatch raises `HandleTamperedError`. The digest covers the file's length plus its first
-  64 KiB.
+  mismatch raises `HandleTamperedError`. The digest covers the file's length, its first 64 KiB and its last 64 KiB.
 - New `TetherConfig.max_emit_bytes` (1 MiB), `max_control_bytes` (8 MiB) and
   `max_new_handles` (256) bound the parent↔sandbox control channel.
 
