@@ -38,6 +38,14 @@ _RM_TIMEOUT_S = 30.0
 _RECHECK_TIMEOUT_S = 10.0    # per runtime call when re-checking a quarantined container
 
 
+def _says_no_such_container(output: str) -> bool:
+    """True only for the runtime's own missing-container message (podman: ``no such
+    container``; docker: ``No such container:``). Never the bare "no such", which also
+    matches a socket error ("connect: no such file or directory") from an unreachable
+    runtime that says nothing about whether the container is still running."""
+    return "no such container" in output.lower()
+
+
 class ContainerSandbox(_OrchestratedSandbox):
     def __init__(self, root: Path | str, store, config: SandboxConfig | None = None,
                  runtime: str | None = None,
@@ -158,8 +166,10 @@ class ContainerSandbox(_OrchestratedSandbox):
     def _confirm_gone(self, name: str, timeout: float) -> tuple[bool, str]:
         """Force-remove container ``name``; return (confirmed gone, failure detail).
 
-        Gone means ``rm -f`` exited 0, or the runtime reports there is no such container
-        (``rm -f`` of an already-removed container fails on some runtimes).
+        Gone means ``rm -f`` exited 0, or the runtime reports there is no such *container*
+        (``rm -f`` of an already-removed container fails on some runtimes). Any other failure
+        -- including an unreachable runtime, whose socket error reads "no such file or
+        directory" -- is not gone: the container may still be running.
         """
         detail = ""
         try:
@@ -168,6 +178,8 @@ class ContainerSandbox(_OrchestratedSandbox):
             if proc.returncode == 0:
                 return True, ""
             detail = proc.stderr.strip()
+            if _says_no_such_container(proc.stderr + proc.stdout):
+                return True, ""
         except (subprocess.TimeoutExpired, OSError) as e:
             detail = str(e)
         try:
@@ -175,7 +187,7 @@ class ContainerSandbox(_OrchestratedSandbox):
                                   capture_output=True, text=True, timeout=timeout)
         except (subprocess.TimeoutExpired, OSError):
             return False, detail
-        if proc.returncode != 0 and "no such" in (proc.stderr + proc.stdout).lower():
+        if proc.returncode != 0 and _says_no_such_container(proc.stderr + proc.stdout):
             return True, ""
         return False, detail
 

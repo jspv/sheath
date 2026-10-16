@@ -65,6 +65,10 @@ All changes are additive: existing call sites keep working with the defaults.
   quarantines the session: later runs and file tools retry removing that exact container
   and raise `SandboxQuarantinedError` (new, exported) until it is gone. A container that
   had already exited is no longer misreported as orphaned.
+- **Security fix:** an unreachable container runtime (e.g. a missing socket, whose error
+  reads "no such file or directory") no longer counts as "container gone": the timed-out
+  run is reported orphaned and an existing quarantine stays until the runtime itself says
+  `no such container`.
 - **Security fix:** the Python `search` fallback runs in a child process killed after 30 s,
   so a catastrophic regex no longer freezes the host process.
 - `Conversation.aclose` (and `SessionManager.close`/`aclose`) waits up to 30 s for a running

@@ -21,6 +21,9 @@ class _FakeRuntime:
         self.calls: list[list[str]] = []
         self.run_names: list[str] = []
         self.run_times_out = True
+        # When set, both `rm -f` and `container inspect` fail with exactly this text
+        # (what a real runtime prints when e.g. its socket is unreachable).
+        self.fail_text: str | None = None
 
     def bounded(self, argv, **kw):
         self.calls.append(argv)
@@ -32,6 +35,9 @@ class _FakeRuntime:
 
     def run(self, argv, **kw):
         self.calls.append(argv)
+        if self.fail_text is not None and (argv[1:3] in (["rm", "-f"],
+                                                          ["container", "inspect"])):
+            return subprocess.CompletedProcess(argv, 125, "", self.fail_text)
         if argv[1:3] == ["rm", "-f"]:
             return subprocess.CompletedProcess(argv, 0 if self.rm_ok else 125, "",
                                                "" if self.rm_ok else "Error: stuck")
@@ -138,6 +144,72 @@ def test_false_orphan_when_rm_fails_but_container_is_gone(tmp_path, monkeypatch)
     res = sb.run_code("1")
     assert res.killed_by == "timeout" and "could not be stopped" not in (res.error or "")
     sb.check_quarantine()                         # nothing recorded
+
+
+_SOCKET_ERR = ("Error: unable to connect to Podman socket: Get \"http://d/v5.0.0/libpod/_ping\": "
+               "dial unix /run/podman/podman.sock: connect: no such file or directory")
+
+
+def _container_sandbox(tmp_path, monkeypatch, fake):
+    import tether.container_runtime as cr
+    import tether.sandbox_container as sc
+    from tether.handles import HandleStore
+    from tether.sandbox_container import ContainerSandbox
+
+    monkeypatch.setattr(cr, "ensure_image", lambda *a, **k: None)
+    monkeypatch.setattr(sc, "run_bounded", fake.bounded)
+    monkeypatch.setattr(sc.subprocess, "run", fake.run)
+    return ContainerSandbox(root=tmp_path, store=HandleStore(tmp_path), runtime="podman",
+                            config=SandboxConfig(backend="container", timeout_s=1))
+
+
+def test_unreachable_runtime_at_timeout_is_orphaned_not_gone(tmp_path, monkeypatch):
+    # A socket failure mentions "no such file or directory"; it says nothing about the
+    # container, which may still be running.
+    fake = _FakeRuntime()
+    fake.fail_text = _SOCKET_ERR
+    sb = _container_sandbox(tmp_path, monkeypatch, fake)
+    res = sb.run_code("1")
+    assert res.killed_by == "timeout" and "could not be stopped" in (res.error or "")
+    with pytest.raises(SandboxQuarantinedError, match=fake.run_names[0]):
+        sb.run_code("2")
+    assert len(fake.run_names) == 1
+
+
+def test_unreachable_runtime_does_not_clear_an_existing_quarantine(quarantined):
+    sess, fake = quarantined
+    fake.fail_text = _SOCKET_ERR
+    tools = {t.__name__: t for t in sess.tools()}
+    for _ in range(2):
+        with pytest.raises(SandboxQuarantinedError):
+            tools["read_file"]("notes.txt")
+    fake.fail_text = None
+    fake.rm_ok = True
+    assert tools["read_file"]("notes.txt") == "hello"
+
+
+@pytest.mark.parametrize("text", [
+    'Error: no such container "tether-abc"',                         # podman
+    "Error response from daemon: No such container: tether-abc",     # docker
+])
+def test_runtime_no_such_container_message_clears_quarantine(quarantined, text):
+    sess, fake = quarantined
+    fake.fail_text = text
+    tools = {t.__name__: t for t in sess.tools()}
+    assert tools["read_file"]("notes.txt") == "hello"
+
+
+@pytest.mark.parametrize("text", [
+    'Error: no such container "tether-abc"',
+    "Error response from daemon: No such container: tether-abc",
+])
+def test_no_such_container_at_timeout_is_not_orphaned(tmp_path, monkeypatch, text):
+    fake = _FakeRuntime()
+    fake.fail_text = text
+    sb = _container_sandbox(tmp_path, monkeypatch, fake)
+    res = sb.run_code("1")
+    assert res.killed_by == "timeout" and "could not be stopped" not in (res.error or "")
+    sb.check_quarantine()
 
 
 def test_local_sandbox_quarantine_check_is_a_noop(tmp_path):
