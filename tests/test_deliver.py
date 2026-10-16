@@ -338,17 +338,43 @@ def test_aopen_on_publish_overrides_tether_default(tmp_path):
     assert calls == ["override"]
 
 
-def test_publish_handle_xlsx_without_openpyxl_is_an_error(tmp_path, monkeypatch):
+def test_publish_handle_xlsx_reports_a_missing_engine(tmp_path):
+    import importlib.util
     host = _Host()
     sess = _session(tmp_path, host)
     h = sess.store.put(pd.DataFrame({"a": [1]}), source="t")
+    from tether.tools.deliver import publish_handle
+    out = publish_handle(sess, h.id, "xlsx")
+    if importlib.util.find_spec("openpyxl") is None:
+        assert "openpyxl" in out["error"] and host.calls == []
+    else:
+        assert "error" not in out and host.calls[0].name.endswith(".xlsx")
 
-    def no_openpyxl(self, *a, **k):
-        raise ImportError("Missing optional dependency 'openpyxl'")
 
-    monkeypatch.setattr(pd.DataFrame, "to_excel", no_openpyxl)
-    out = _tool(sess, "publish_handle")(h.id, format="xlsx")
-    assert "openpyxl" in out["error"] and host.calls == []
+def test_publish_handle_never_loads_the_dataframe_in_the_parent(tmp_path, monkeypatch):
+    host = _Host()
+    sess = _session(tmp_path, host)
+    h = sess.store.put(pd.DataFrame({"a": [1, 2], "b": ["x", "y"]}), source="t")
+
+    def boom(*a, **k):
+        raise AssertionError("the parent must not load a dataframe handle")
+
+    monkeypatch.setattr(pd, "read_parquet", boom)
+    from tether.tools.deliver import publish_handle
+    out = publish_handle(sess, h.id, "csv", "report")
+    assert "error" not in out, out
+    assert host.copies["report.csv"] == b"a,b\n1,x\n2,y\n"
+    assert not [p for p in (sess.root / "outputs").iterdir() if p.name.startswith(".publish_")]
+
+
+def test_publish_handle_reports_a_failed_conversion(tmp_path):
+    host = _Host()
+    sess = _session(tmp_path, host)
+    h = sess.store.put(pd.DataFrame({"a": [1]}), source="t")
+    (sess.root / h.path).write_bytes(b"not parquet any more")     # digest mismatch
+    from tether.tools.deliver import publish_handle
+    out = publish_handle(sess, h.id, "csv")
+    assert "error" in out and host.calls == []
 
 
 def test_sandbox_publish_disabled_without_deliver_bundle(tmp_path):
