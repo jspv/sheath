@@ -153,18 +153,14 @@ class Tether:
         with the official AG-UI wrapper (CopilotKit replays ``messages``). The thread's workspace
         is reaped only by ``close``/TTL, never at end-of-request. Requires the ``agui`` extra.
         """
-        from .agui import agui_event_stream
-
         thread_id = input_data.get("threadId") or input_data.get("thread_id")
         if not thread_id:
             # The threadId IS the persistence key; without it aopen(None) would mint a fresh,
             # unreachable Conversation per request (an unbounded leak). Fail loud instead.
             raise ValueError("agui_stream requires input_data['threadId']")
-        # No single-flight lock here: AG-UI hosts (e.g. CopilotKit) serialize runs per thread, so
-        # one threadId has at most one in-flight request. A non-serializing host would need the lock.
         conv = await self._sessions().aopen(thread_id, tools=tools)
-        async for event in agui_event_stream(conv.agent, conv.session.status_bus, input_data,
-                                             **agui_kwargs):
+        # The conversation serializes turns and stamps activity; see Conversation.astream_agui.
+        async for event in conv.astream_agui(input_data, **agui_kwargs):
             yield event
 
     def solve(self, problem: str, tools: list | None = None, *,

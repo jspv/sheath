@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import shutil
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from .config import TetherConfig
 from .publish import OnPublish
@@ -72,6 +72,29 @@ class Conversation:
             self.last_activity = time.monotonic()
             return Result(final_text=final_text, handles=dict(self.session.handles),
                           files=self.session.artifacts, session_dir=self.session.root, error=error)
+
+    @property
+    def busy(self) -> bool:
+        """True while a turn (``aask`` or an AG-UI stream) holds this conversation."""
+        return self._lock.locked()
+
+    async def astream_agui(self, input_data: dict, **agui_kwargs: Any) -> AsyncIterator[Any]:
+        """Run one AG-UI turn: serialized with every other turn on this conversation, and
+        counted as activity at its start and its end so an idle TTL measures real idleness.
+
+        The lock is released when the stream is exhausted **or closed**: a server that
+        closes this generator on client disconnect frees the conversation for the next turn.
+        """
+        from . import agui
+
+        async with self._lock:
+            self.last_activity = time.monotonic()
+            try:
+                async for event in agui.agui_event_stream(
+                        self.agent, self.session.status_bus, input_data, **agui_kwargs):
+                    yield event
+            finally:
+                self.last_activity = time.monotonic()
 
     @property
     def inputs(self) -> dict[str, "Handle"]:

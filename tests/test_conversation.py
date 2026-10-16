@@ -74,3 +74,75 @@ def test_conversation_error_is_non_fatal(tmp_path):
         return ok
 
     assert asyncio.run(run())
+
+
+def _conv(tmp_path):
+    async def make():
+        return await Conversation.acreate(
+            id="c1", config=TetherConfig(root_dir=tmp_path / "c1"),
+            client=StubChatClient([text("ok")]), bundles=("files",))
+    return make
+
+
+def _fake_stream(events, gate=None):
+    async def fake(agent, bus, input_data, **kwargs):
+        for e in events:
+            if gate is not None:
+                await gate.wait()
+            yield e
+    return fake
+
+
+def test_agui_turn_holds_the_lock_and_stamps_activity(tmp_path, monkeypatch):
+    async def run():
+        conv = await _conv(tmp_path)()
+        monkeypatch.setattr("tether.agui.agui_event_stream", _fake_stream(["a", "b"]))
+        conv.last_activity = 0.0
+        seen, busy = [], []
+        async for event in conv.astream_agui({"messages": []}):
+            seen.append(event)
+            busy.append(conv.busy)
+        assert seen == ["a", "b"] and busy == [True, True]
+        assert not conv.busy and conv.last_activity > 0.0
+        await conv.aclose()
+
+    asyncio.run(run())
+
+
+def test_agui_turns_on_one_conversation_are_serialized(tmp_path, monkeypatch):
+    async def run():
+        conv = await _conv(tmp_path)()
+        gate = asyncio.Event()
+        monkeypatch.setattr("tether.agui.agui_event_stream", _fake_stream(["x"], gate))
+        order = []
+
+        async def turn(label):
+            async for _ in conv.astream_agui({"messages": []}):
+                order.append(label)
+
+        first = asyncio.create_task(turn("first"))
+        await asyncio.sleep(0.05)
+        second = asyncio.create_task(turn("second"))
+        await asyncio.sleep(0.05)
+        assert conv.busy and order == []
+        gate.set()
+        await asyncio.gather(first, second)
+        assert order == ["first", "second"]
+        await conv.aclose()
+
+    asyncio.run(run())
+
+
+def test_abandoned_agui_stream_releases_the_lock(tmp_path, monkeypatch):
+    async def run():
+        conv = await _conv(tmp_path)()
+        monkeypatch.setattr("tether.agui.agui_event_stream", _fake_stream(["a", "b", "c"]))
+        stream = conv.astream_agui({"messages": []})
+        assert await stream.__anext__() == "a"
+        assert conv.busy
+        await stream.aclose()                     # what a server does on client disconnect
+        assert not conv.busy
+        assert (await conv.aask("still usable?")).error is None
+        await conv.aclose()
+
+    asyncio.run(run())

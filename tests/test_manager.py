@@ -124,3 +124,55 @@ def test_conversation_ids_must_be_a_single_safe_segment(tmp_path, bad):
             await m.aopen(bad)
 
     asyncio.run(run())
+
+
+def test_busy_conversation_is_never_expired(tmp_path):
+    async def run():
+        m = SessionManager(_tether(tmp_path), idle_ttl_s=0.01)
+        conv = await m.aopen("t1")
+        async with conv._lock:                    # a turn is in flight
+            await asyncio.sleep(0.05)             # well past the TTL
+            await m.sweep()
+            assert m.get("t1") is conv and conv.session.root.exists()
+            assert await m.aopen("t1") is conv
+        await m.aclose()
+
+    asyncio.run(run())
+
+
+def test_reopening_a_live_conversation_counts_as_activity(tmp_path):
+    async def run():
+        m = SessionManager(_tether(tmp_path), idle_ttl_s=60)
+        conv = await m.aopen("t1")
+        conv.last_activity -= 30
+        before = conv.last_activity
+        assert await m.aopen("t1") is conv
+        assert conv.last_activity > before
+        await m.aclose()
+
+    asyncio.run(run())
+
+
+def test_agui_stream_keeps_an_active_thread_alive_past_its_ttl(tmp_path, monkeypatch):
+    async def run():
+        h = Tether(TetherConfig(root_dir=tmp_path / "base", idle_ttl_s=0.5),
+                   client=StubChatClient([text("x")]))
+
+        async def fake(agent, bus, input_data, **kwargs):
+            yield "event"
+
+        monkeypatch.setattr("tether.agui.agui_event_stream", fake)
+        convs = []
+        for turn in range(4):                      # 4 turns, 0.2 s apart: 0.6 s > TTL overall
+            async for _ in h.agui_stream({"threadId": "t1", "messages": []}):
+                pass
+            conv = h._sessions().get("t1")
+            convs.append(conv)
+            if turn == 0:
+                (conv.session.root / "kept.txt").write_text("from turn 0")
+            await asyncio.sleep(0.2)
+        assert all(c is convs[0] for c in convs)   # never reaped and recreated
+        assert (convs[0].session.root / "kept.txt").read_text() == "from turn 0"
+        await h.aclose_sessions()
+
+    asyncio.run(run())

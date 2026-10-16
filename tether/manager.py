@@ -64,7 +64,10 @@ class SessionManager:
         self._lock = asyncio.Lock()
 
     def _expired(self, conv: Conversation) -> bool:
-        return self._ttl is not None and (time.monotonic() - conv.last_activity) > self._ttl
+        # A conversation with a turn in flight is by definition not idle.
+        if self._ttl is None or conv.busy:
+            return False
+        return (time.monotonic() - conv.last_activity) > self._ttl
 
     async def aopen(self, session_id: str | None = None, *, tools: list | None = None,
                     bundles: tuple[str, ...] | None = None,
@@ -84,6 +87,9 @@ class SessionManager:
             if session_id is not None:
                 existing = self._store.get(session_id)
                 if existing is not None and not self._expired(existing):
+                    # Opening is activity: without this, a caller could be handed a
+                    # conversation that a sweep reaps before its turn takes the lock.
+                    existing.last_activity = time.monotonic()
                     return existing
                 if existing is not None:               # expired -> reap before recreating
                     self._store.pop(session_id)
