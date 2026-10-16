@@ -1,7 +1,7 @@
 """File tools, all confined to the session root via safe_path.
 
-Every tool holds the session's io_lock, so no sandboxed code runs between a path check and
-its use, and reads only regular files with bounded memory.
+Every tool holds the session's io_lock (via ``Session.file_io``, which also refuses while
+the sandbox is quarantined), so no sandboxed code runs between a path check and its use, and reads only regular files with bounded memory.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ def read_file(session: Session, path: str, offset: int = 0, limit: int = _DEFAUL
     """
     if offset < 0 or limit < 0:
         raise ValueError("offset and limit must be non-negative")
-    with session.io_lock:
+    with session.file_io():
         target = safe_path(session.root, path)
         fd = _open_checked(target, os.O_RDONLY, path)
         try:
@@ -88,7 +88,7 @@ def write_file(session: Session, path: str, content: str) -> str:
     Paths that resolve into a tether-managed directory (handles/, inputs/, .scripts/,
     .tether/) are refused: those hold state the harness vouches for.
     """
-    with session.io_lock:
+    with session.file_io():
         target = safe_path(session.root, path)
         if workspace.is_protected(session.root, target):
             raise ValueError(f"{path!r} is in a directory managed by tether; write elsewhere "
@@ -113,7 +113,7 @@ def list_files(session: Session, path: str = ".") -> list[str]:
     Links and tether's private state directory are skipped. At most ``_MAX_LISTED`` paths
     are returned, followed by a note saying how many were left out.
     """
-    with session.io_lock:
+    with session.file_io():
         base = safe_path(session.root, path or ".")  # "" / None -> the root
         if base.is_file():
             return [base.relative_to(session.root).as_posix()]

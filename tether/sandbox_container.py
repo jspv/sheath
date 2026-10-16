@@ -30,10 +30,12 @@ from .sandbox import (
     _LaunchResult,
     _OrchestratedSandbox,
     _RunContext,
+    SandboxQuarantinedError,
 )
 
 _PIDS_LIMIT = 256
 _RM_TIMEOUT_S = 30.0
+_RECHECK_TIMEOUT_S = 10.0    # per runtime call when re-checking a quarantined container
 
 
 class ContainerSandbox(_OrchestratedSandbox):
@@ -46,6 +48,9 @@ class ContainerSandbox(_OrchestratedSandbox):
         else:
             from .container_runtime import detect_runtime
             self._runtime = detect_runtime(self.config.container_runtime)
+        # Exact names of containers from timed-out runs that the runtime has not confirmed
+        # gone. While any is listed the session is quarantined (see check_quarantine).
+        self._orphans: list[str] = []
 
     def _build_run_argv(self, ctx: _RunContext, tag: str, layer: Path | None,
                         name: str | None = None) -> list[str]:
@@ -116,20 +121,67 @@ class ContainerSandbox(_OrchestratedSandbox):
             # fails the container may still be running in the bind-mounted root, so the run
             # is reported as orphaned and the orchestrator ingests nothing from it.
             note = self._remove_container(name)
+            if note:
+                self._orphans.append(name)
             return _LaunchResult(run.stdout, run.stderr + "\ntether: killed (timeout)" + note,
                                  -1, killed_by="timeout", orphaned=bool(note))
         # 137 == 128 + SIGKILL: the runtime killed the container, typically the memory cap.
         killed_by = "killed" if run.returncode == 137 else None
         return _LaunchResult(run.stdout, run.stderr, run.returncode, killed_by=killed_by)
 
-    def _remove_container(self, name: str) -> str:
-        """Force-remove a container by name; returns a warning suffix if that failed."""
+    def check_quarantine(self) -> None:
+        """Refuse while a container from a timed-out run may still be running.
+
+        Each recorded container is re-removed by its exact name (never anything else); one
+        the runtime confirms gone is dropped from the list. If any remains, raise
+        ``SandboxQuarantinedError``: that container may still be writing in the
+        bind-mounted root, so neither a new run nor parent-side file work may proceed.
+        """
+        with self.lock:
+            if not self._orphans:
+                return
+            still: list[str] = []
+            details: list[str] = []
+            for name in self._orphans:
+                gone, detail = self._confirm_gone(name, _RECHECK_TIMEOUT_S)
+                if not gone:
+                    still.append(name)
+                    details.append(f"{name}: {detail}" if detail else name)
+            self._orphans = still
+            if still:
+                raise SandboxQuarantinedError(
+                    "sandbox quarantined: a timed-out run's container could not be confirmed "
+                    f"stopped and may still be writing in the workspace ({'; '.join(details)}). "
+                    "Nothing will run in or touch the workspace until the container runtime "
+                    f"removes it (e.g. `{self._runtime} rm -f {still[0]}`); every call retries.")
+
+    def _confirm_gone(self, name: str, timeout: float) -> tuple[bool, str]:
+        """Force-remove container ``name``; return (confirmed gone, failure detail).
+
+        Gone means ``rm -f`` exited 0, or the runtime reports there is no such container
+        (``rm -f`` of an already-removed container fails on some runtimes).
+        """
+        detail = ""
         try:
             proc = subprocess.run([self._runtime, "rm", "-f", name], capture_output=True,
-                                  text=True, timeout=_RM_TIMEOUT_S)
+                                  text=True, timeout=timeout)
+            if proc.returncode == 0:
+                return True, ""
+            detail = proc.stderr.strip()
         except (subprocess.TimeoutExpired, OSError) as e:
-            return f"\ntether: WARNING: could not remove timed-out container {name}: {e}"
-        if proc.returncode != 0:
-            return (f"\ntether: WARNING: could not remove timed-out container {name}: "
-                    f"{proc.stderr.strip()}")
-        return ""
+            detail = str(e)
+        try:
+            proc = subprocess.run([self._runtime, "container", "inspect", name],
+                                  capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError):
+            return False, detail
+        if proc.returncode != 0 and "no such" in (proc.stderr + proc.stdout).lower():
+            return True, ""
+        return False, detail
+
+    def _remove_container(self, name: str) -> str:
+        """Force-remove a container by name; returns a warning suffix if that failed."""
+        gone, detail = self._confirm_gone(name, _RM_TIMEOUT_S)
+        if gone:
+            return ""
+        return f"\ntether: WARNING: could not remove timed-out container {name}: {detail}"

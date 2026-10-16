@@ -60,6 +60,12 @@ class SandboxRuntimeUnavailable(RuntimeError):
     isolation is required and the selected backend cannot provide it."""
 
 
+class SandboxQuarantinedError(RuntimeError):
+    """A sandbox run could not be confirmed stopped (an orphaned container may still be
+    running in the workspace). Until the runtime confirms it is gone, no run starts and no
+    parent-side file work touches the root."""
+
+
 @dataclass
 class ControlPlaneLimits:
     """Bounds on the parent<->child control channel. Defaults mirror TetherConfig."""
@@ -119,8 +125,16 @@ class _OrchestratedSandbox:
         self.publisher: Publisher | None = None   # set by Session when the host can receive files
         self.lock = threading.RLock()             # shared with the Session; see class docstring
 
+    def check_quarantine(self) -> None:
+        """Raise ``SandboxQuarantinedError`` while an earlier run may still be running.
+
+        A no-op here: the local tier's child is always killed with its process group. The
+        container backend overrides it. Call with ``self.lock`` held.
+        """
+
     def run_code(self, code: str, args: list[str] | None = None) -> ExecResult:
         with self.lock:
+            self.check_quarantine()
             workspace.verify_layout(self.root)   # .scripts/ must be a real directory
             scripts = self.root / _SCRIPTS_DIR
             # Collision-free across instances/processes; scripts persist as debuggable artifacts.
@@ -133,6 +147,7 @@ class _OrchestratedSandbox:
 
     def run_script(self, path: str, args: list[str] | None = None) -> ExecResult:
         with self.lock:
+            self.check_quarantine()
             return self._run_script(path, args)
 
     def _run_script(self, path: str, args: list[str] | None) -> ExecResult:

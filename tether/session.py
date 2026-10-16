@@ -10,6 +10,8 @@ import stat
 import tempfile
 import threading
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
@@ -21,7 +23,7 @@ from .paths import safe_filename, validate_segment
 from .publish import OnPublish, PublishError, validate_publication
 from .sandbox import (
     ControlPlaneLimits, LocalSubprocessSandbox, NoSandboxIsolationWarning,
-    SandboxExecutor, SandboxRuntimeUnavailable,
+    SandboxExecutor, SandboxQuarantinedError, SandboxRuntimeUnavailable,
 )
 from .status import StatusBus, StatusEvent, bind_bus
 
@@ -93,6 +95,17 @@ class Session:
             out.append(rel.as_posix())
         return out
 
+    @contextmanager
+    def file_io(self) -> Iterator[None]:
+        """Hold ``io_lock`` for parent-side file work in the root, after the sandbox's
+        quarantine check: while a timed-out container may still be running in the root,
+        this raises ``SandboxQuarantinedError`` instead of letting the work start."""
+        with self.io_lock:
+            check = getattr(self.sandbox, "check_quarantine", None)
+            if check is not None:
+                check()
+            yield
+
     def subscribe(self, callback: Callable[[StatusEvent], None]) -> Callable[[], None]:
         """Register a status subscriber; returns a zero-arg unsubscribe handle."""
         return self.status_bus.subscribe(callback)
@@ -131,12 +144,25 @@ class Session:
         copies the context; the callback must therefore be thread-safe). The callback gets a
         private snapshot outside the workspace (``PublishedFile.path``), copied from the
         validated bytes and deleted when the callback returns. Holds the sandbox lock, so no
-        sandboxed code runs meanwhile. Never raises for a bad request or a failing callback:
+        sandboxed code runs meanwhile, and refuses while the sandbox is quarantined. Never raises for a bad request or a failing callback:
         the result carries ``error`` so the agent loop can continue.
         """
         if self.on_publish is None:
             return {"error": "publishing is not enabled for this session", "path": path}
-        with self.io_lock, tempfile.TemporaryDirectory(prefix="tether-publish-") as snap:
+        try:
+            with self.file_io():
+                out = self._publish(path, name=name, description=description, source=source)
+        except SandboxQuarantinedError as e:
+            return {"error": str(e), "path": path}
+        if "error" not in out:
+            self.status_bus.emit(StatusEvent(tool="publish_file",
+                                             message=f"published {out['name']} "
+                                                     f"({out['size']} bytes)"))
+        return out
+
+    def _publish(self, path: str, *, name: str | None, description: str | None,
+                 source: str) -> dict:
+        with tempfile.TemporaryDirectory(prefix="tether-publish-") as snap:
             try:
                 pf = validate_publication(self.root, path, name=name, description=description,
                                           source=source, max_bytes=self.config.max_publish_bytes,
@@ -150,8 +176,6 @@ class Session:
             except Exception as e:  # noqa: BLE001 - a host failure is reported, not fatal
                 return {**record,
                         "error": f"host rejected the publication: {type(e).__name__}: {e}"}
-        self.status_bus.emit(StatusEvent(tool="publish_file",
-                                         message=f"published {pf.name} ({pf.size} bytes)"))
         return {**record, "host": host}
 
     @property
@@ -168,9 +192,10 @@ class Session:
         restarts, via the manifest). The file is made read-only (``0444``); the container tier
         additionally mounts ``inputs/`` read-only. Not safe to call while a turn is running —
         use ``Conversation.add_input`` / ``aadd_input``, which enforce that. Holds the sandbox
-        lock, so no sandboxed code can swap paths under ``inputs/`` while it writes.
+        lock, so no sandboxed code can swap paths under ``inputs/`` while it writes; raises
+        ``SandboxQuarantinedError`` while the sandbox is quarantined.
         """
-        with self.io_lock:
+        with self.file_io():
             return self._add_input(source, input_id=input_id, name=name,
                                    content_type=content_type, description=description)
 

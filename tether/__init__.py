@@ -8,7 +8,8 @@ from .publish import OnPublish, PublishedFile, PublishError
 from .container_runtime import (PreflightReport, SandboxImageError, SandboxImageMissing,
                                 sandbox_preflight)
 from .sandbox import (ExecResult, LocalSubprocessSandbox, NoSandboxIsolationWarning,
-                      SandboxExecutor, SandboxRuntimeUnavailable)
+                      SandboxExecutor, SandboxQuarantinedError,
+                      SandboxRuntimeUnavailable)
 from .sandbox_container import ContainerSandbox
 from .session import Session
 from .conversation import Conversation
@@ -24,7 +25,8 @@ __all__ = [
     "Handle", "HandleStore",
     "PathEscapesRootError", "safe_path",
     "OnPublish", "PublishedFile", "PublishError",
-    "ExecResult", "LocalSubprocessSandbox", "SandboxExecutor", "SandboxRuntimeUnavailable",
+    "ExecResult", "LocalSubprocessSandbox", "SandboxExecutor", "SandboxQuarantinedError",
+    "SandboxRuntimeUnavailable",
     "NoSandboxIsolationWarning",
     "PreflightReport", "SandboxImageError", "SandboxImageMissing", "sandbox_preflight",
     "ContainerSandbox",

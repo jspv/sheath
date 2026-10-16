@@ -27,6 +27,7 @@ import httpx
 from .. import workspace
 from ..egress import BlockedAddressError, guarded_fetch
 from ..paths import PathEscapesRootError, safe_path
+from ..sandbox import SandboxQuarantinedError
 from ..session import Session
 from ..status import report_progress
 from .files import _open_checked
@@ -110,7 +111,7 @@ def _snapshot(session: Session, source: str) -> Path:
     can run; conversion (slow) then happens on the private copy, outside the lock.
     """
     limit = session.config.max_input_bytes
-    with session.io_lock:
+    with session.file_io():
         target = safe_path(session.root, source)
         fd = _open_checked(target, os.O_RDONLY, source)
         with open(fd, "rb") as src:
@@ -162,7 +163,7 @@ def read_document(session: Session, source: str,
             scratch = _snapshot(session, source)
         except PathEscapesRootError:
             return {"error": f"path escapes the workspace root: {source!r}", "source": source}
-        except (OSError, ValueError) as e:
+        except (OSError, ValueError, SandboxQuarantinedError) as e:
             return {"error": f"could not read {source!r}: {e}", "source": source}
     else:
         return {"error": f"unsupported source scheme {scheme!r}; pass a workspace path or a "

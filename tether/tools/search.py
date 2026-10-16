@@ -72,7 +72,7 @@ def search(session: Session, pattern: str, path: str = ".", glob: str | None = N
     """
     max_matches = max(1, min(int(max_matches), _MAX_MATCHES))
     _check_glob(glob)
-    with session.io_lock:
+    with session.file_io():
         base = safe_path(session.root, path or ".")  # "" / None -> the root
         mode = os.stat(base).st_mode
         if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):

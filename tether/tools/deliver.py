@@ -16,6 +16,7 @@ from pathlib import Path
 from .. import workspace
 from ..handles import HandleTamperedError
 from ..paths import safe_filename
+from ..sandbox import SandboxQuarantinedError
 from ..session import Session, _ensure_real_dir
 
 _OUTPUTS = "outputs"
@@ -53,8 +54,11 @@ def publish_handle(session: Session, handle_id: str, format: str | None = None,
     Holds the session's sandbox lock throughout, so no sandboxed code can swap ``outputs/``
     between the containment check and the write.
     """
-    with session.io_lock:
-        return _publish_handle(session, handle_id, format, name, description)
+    try:
+        with session.file_io():
+            return _publish_handle(session, handle_id, format, name, description)
+    except SandboxQuarantinedError as e:
+        return {"error": str(e)}
 
 
 def _publish_handle(session: Session, handle_id: str, format: str | None, name: str | None,
