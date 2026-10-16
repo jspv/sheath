@@ -74,6 +74,10 @@ All changes are additive: existing call sites keep working with the defaults.
 - `Conversation.aclose` (and `SessionManager.close`/`aclose`) waits up to 30 s for a running
   turn before tearing the workspace down; turns that start after the close see the
   conversation closed (`aask` returns an error, `astream_agui`/`aadd_input` raise).
+- `SessionManager.aopen` reaps an expired conversation outside the manager lock, so a slow
+  teardown no longer stalls opens of other ids; opens of the same id (and opens racing a
+  `sweep`/`close` of it) wait until the old workspace is removed, so the replacement's root
+  is never deleted from under it.
 - CI runs lint and tests on push and pull request; publishing requires them. The
   container-tier tests run in CI when a runtime is usable (ubuntu-latest has one) and
   build the sandbox image there.

@@ -62,6 +62,8 @@ class SessionManager:
         self._ttl = idle_ttl_s
         self._store: ConversationStore = store or InMemoryConversationStore()
         self._lock = asyncio.Lock()
+        # Ids whose popped conversation is still tearing down; aopen of such an id waits.
+        self._reaping: dict[str, asyncio.Event] = {}
 
     def _expired(self, conv: Conversation) -> bool:
         # A conversation with a turn in flight is by definition not idle.
@@ -78,39 +80,73 @@ class SessionManager:
         Open-or-create is serialized behind a single manager lock so a concurrent ``aopen`` of the
         same id returns the same Conversation rather than racing two builds. The lock is held across
         ``Conversation.acreate`` (which connects MCP), so a slow connect for one id delays other
-        opens — acceptable at v1's scale; a per-id lock is the fast-follow if it bites.
+        opens — acceptable at v1's scale; a per-id lock is the fast-follow if it bites. Reaping
+        an expired conversation (whose teardown may wait for a running turn) happens outside
+        the manager lock; only opens of that same id wait for it.
 
         ``agent_instructions`` and ``on_publish`` override the Tether defaults for a conversation
         being *created*; re-opening a live id returns the existing conversation unchanged.
         """
-        async with self._lock:
-            if session_id is not None:
-                existing = self._store.get(session_id)
-                if existing is not None and not self._expired(existing):
-                    # Opening is activity: without this, a caller could be handed a
-                    # conversation that a sweep reaps before its turn takes the lock.
-                    existing.last_activity = time.monotonic()
-                    return existing
-                if existing is not None:               # expired -> reap before recreating
+        while True:
+            async with self._lock:
+                reaping = self._reaping.get(session_id) if session_id is not None else None
+                if reaping is None:
+                    existing = (self._store.get(session_id) if session_id is not None
+                                else None)
+                    if existing is None:
+                        return await self._create(session_id, tools=tools, bundles=bundles,
+                                                  agent_instructions=agent_instructions,
+                                                  on_publish=on_publish)
+                    if not self._expired(existing):
+                        # Opening is activity: without this, a caller could be handed a
+                        # conversation that a sweep reaps before its turn takes the lock.
+                        existing.last_activity = time.monotonic()
+                        return existing
+                    # Expired: reap it, but outside the manager lock (its teardown may wait
+                    # up to 30 s for a turn). The reservation makes opens of this id wait.
                     self._store.pop(session_id)
-                    await existing.aclose()
-            conv_id = session_id if session_id is not None else uuid.uuid4().hex
-            config = dataclasses.replace(
-                self._tether.config, root_dir=str(_conv_root(self._tether.config, conv_id)))
-            from .api import expand_tools
+                    done = self._reserve(session_id)
+            if reaping is not None:
+                await reaping.wait()          # another task is tearing this id down
+            else:
+                await self._reap(session_id, existing, done)
+            # Retry: the id is now free (or someone else recreated it first).
 
-            conv = await Conversation.acreate(
-                id=conv_id, config=config, client=self._tether._make_client(),
-                tools=expand_tools(self._tether._tools) + expand_tools(tools),
-                bundles=bundles if bundles is not None else self._tether._bundles,
-                reap_on_close=True,
-                agent_instructions=(agent_instructions if agent_instructions is not None
-                                    else self._tether._agent_instructions),
-                on_publish=(on_publish if on_publish is not None
-                            else self._tether._on_publish),
-            )
-            self._store.put(conv_id, conv)
-            return conv
+    async def _create(self, session_id: str | None, *, tools, bundles, agent_instructions,
+                      on_publish) -> Conversation:
+        conv_id = session_id if session_id is not None else uuid.uuid4().hex
+        config = dataclasses.replace(
+            self._tether.config, root_dir=str(_conv_root(self._tether.config, conv_id)))
+        from .api import expand_tools
+
+        conv = await Conversation.acreate(
+            id=conv_id, config=config, client=self._tether._make_client(),
+            tools=expand_tools(self._tether._tools) + expand_tools(tools),
+            bundles=bundles if bundles is not None else self._tether._bundles,
+            reap_on_close=True,
+            agent_instructions=(agent_instructions if agent_instructions is not None
+                                else self._tether._agent_instructions),
+            on_publish=(on_publish if on_publish is not None
+                        else self._tether._on_publish),
+        )
+        self._store.put(conv_id, conv)
+        return conv
+
+    def _reserve(self, conv_id: str) -> asyncio.Event:
+        """Mark ``conv_id`` as being torn down. Call synchronously right after popping it
+        from the store, so no ``aopen`` can create a replacement whose root (the same
+        per-id directory) the old conversation's teardown would then delete."""
+        done = asyncio.Event()
+        self._reaping[conv_id] = done
+        return done
+
+    async def _reap(self, conv_id: str, conv: Conversation, done: asyncio.Event) -> None:
+        try:
+            await conv.aclose()
+        finally:
+            if self._reaping.get(conv_id) is done:
+                del self._reaping[conv_id]
+            done.set()
 
     def get(self, session_id: str) -> Conversation | None:
         """Live conversation for ``session_id``, or None if absent/expired.
@@ -127,15 +163,18 @@ class SessionManager:
     async def close(self, session_id: str) -> None:
         conv = self._store.pop(session_id)
         if conv is not None:
-            await conv.aclose()
+            await self._reap(session_id, conv, self._reserve(session_id))
 
     async def sweep(self) -> None:
         for conv_id, conv in self._store.items():
-            if self._expired(conv):
+            # Identity check: an earlier reap's await may have let this id be recreated.
+            if self._expired(conv) and self._store.get(conv_id) is conv:
                 self._store.pop(conv_id)
-                await conv.aclose()
+                await self._reap(conv_id, conv, self._reserve(conv_id))
 
     async def aclose(self) -> None:
         for conv_id, conv in self._store.items():
+            if self._store.get(conv_id) is not conv:
+                continue
             self._store.pop(conv_id)
-            await conv.aclose()
+            await self._reap(conv_id, conv, self._reserve(conv_id))

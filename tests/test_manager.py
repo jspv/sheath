@@ -217,3 +217,80 @@ def test_manager_close_waits_for_a_running_turn(tmp_path):
         assert agent.root_seen_during_turn is True and not root.exists()
 
     asyncio.run(run())
+
+
+def _block_teardown(conv):
+    """Make ``conv.aclose`` wait on a gate before running its real teardown."""
+    gate, started = asyncio.Event(), asyncio.Event()
+    real = conv.aclose
+
+    async def blocked():
+        started.set()
+        await gate.wait()
+        await real()
+
+    conv.aclose = blocked
+    return gate, started
+
+
+def test_reaping_an_expired_id_does_not_stall_opens_of_other_ids(tmp_path):
+    async def run():
+        m = SessionManager(_tether(tmp_path), idle_ttl_s=60)
+        old = await m.aopen("t1")
+        old.last_activity -= 1000
+        gate, started = _block_teardown(old)
+        reopen = asyncio.create_task(m.aopen("t1"))
+        await asyncio.wait_for(started.wait(), 2)
+        other = await asyncio.wait_for(m.aopen("t2"), 2)      # not behind t1's teardown
+        assert other.session.root.is_dir()
+        assert not reopen.done()
+        gate.set()
+        new = await asyncio.wait_for(reopen, 5)
+        assert new is not old and new.session.root.is_dir()
+        await m.aclose()
+
+    asyncio.run(run())
+
+
+def test_reopening_an_expired_id_gets_a_root_that_survives_the_old_teardown(tmp_path):
+    async def run():
+        m = SessionManager(_tether(tmp_path), idle_ttl_s=60)
+        old = await m.aopen("t1")
+        old.last_activity -= 1000
+        gate, started = _block_teardown(old)
+        first = asyncio.create_task(m.aopen("t1"))
+        await asyncio.wait_for(started.wait(), 2)
+        second = asyncio.create_task(m.aopen("t1"))           # same id waits for the reap
+        await asyncio.sleep(0.05)
+        assert not first.done() and not second.done()
+        gate.set()
+        a, b = await asyncio.wait_for(asyncio.gather(first, second), 5)
+        assert a is b and a is not old and m.get("t1") is a
+        assert a.session.root == old.session.root and a.session.root.is_dir()
+        (a.session.root / "after.txt").write_text("ok")
+        assert (a.session.root / "after.txt").read_text() == "ok"
+        await m.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("how", ["sweep", "close"])
+def test_open_during_a_sweep_or_close_teardown_keeps_its_root(tmp_path, how):
+    # The old conversation's teardown rmtree's the per-id root; a replacement created while
+    # it is still running must not have its workspace deleted from under it.
+    async def run():
+        m = SessionManager(_tether(tmp_path), idle_ttl_s=60)
+        old = await m.aopen("t1")
+        old.last_activity -= 1000
+        gate, started = _block_teardown(old)
+        reaper = asyncio.create_task(m.sweep() if how == "sweep" else m.close("t1"))
+        await asyncio.wait_for(started.wait(), 2)
+        opener = asyncio.create_task(m.aopen("t1"))
+        await asyncio.sleep(0.05)
+        gate.set()
+        await asyncio.wait_for(reaper, 5)
+        new = await asyncio.wait_for(opener, 5)
+        assert new is not old and new.session.root.is_dir()
+        await m.aclose()
+
+    asyncio.run(run())
