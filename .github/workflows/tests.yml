@@ -5,6 +5,9 @@ on:
   pull_request:
   workflow_call:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Lint and test (Python ${{ matrix.python }})
@@ -28,12 +31,14 @@ jobs:
 
       # The agui extra is included so the AG-UI tests run instead of skipping.
       - name: Sync
-        run: uv sync --prerelease=allow --extra agui
+        run: uv sync --locked --prerelease=allow --extra agui
 
       - name: Lint
         run: uv run ruff check tether tests
 
-      # The suite pins the sandbox to the local tier (tests/conftest.py) and needs no
-      # network or keys. Container-tier tests skip themselves when no runtime is usable.
+      # The suite pins the sandbox to the local tier (tests/conftest.py), and the unit tests
+      # need no network or keys. The container-tier tests run here, not skip: ubuntu-latest
+      # ships a usable container runtime, so they build the sandbox image (pulling the base
+      # image and packages) on each matrix leg. They skip only when no runtime is usable.
       - name: Test
         run: uv run pytest -p no:warnings
