@@ -205,6 +205,18 @@ def test_read_file_splits_bare_carriage_return_lines(tmp_path):
     assert read_file(sess, "mac.txt", offset=2, limit=5) == "three\r"
 
 
+@pytest.mark.parametrize("width", [65535, 131071])
+def test_read_file_counts_crlf_lines_once_at_a_chunk_boundary(tmp_path, width):
+    sess = _session(tmp_path)
+    line = b"y" * width + b"\r\n"
+    (sess.root / "dos.txt").write_bytes(line * 3 + b"tail\r\n")
+    big = 10 * width
+    assert read_file(sess, "dos.txt", offset=1, limit=1, max_chars=big) == line.decode()
+    assert read_file(sess, "dos.txt", offset=3, limit=5, max_chars=big) == "tail\r\n"
+    assert read_file(sess, "dos.txt", offset=0, limit=100, max_chars=big) == (
+        (line * 3 + b"tail\r\n").decode())
+
+
 def test_write_file_with_unencodable_content_leaves_the_file_intact(tmp_path):
     sess = _session(tmp_path)
     write_file(sess, "keep.txt", "precious")

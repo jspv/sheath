@@ -194,14 +194,26 @@ def iter_bounded_lines(f, max_line_chars: int, chunk: int = 65536) -> Iterator[s
 
     A line longer than the bound is consumed in ``chunk``-sized reads and discarded past
     the bound, so one enormous line costs bounded memory and still counts as one line.
+    ``f`` is expected to be opened with ``newline=""``: a line ends at "\n", "\r\n" or a
+    bare "\r", and a "\r\n" split across two reads still ends exactly one line.
     """
+    pending = ""                      # a piece read ahead that starts the next line
     while True:
-        piece = f.readline(chunk)
+        piece, pending = (pending, "") if pending else (f.readline(chunk), "")
         if not piece:
             return
         kept = piece[:max_line_chars]
-        # newline="" streams end a line at "\n", "\r\n" or a bare "\r".
-        while piece[-1] not in "\r\n":
+        while piece[-1] != "\n":
+            if piece[-1] == "\r":
+                # Either a bare "\r" ending, or a "\r\n" whose "\n" fell into the next
+                # read (the "\r" landed on a chunk boundary). Peek to tell them apart.
+                nxt = f.readline(chunk)
+                if nxt.startswith("\n"):
+                    if len(kept) < max_line_chars:
+                        kept += "\n"
+                    nxt = nxt[1:]     # readline stops at "\n", so this is always empty
+                pending = nxt
+                break
             piece = f.readline(chunk)
             if not piece:
                 break

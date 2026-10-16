@@ -133,6 +133,31 @@ def test_iter_bounded_lines_truncates_long_lines_without_miscounting():
     assert lines == ["a\n", "b" * 10, "c"]
 
 
+@pytest.mark.parametrize("width", [65534, 65535, 65536, 131071])
+def test_iter_bounded_lines_counts_crlf_once_at_a_chunk_boundary(width):
+    # width 65535 / 131071: the "\r" is the last char of a 65536-char readline chunk.
+    text = ("y" * width + "\r\n") * 2 + "end\r\n"
+    f = io.StringIO(text, newline="")
+    lines = list(iter_bounded_lines(f, max_line_chars=width + 2))
+    assert lines == ["y" * width + "\r\n"] * 2 + ["end\r\n"]
+
+
+def test_iter_bounded_lines_crlf_at_chunk_boundary_when_truncated():
+    f = io.StringIO(("y" * 65535 + "\r\n") * 2 + "z", newline="")
+    assert list(iter_bounded_lines(f, max_line_chars=10)) == ["y" * 10] * 2 + ["z"]
+
+
+def test_iter_bounded_lines_bare_cr_at_chunk_boundary_still_splits():
+    f = io.StringIO("y" * 65535 + "\r" + "next\rlast", newline="")
+    assert list(iter_bounded_lines(f, max_line_chars=70000)) == [
+        "y" * 65535 + "\r", "next\r", "last"]
+
+
+def test_iter_bounded_lines_mixed_endings():
+    f = io.StringIO("a\r\nb\rc\nd", newline="")
+    assert list(iter_bounded_lines(f, max_line_chars=10)) == ["a\r\n", "b\r", "c\n", "d"]
+
+
 def test_ensure_layout_creates_real_state_subdirs(tmp_path):
     ensure_layout(tmp_path)
     for sub in ("tmp", "runs"):
