@@ -54,6 +54,22 @@ All changes are additive: existing call sites keep working with the defaults.
   exported into `os.environ` -- the built-in OpenAI client reads `.env` itself.
   `python-dotenv` is a declared dependency.
 - The sandbox image is built for the host's Python `major.minor`.
+- **Security fix:** `publish_handle` followed a link sandboxed code planted at `outputs/`
+  (for example `outputs -> handles`), so the harness could overwrite handle files, the
+  manifest or an upload. A link or file at `outputs/` is now replaced by a real directory
+  before anything is written.
+- **Security fix:** `.tether/tmp/` and `.tether/runs/` are created with the workspace and
+  must be real directories (`WorkspaceTamperedError` otherwise); scratch and run directories
+  are never created through a link.
+- **Security fix:** a timed-out container that the runtime cannot confirm removed
+  quarantines the session: later runs and file tools retry removing that exact container
+  and raise `SandboxQuarantinedError` (new, exported) until it is gone. A container that
+  had already exited is no longer misreported as orphaned.
+- **Security fix:** the Python `search` fallback runs in a child process killed after 30 s,
+  so a catastrophic regex no longer freezes the host process.
+- `Conversation.aclose` (and `SessionManager.close`/`aclose`) waits up to 30 s for a running
+  turn before tearing the workspace down; turns that start after the close see the
+  conversation closed (`aask` returns an error, `astream_agui`/`aadd_input` raise).
 - CI runs lint and tests on push and pull request; publishing requires them. The
   container-tier tests run in CI when a runtime is usable (ubuntu-latest has one) and
   build the sandbox image there.
