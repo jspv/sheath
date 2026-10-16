@@ -1,4 +1,5 @@
-"""Text search over the session root: ripgrep when available, Python regex fallback."""
+"""Text search over the session root: ripgrep when available, else a Python regex scan in
+a bounded child process."""
 
 from __future__ import annotations
 
@@ -9,18 +10,21 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 from pathlib import Path
 
-from .. import workspace
 from ..paths import safe_path
+from ..procio import run_bounded
 from ..session import Session
 
 _MAX_MATCHES = 1000
 _MAX_SEARCH_FILE_BYTES = 50 * 1024 * 1024
 _MAX_LINE_CHARS = 1_000_000
 _RG_TIMEOUT_S = 30.0
+_PY_TIMEOUT_S = _RG_TIMEOUT_S
+_PY_OUTPUT_CAP = 16 * 1024 * 1024   # 1000 hits of bounded snippets fit with room to spare
 
 _MAX_SEARCH_RESULT_CHARS = 60_000
 
@@ -143,30 +147,36 @@ def _search_rg(rg: str, root: Path, base: Path, pattern: str, glob: str | None,
 
 def _search_python(root: Path, base: Path, pattern: str, ignore_case: bool,
                    max_matches: int, glob: str | None = None) -> list[dict]:
-    flags = re.IGNORECASE if ignore_case else 0
+    """The fallback scan, run in a bounded child process (``_search_worker``).
+
+    A model-supplied catastrophic regex against a model-written file backtracks inside one
+    C call holding the GIL; in-process that freezes the whole host. The child is killed
+    after ``_PY_TIMEOUT_S`` and its output is capped. The request travels in a private temp
+    file (argv has a length limit; stdin is closed).
+    """
+    request = {"root": str(root), "base": str(base), "pattern": pattern,
+               "ignore_case": ignore_case, "max_matches": max_matches, "glob": glob}
+    # Outside the root (the host's private temp dir, mode 0600): inside it, the scan would
+    # find the request file -- which contains the pattern -- and report it as a hit.
+    fd, req_path = tempfile.mkstemp(prefix="tether-search-", suffix=".json")
     try:
-        rx = re.compile(pattern, flags)
-    except re.error as e:  # match the rg path: invalid regex -> ValueError
-        raise ValueError(f"invalid search pattern: {e}") from e
-    files = [base] if base.is_file() else sorted(base.rglob(glob or "*"))
-    hits: list[dict] = []
-    real_root = root.resolve()
-    for f in files:
-        try:
-            if not f.resolve().is_relative_to(real_root):
-                continue                   # never read outside the root (links, odd globs)
-            st = os.lstat(f)               # lstat: a link is skipped, never followed
-            if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_SEARCH_FILE_BYTES:
-                continue
-            with f.open(encoding="utf-8", newline="") as fh:
-                for lineno, line in enumerate(
-                        workspace.iter_bounded_lines(fh, _MAX_LINE_CHARS), start=1):
-                    m = rx.search(line)
-                    if m:
-                        hits.append({"file": f.relative_to(root).as_posix(), "line": lineno,
-                                     "col": m.start(), "text": _snippet(line, m.start())})
-                        if len(hits) >= max_matches:
-                            return hits
-        except (UnicodeDecodeError, OSError):
-            continue
-    return hits
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(request, f)
+        run = run_bounded([sys.executable, "-I", "-m", "tether.tools._search_worker",
+                           req_path], timeout=_PY_TIMEOUT_S, cap=_PY_OUTPUT_CAP,
+                          cwd=tempfile.gettempdir())
+    finally:
+        os.unlink(req_path)
+    if run.timed_out:
+        raise ValueError(f"search timed out after {_PY_TIMEOUT_S:.0f}s; narrow the path "
+                         "or the pattern")
+    try:
+        out = json.loads(run.stdout)
+    except json.JSONDecodeError:
+        out = None
+    if run.returncode != 0 or not isinstance(out, dict):
+        tail = run.stderr.strip().splitlines()[-1:] or [f"exit {run.returncode}"]
+        raise ValueError(f"search failed: {tail[0]}")
+    if "error" in out:
+        raise ValueError(str(out["error"]))
+    return list(out.get("hits", []))[:max_matches]

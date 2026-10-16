@@ -198,3 +198,46 @@ def test_search_result_is_capped_by_total_size(tmp_path):
     hits = search(sess, "needle", max_matches=1000)
     assert len(json.dumps(hits)) <= 61_000
     assert "more matches omitted" in hits[-1]["note"]
+
+
+def test_python_fallback_bounds_a_catastrophic_regex(tmp_path, monkeypatch):
+    # A model-supplied pattern with exponential backtracking against a model-written file
+    # must not pin the host process: the scan runs in a child that is killed on timeout.
+    import threading
+    import time
+
+    _force_fallback(monkeypatch)
+    search_mod = importlib.import_module("tether.tools.search")
+    monkeypatch.setattr(search_mod, "_PY_TIMEOUT_S", 1.0)
+    sess = _session(tmp_path)
+    (sess.root / "evil.txt").write_text("a" * 30 + "!\n")
+    ticks = []
+    done = threading.Event()
+
+    def heartbeat():
+        while not done.is_set():
+            ticks.append(time.monotonic())
+            time.sleep(0.05)
+
+    hb = threading.Thread(target=heartbeat, daemon=True)
+    hb.start()
+    start = time.monotonic()
+    try:
+        with pytest.raises(ValueError, match="search timed out"):
+            search(sess, "(a+)+$")
+    finally:
+        done.set()
+    elapsed = time.monotonic() - start
+    assert elapsed < 10
+    assert len(ticks) >= 10          # the host kept running Python while the search ran
+
+
+def test_python_fallback_worker_keeps_confinement_and_results(tmp_path, monkeypatch):
+    _force_fallback(monkeypatch)
+    sess = _session(tmp_path)
+    _seed(sess)
+    hits = search(sess, "alpha", glob="*.txt")
+    assert [(h["file"], h["line"], h["col"]) for h in hits] == [("a.txt", 1, 0),
+                                                              ("sub/b.txt", 2, 0)]
+    with pytest.raises(ValueError, match="invalid search pattern"):
+        search(sess, "(unclosed")
