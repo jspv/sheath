@@ -1,0 +1,39 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+jobs:
+  test:
+    name: Lint and test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+
+      # The search tool prefers ripgrep; install it so that code path is tested, not only
+      # the Python fallback.
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      # The agui extra is included so the AG-UI tests run instead of skipping.
+      - name: Sync
+        run: uv sync --prerelease=allow --extra agui
+
+      - name: Lint
+        run: uv run ruff check tether tests
+
+      # The suite pins the sandbox to the local tier (tests/conftest.py) and needs no
+      # network or keys. Container-tier tests skip themselves when no runtime is usable.
+      - name: Test
+        run: uv run pytest -p no:warnings

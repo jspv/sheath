@@ -1,7 +1,7 @@
 import httpx
 
 from tether import TetherConfig, Session
-from tether.tools.web import web_search
+from tether.tools.web import web_extract, web_search
 
 
 def _session(tmp_path, api_key="test-key"):
@@ -73,9 +73,6 @@ def test_web_search_http_error_is_structured(tmp_path):
     out = web_search(sess, "q", client=_client(handler))
     assert out["status"] == 401
     assert "error" in out
-
-
-from tether.tools.web import web_extract
 
 
 def test_web_extract_stores_markdown_handle(tmp_path):

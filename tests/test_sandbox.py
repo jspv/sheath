@@ -4,7 +4,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-RUNTIME_DIR = Path(__file__).resolve().parent.parent / "tether" / "runtime"
+import pytest
+
+from tether.config import SandboxConfig
+from tether.handles import HandleStore
+from tether.paths import PathEscapesRootError
+from tether.sandbox import ControlPlaneLimits, ExecResult, LocalSubprocessSandbox
+
+RUNTIME_DIR =Path(__file__).resolve().parent.parent / "tether" / "runtime"
 
 
 def _run_child(tmp_path, body: str, registry: dict | None = None, args: list[str] | None = None):
@@ -76,14 +83,6 @@ def test_helper_passes_argv(tmp_path):
     )
     assert proc.returncode == 0, proc.stderr
     assert json.loads(emit.read_text()) == ["EU", "2025"]
-
-
-import pytest
-
-from tether.config import SandboxConfig
-from tether.handles import HandleStore
-from tether.sandbox import ControlPlaneLimits, ExecResult, LocalSubprocessSandbox
-from tether.paths import PathEscapesRootError
 
 
 def _sandbox(tmp_path):
