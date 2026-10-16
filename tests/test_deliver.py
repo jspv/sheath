@@ -172,7 +172,9 @@ def test_publish_handle_does_not_write_through_planted_symlink(tmp_path):
     assert victim.read_text() == "precious"
 
 
-def test_publish_handle_refuses_symlinked_outputs_dir(tmp_path):
+def test_publish_handle_replaces_symlinked_outputs_dir(tmp_path):
+    # A planted outputs -> <elsewhere> link is removed (never followed) and replaced by a
+    # real directory, as inputs/ is; nothing lands in the link's target.
     host = _Host()
     sess = _session(tmp_path, host)
     elsewhere = tmp_path / "elsewhere"
@@ -180,8 +182,43 @@ def test_publish_handle_refuses_symlinked_outputs_dir(tmp_path):
     os.symlink(elsewhere, sess.root / "outputs")
     h = sess.store.put(pd.DataFrame({"a": [1]}), source="t")
     out = _tool(sess, "publish_handle")(h.id, format="csv")
-    assert "error" in out and host.calls == []
+    assert "error" not in out, out
     assert list(elsewhere.iterdir()) == []
+    assert not (sess.root / "outputs").is_symlink() and (sess.root / "outputs").is_dir()
+
+
+@pytest.mark.parametrize("target", ["handles", ".tether", "inputs/u1"])
+def test_publish_handle_never_writes_through_outputs_link_into_protected_dir(tmp_path, target):
+    host = _Host()
+    sess = _session(tmp_path, host)
+    victim = sess.store.put("VICTIM ORIGINAL", source="s")
+    upload = sess.add_input(b"a,b\n1,2\n", input_id="u1", name="data.csv")
+    attacker = sess.store.put("ATTACKER CONTENT", source="fetch_url(evil)")
+    names = {"handles": os.path.basename(victim.path), ".tether": "manifest.json",
+             "inputs/u1": "data.csv"}
+    protected = sess.root / target
+    before = {p.name: p.read_bytes() for p in protected.iterdir() if p.is_file()}
+    os.symlink(target, sess.root / "outputs")     # what sandboxed code can leave behind
+    out = _tool(sess, "publish_handle")(attacker.id, name=names[target])
+    after = {p.name: p.read_bytes() for p in protected.iterdir() if p.is_file()}
+    assert after == before                        # nothing modified, nothing added
+    assert (sess.root / victim.path).read_text() == "VICTIM ORIGINAL"
+    assert (sess.root / upload.path).read_bytes() == b"a,b\n1,2\n"
+    sess.store.get(victim.id)                     # digest still verifies
+    # Chosen behavior: the link is replaced by a real outputs/ and the publish succeeds.
+    assert "error" not in out, out
+    assert not (sess.root / "outputs").is_symlink()
+    assert (sess.root / "outputs" / names[target]).read_bytes() == b"ATTACKER CONTENT"
+
+
+def test_publish_handle_replaces_a_file_squatting_on_outputs(tmp_path):
+    host = _Host()
+    sess = _session(tmp_path, host)
+    (sess.root / "outputs").write_text("squat")
+    h = sess.store.put("hello", source="t")
+    out = _tool(sess, "publish_handle")(h.id, name="n.txt")
+    assert "error" not in out, out
+    assert (sess.root / "outputs" / "n.txt").read_text() == "hello"
 
 
 # --- sandbox publish() --------------------------------------------------------------------

@@ -13,9 +13,10 @@ import stat
 import tempfile
 from pathlib import Path
 
+from .. import workspace
 from ..handles import HandleTamperedError
-from ..paths import PathEscapesRootError, safe_filename, safe_path
-from ..session import Session
+from ..paths import safe_filename
+from ..session import Session, _ensure_real_dir
 
 _OUTPUTS = "outputs"
 _DATAFRAME_FORMATS = ("csv", "xlsx", "parquet", "json")
@@ -86,11 +87,17 @@ def _publish_handle(session: Session, handle_id: str, format: str | None, name: 
 
 
 def _outputs_dir(session: Session) -> Path:
-    try:
-        outputs = safe_path(session.root, _OUTPUTS)
-    except PathEscapesRootError as e:
-        raise ValueError("outputs/ resolves outside the workspace") from e
-    outputs.mkdir(exist_ok=True)
+    """Return ``<root>/outputs`` as a REAL directory. The caller holds the session lock.
+
+    Sandboxed code can replace ``outputs/`` with anything, including a link to a protected
+    directory (``outputs -> handles``) that ``safe_path`` would happily resolve inside the
+    root. So the name is never followed: a link or non-directory found there is removed and
+    replaced by a real directory, exactly as ``inputs/<id>`` is repaired.
+    """
+    outputs = session.root / _OUTPUTS
+    _ensure_real_dir(outputs)
+    if workspace.is_protected(session.root, outputs.resolve()):
+        raise ValueError("outputs/ is a tether-managed directory; refusing to write there")
     return outputs
 
 
@@ -124,8 +131,8 @@ def _convert_in_sandbox(session: Session, handle_id: str, fmt: str, filename: st
 def _write_output(session: Session, filename: str, write) -> str:
     """Write ``outputs/<filename>`` without ever following a link sandboxed code planted.
 
-    ``outputs/`` itself is resolved through ``safe_path`` (a symlinked dir that escapes is
-    refused), the bytes go to a fresh temp file in it, and ``os.replace`` swaps that in, which
+    ``outputs/`` itself is made a real directory first (a planted link there is replaced,
+    never followed), the bytes go to a fresh temp file in it, and ``os.replace`` swaps that in, which
     replaces a planted symlink at the destination instead of writing through it.
     """
     outputs = _outputs_dir(session)
