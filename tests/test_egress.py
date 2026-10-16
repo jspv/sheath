@@ -378,3 +378,53 @@ def test_guarded_fetch_reports_encoding_and_final_url():
                             max_bytes=100, resolve=_public("example.com"))
     assert got.encoding == "latin-1" and got.url == "https://example.com/x"
     assert got.body.decode(got.encoding) == "é" and not got.truncated and not got.is_error
+
+
+def test_guarded_fetch_deadline_bounds_a_header_drip():
+    """The client's timeout bounds each read, so a server dripping header lines forever
+    never trips it; the total deadline must cut the request off during the header phase."""
+    import socket
+    import threading
+    import time
+
+    stop = threading.Event()
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    srv.settimeout(0.1)
+    port = srv.getsockname()[1]
+    conns = []
+
+    def serve():
+        while not stop.is_set():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                continue
+            conns.append(conn)
+            try:
+                conn.sendall(b"HTTP/1.1 200 OK\r\n")
+                n = 0
+                while not stop.is_set():
+                    conn.sendall(b"X-Drip-%d: x\r\n" % n)
+                    n += 1
+                    stop.wait(0.2)
+            except OSError:
+                pass
+
+    t = threading.Thread(target=serve, daemon=True)
+    t.start()
+    cfg = FetchConfig(total_timeout_s=1, timeout_s=0.5, allow_private_hosts=("127.0.0.1",))
+    started = time.monotonic()
+    try:
+        with httpx.Client(follow_redirects=False) as c:
+            with pytest.raises(FetchDeadlineExceeded):
+                guarded_fetch(f"http://127.0.0.1:{port}/drip", cfg, client=c,
+                              max_bytes=10_000)
+        assert time.monotonic() - started < 3
+    finally:
+        stop.set()
+        t.join(timeout=5)
+        for conn in conns:
+            conn.close()
+        srv.close()

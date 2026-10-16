@@ -121,7 +121,9 @@ def fetch_url(session: Session, url: str, max_bytes: int | None = None,
 
     try:
         text = body.decode(got.encoding, errors="replace")
-    except LookupError:                   # a server-named charset Python does not know
+    except (LookupError, UnicodeError):
+        # The charset is server-chosen: unknown to Python (LookupError), or a real codec
+        # that rejects errors="replace" (e.g. idna raises UnicodeError). Fall back to utf-8.
         text = body.decode("utf-8", errors="replace")
     handle = None
     if "json" in content_type and not got.truncated:

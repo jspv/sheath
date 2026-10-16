@@ -317,3 +317,16 @@ def test_fetch_url_survives_an_unknown_charset(tmp_path):
 
     summary = fetch_url(sess, "https://example.com/x", client=_client(handler))
     assert sess.store.get(summary["id"]) == "plain"
+
+
+def test_fetch_url_survives_a_charset_that_cannot_decode_with_replace(tmp_path):
+    """idna is a real codec, so httpx keeps it, but it rejects errors='replace' with a
+    UnicodeError; that must not escape the structured-error contract."""
+    sess = _session(tmp_path)
+
+    def handler(request):
+        return httpx.Response(200, content=b"plain",
+                              headers={"content-type": "text/plain; charset=idna"})
+
+    summary = fetch_url(sess, "https://example.com/x", client=_client(handler))
+    assert sess.store.get(summary["id"]) == "plain"

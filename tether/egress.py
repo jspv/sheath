@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -152,18 +153,79 @@ def guarded_fetch(url: str, cfg: FetchConfig, *, client: httpx.Client, max_bytes
     Redirects are followed here rather than by httpx, because httpx would follow them
     without consulting egress policy; ``follow_redirects=False`` is forced per request.
     Every hop's scheme must be in ``cfg.allowed_schemes``. The body is streamed: reading
-    stops at ``max_bytes`` (the response is then closed, so the remainder is never pulled),
-    and the whole operation is bounded by ``cfg.total_timeout_s`` -- the client's own
-    timeout only bounds each read, which a slow drip never trips. The caller owns the
-    client's lifecycle.
+    stops at ``max_bytes`` (the response is then closed, so the remainder is never pulled).
+
+    The whole operation is bounded by ``cfg.total_timeout_s`` -- the client's own timeout
+    only bounds each read, which a slow drip (of headers or body) never trips. Two
+    mechanisms enforce it: ``clock`` is checked before each hop and after each body chunk,
+    and a watchdog timer shuts down the socket of every connection this call opened, so a
+    read blocked in the header or body phase returns at once; the resulting transport
+    error is reported as ``FetchDeadlineExceeded``. Sockets are found through httpcore's
+    ``trace`` request extension, so the client itself is left open and usable (closing an
+    fd under a blocked reader does not wake it, and its number could be reused).
+
+    Residual, by design: DNS resolution inside ``validate_url`` cannot be interrupted, a
+    TCP/TLS connect is bounded only by the client's per-phase timeout (the watchdog shuts
+    the socket as soon as the connect completes), and a keep-alive connection the client
+    opened *before* this call is not traced -- both production callers use a fresh client.
+    The caller owns the client's lifecycle.
     """
     deadline = clock() + cfg.total_timeout_s
+    expired = threading.Event()
+    streams: list = []
+    lock = threading.Lock()
+
+    def shut(stream) -> None:
+        try:
+            stream.get_extra_info("socket").shutdown(socket.SHUT_RDWR)
+        except (OSError, AttributeError):
+            pass                  # already closed, or a transport without a real socket
+
+    def trace(event: str, info: dict) -> None:
+        if event in ("connection.connect_tcp.complete", "connection.start_tls.complete"):
+            stream = info.get("return_value")
+            with lock:
+                streams.append(stream)
+                late = expired.is_set()
+            if late:              # connected after the deadline: cut it off immediately
+                shut(stream)
+
+    def expire() -> None:
+        with lock:
+            expired.set()
+            pending = list(streams)
+        for stream in pending:
+            shut(stream)
+
+    def deadline_error() -> FetchDeadlineExceeded:
+        return FetchDeadlineExceeded(
+            f"fetch exceeded the {cfg.total_timeout_s:.0f}s total deadline: {url!r}")
 
     def check_deadline() -> None:
-        if clock() > deadline:
-            raise FetchDeadlineExceeded(
-                f"fetch exceeded the {cfg.total_timeout_s:.0f}s total deadline: {url!r}")
+        if expired.is_set() or clock() > deadline:
+            raise deadline_error()
 
+    watchdog = threading.Timer(cfg.total_timeout_s, expire)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        return _fetch_hops(url, cfg, client=client, max_bytes=max_bytes, resolve=resolve,
+                           check_deadline=check_deadline, trace=trace)
+    except FetchDeadlineExceeded:
+        raise
+    except (httpx.HTTPError, OSError) as e:
+        # A socket shut down by the watchdog surfaces as an ordinary transport error.
+        if expired.is_set():
+            raise deadline_error() from e
+        raise
+    finally:
+        watchdog.cancel()
+
+
+def _fetch_hops(url: str, cfg: FetchConfig, *, client: httpx.Client, max_bytes: int,
+                resolve: Callable[[str], list[str]] | None,
+                check_deadline: Callable[[], None],
+                trace: Callable[[str, dict], None]) -> FetchedBody:
     current = url
     for _ in range(cfg.max_redirects + 1):
         check_deadline()
@@ -172,7 +234,8 @@ def guarded_fetch(url: str, cfg: FetchConfig, *, client: httpx.Client, max_bytes
             raise BlockedAddressError(
                 f"scheme {scheme!r} not allowed for {current!r} (allowed: {cfg.allowed_schemes})")
         validate_url(current, cfg, resolve=resolve)
-        with client.stream("GET", current, follow_redirects=False) as resp:
+        with client.stream("GET", current, follow_redirects=False,
+                           extensions={"trace": trace}) as resp:
             location = resp.headers.get("location")
             if resp.status_code in _REDIRECT_CODES and location:
                 current = urljoin(current, location)  # relative -> absolute, then re-validate
