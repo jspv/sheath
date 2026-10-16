@@ -249,6 +249,9 @@ def _fetch_hops(url: str, cfg: FetchConfig, *, client: httpx.Client, max_bytes: 
                     truncated = True
                     break
                 check_deadline()
+            # The watchdog's socket shutdown reads as a clean EOF, which ends a body
+            # delimited by connection close without an error: never report that as complete.
+            check_deadline()
             return FetchedBody(resp.status_code, str(resp.url), resp.headers,
                                resp.encoding or "utf-8", bytes(body), truncated)
     raise httpx.HTTPError(f"too many redirects (> {cfg.max_redirects}) starting at {url!r}")

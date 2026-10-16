@@ -380,9 +380,9 @@ def test_guarded_fetch_reports_encoding_and_final_url():
     assert got.body.decode(got.encoding) == "é" and not got.truncated and not got.is_error
 
 
-def test_guarded_fetch_deadline_bounds_a_header_drip():
-    """The client's timeout bounds each read, so a server dripping header lines forever
-    never trips it; the total deadline must cut the request off during the header phase."""
+def _assert_drip_hits_the_deadline(preamble: bytes, drip):
+    """Serve ``preamble`` then ``drip(n)`` every 0.2 s forever on loopback; guarded_fetch
+    must raise FetchDeadlineExceeded well within 3 s. The server is always torn down."""
     import socket
     import threading
     import time
@@ -403,10 +403,10 @@ def test_guarded_fetch_deadline_bounds_a_header_drip():
                 continue
             conns.append(conn)
             try:
-                conn.sendall(b"HTTP/1.1 200 OK\r\n")
+                conn.sendall(preamble)
                 n = 0
                 while not stop.is_set():
-                    conn.sendall(b"X-Drip-%d: x\r\n" % n)
+                    conn.sendall(drip(n))
                     n += 1
                     stop.wait(0.2)
             except OSError:
@@ -428,3 +428,16 @@ def test_guarded_fetch_deadline_bounds_a_header_drip():
         for conn in conns:
             conn.close()
         srv.close()
+
+
+def test_guarded_fetch_deadline_bounds_a_header_drip():
+    """The client's timeout bounds each read, so a server dripping header lines forever
+    never trips it; the total deadline must cut the request off during the header phase."""
+    _assert_drip_hits_the_deadline(b"HTTP/1.1 200 OK\r\n", lambda n: b"X-Drip-%d: x\r\n" % n)
+
+
+def test_guarded_fetch_deadline_mid_body_is_never_a_complete_response():
+    """A body delimited by connection close: the watchdog's socket shutdown reads as a
+    clean EOF, which must not be reported as a complete (untruncated) response."""
+    _assert_drip_hits_the_deadline(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n",
+                                   lambda n: b"a")
