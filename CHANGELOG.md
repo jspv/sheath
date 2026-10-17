@@ -5,6 +5,14 @@ the defaults.
 
 ## Unreleased
 
+### Conversation history stays local (`store=False`)
+- **Behavior change (privacy):** the built-in OpenAI client stores conversations at OpenAI by
+  default. Agents from `Session.create_agent()` now send `store=False`, so the web content, documents
+  and workspace data they handle are not retained server-side and history is kept in-process.
+  Opt back in per agent with `default_options={"store": True}`; other `default_options` you pass are
+  preserved. Multi-turn memory is unaffected (covered by a live test), and the framework's
+  "stores history server-side" warning no longer appears.
+
 ### Default model is now `gpt-6.1-sol`
 - **Behavior change:** the built-in OpenAI client, the CLI `--model` flag and `SheathConfig.model`
   default to `gpt-6.1-sol` (previously `gpt-5-mini`). It costs more per token; pass

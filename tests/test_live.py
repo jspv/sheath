@@ -30,3 +30,19 @@ def test_live_gather_act_verify(tmp_path):
 
     result = asyncio.run(run())
     assert "425" in result.final_text
+
+
+def test_live_multi_turn_memory_survives_store_false(tmp_path):
+    """The agent opts out of OpenAI's server-side storage; history must then stay local and work."""
+    async def run():
+        h = Sheath(SheathConfig(root_dir=tmp_path / "r"))
+        conv = await h.aopen("memory")
+        try:
+            await conv.aask("Remember this code word: PELICAN-7421. Reply only OK.")
+            return await conv.aask("What code word did I ask you to remember?")
+        finally:
+            await conv.aclose()
+
+    result = asyncio.run(run())
+    assert result.error is None
+    assert "PELICAN-7421" in result.final_text

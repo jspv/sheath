@@ -301,6 +301,11 @@ class Session:
         # run() is given an AgentSession. We have no approval flow, and the returned agent is
         # public API, so keep it off: callers can run() it bare.
         maf_kwargs.setdefault("disable_tool_auto_approval", True)
+        # The built-in OpenAI client stores conversations at OpenAI by default. This agent sends
+        # fetched web content, documents and workspace data, so keep history local unless the
+        # caller opts in with default_options={"store": True}. Merge, don't replace: the caller's
+        # other chat options must survive.
+        maf_kwargs["default_options"] = {"store": False, **(maf_kwargs.get("default_options") or {})}
         return create_harness_agent(
             client,
             name=name,
