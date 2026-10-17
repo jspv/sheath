@@ -64,18 +64,30 @@ The central design move is keeping large data out of context. When a tool, MCP s
 
 ### Installation
 
-Requires **Python 3.12** and [`uv`](https://docs.astral.sh/uv/). `agent-framework-core` is a prerelease, so allow prereleases when syncing:
+Requires **Python 3.12**. Install from PyPI:
 
 ```bash
-uv sync --prerelease=allow
+pip install sheath                # or: uv add sheath
+pip install "sheath[agui]"        # + AG-UI / CopilotKit streaming
+pip install "sheath[docling]"     # + document ingestion (read_document)
 ```
 
-Optional extras:
+To work on sheath itself, clone the repository and use [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-uv sync --prerelease=allow --extra docling   # document ingestion (read_document)
-uv sync --prerelease=allow --extra agui       # AG-UI / CopilotKit streaming
+uv sync
 ```
+
+Built on Microsoft Agent Framework `agent-framework-core>=1.22.0` and `agent-framework-openai>=1.17.0` (and `agent-framework-ag-ui>=1.6.0` for the AG-UI extra); these are the versions the test suite and live tests run against. The lock includes a few prerelease transitive dependencies, so `pyproject.toml` sets `prerelease = "allow"` for `uv` — no flag is needed.
+
+In a checkout, the optional extras are:
+
+```bash
+uv sync --extra docling   # document ingestion (read_document)
+uv sync --extra agui      # AG-UI / CopilotKit streaming
+```
+
+`uv sync` makes the environment match exactly what you ask for, so it **uninstalls an extra you leave off**. Name every extra you want each time, e.g. `uv sync --extra agui --extra docling`.
 
 Document ingestion uses [Docling](https://github.com/DS4SD/docling), which downloads its models on first use. To pay that cost up front (e.g. at deploy time) instead of on the first `read_document` call, prefetch them:
 
@@ -148,8 +160,8 @@ The quickstarts above and the guides below are each worked examples. Two runnabl
 
 | Sample | Shows |
 |---|---|
-| [`examples/copilotkit/`](examples/copilotkit/) | **Full end-to-end app:** a CopilotKit chat UI + a FastAPI AG-UI backend with an **MCP server** wired in — ask a data question and watch the agent call the MCP tool, spill the result to a handle, and run sandboxed Python to answer |
-| [`examples/agui_server.py`](examples/agui_server.py) | The minimal AG-UI backend: a FastAPI endpoint that streams a sheath run as SSE |
+| [`examples/copilotkit/`](https://github.com/jspv/sheath/tree/main/examples/copilotkit) | **Full end-to-end app:** a CopilotKit chat UI + a FastAPI AG-UI backend with an **MCP server** wired in — ask a data question and watch the agent call the MCP tool, spill the result to a handle, and run sandboxed Python to answer |
+| [`examples/agui_server.py`](https://github.com/jspv/sheath/blob/main/examples/agui_server.py) | The minimal AG-UI backend: a FastAPI endpoint that streams a sheath run as SSE |
 | [Use it as a MAF agent](#use-it-as-a-maf-agent) | Building and driving the agent with the ordinary MAF agent surface (`run` / streaming / threads / workflows) |
 | [Bring your own model client](#bring-your-own-model-client) | Injecting an Azure / Foundry / custom-auth chat client |
 | [Sessions: one-shot vs continuous](#sessions-one-shot-vs-continuous) | Persistent multi-turn conversations with a shared workspace |
@@ -196,9 +208,11 @@ asyncio.run(main())
 
 Because the returned object is a standard MAF `Agent`, it composes anywhere a MAF agent is expected — as a workflow node, a sub-agent, or behind the AG-UI wrapper (`agui_stream` does exactly this with `conv.agent`). Construction goes through MAF's own `create_harness_agent(client, …)` factory, so apart from the workspace two-step and the spill-wrapping of your tools, you are building and running an ordinary MAF agent.
 
+**Defaults `create_agent` sets.** Sheath turns off the framework's built-in todo, mode, file-memory and web-search providers (the agent's tools come from the bundles you select, not from MAF), and the framework's tool-approval middleware (it would raise unless every `run()` is given an `AgentSession`; sheath has no approval flow, so the returned agent can be `run()` bare). It also sends `store=False` with every request — see [Model-provider storage](#security-and-confinement). You can override `default_options` (your other options are kept; `{"store": True}` opts back in), `disable_tool_auto_approval`, and the token budgets `max_context_window_tokens` / `max_output_tokens` by passing them to `create_agent`; the four provider switches (todo, mode, file memory, web search) are fixed, and passing one raises `TypeError`. The one-shot and conversation paths (`solve`, `aopen`, `agui_stream`) always use the defaults; build the agent with `create_agent` to change them.
+
 ### Bring your own model client
 
-The convenience entry points (`solve`, `Sheath(...)` with no `client`) use MAF's OpenAI client by default — following [MAF's own Python convention](https://github.com/microsoft/agent-framework/blob/main/python/README.md) (`OPENAI_API_KEY` present → OpenAI). The sheath is **not** OpenAI-only: it needs only an object implementing MAF's chat-client protocol (`SupportsChatGetResponse`), and never authenticates one for you when you supply it. The same client is reused across one-shots and every continuous conversation. Two injection points:
+The convenience entry points (`solve`, `Sheath(...)` with no `client`) use MAF's OpenAI client by default — following [MAF's own Python convention](https://github.com/microsoft/agent-framework/blob/main/python/README.md) (`OPENAI_API_KEY` present → OpenAI). The sheath is **not** OpenAI-only: it needs only an object implementing MAF's chat-client protocol (`SupportsChatGetResponse`), and never authenticates one for you when you supply it. The same client is reused across one-shots and every continuous conversation. Whatever client you supply, `create_agent` applies the defaults in [Use it as a MAF agent](#use-it-as-a-maf-agent), including `store=False`, a standard MAF chat option. Two injection points:
 
 ```python
 # High-level facade — your client flows to solve / aopen / agui_stream
@@ -222,7 +236,7 @@ client = OpenAIChatClient(
     azure_endpoint="https://my-resource.openai.azure.com",
     api_version="2024-10-21",
     credential=token_provider,
-    model="my-gpt-5-deployment",                 # Azure deployment name
+    model="my-deployment",                       # Azure deployment name
 )
 h = Sheath(SheathConfig(), client=client)      # config.model is ignored; the client carries it
 ```
@@ -377,7 +391,7 @@ The CLI exposes the same feed with `-v`/`--verbose` (printed to stderr). MCP-ser
 A sheath run can drive an [AG-UI](https://docs.ag-ui.com/) client such as [CopilotKit](https://docs.copilotkit.ai/) — streamed answer text, live tool-call visibility, and the status feed above — all as AG-UI events. Install the optional extra:
 
 ```bash
-uv sync --prerelease=allow --extra agui
+uv sync --extra agui
 ```
 
 `Sheath.agui_stream(input_data)` yields AG-UI events for one request; encode them as SSE from your endpoint:
@@ -400,7 +414,7 @@ async def agent(request: Request):
     return StreamingResponse(sse(), media_type="text/event-stream")
 ```
 
-Point your AG-UI client at this endpoint. The sheath reuses the official `agent-framework-ag-ui` converter, so **frontend/generative-UI tools** (defined in the request), **shared state** (`state_schema`/`predict_state_config`, forwarded as keyword args to `agui_stream`), **human-in-the-loop**, and **multi-turn history** all work — with the sheath's own progress feed overlaid as `sheath.status` `CUSTOM` events. A runnable version is in [`examples/agui_server.py`](examples/agui_server.py).
+Point your AG-UI client at this endpoint. The sheath reuses the official `agent-framework-ag-ui` converter, so **frontend/generative-UI tools** (defined in the request), **shared state** (`state_schema`/`predict_state_config`, forwarded as keyword args to `agui_stream`), **human-in-the-loop**, and **multi-turn history** all work — with the sheath's own progress feed overlaid as `sheath.status` `CUSTOM` events. A runnable version is in [`examples/agui_server.py`](https://github.com/jspv/sheath/blob/main/examples/agui_server.py).
 
 Each request is one conversation turn: turns on the same `threadId` are serialized, and a turn counts as activity for `idle_ttl_s`. Close the event stream on client disconnect (Starlette's `StreamingResponse` does) so the conversation is released for the next turn; a stream a server never closes keeps the conversation busy, and therefore exempt from the idle TTL. While a stream is open, sync `Conversation.add_input` raises — use `aadd_input`, which waits for the turn. The `threadId` selects the workspace, so authenticate and authorize it in your endpoint before calling `agui_stream`.
 
@@ -437,10 +451,11 @@ Every session has one **root directory**; everything — handles, agent-written 
 - **Layer 3 — Egress.** The model chooses the URLs the harness fetches, so egress is filtered. `fetch_url` and `read_document(url)` deny loopback, private, link-local, reserved, multicast and unspecified addresses by default, plus `100.64.0.0/10` (RFC 6598 carrier-grade NAT), which no standard `ipaddress` flag reports as private and so is denied explicitly. The harness follows redirects itself (`follow_redirects=False` is forced on every request), so **every hop is re-validated**, including its scheme against `FetchConfig.allowed_schemes`. Bodies are streamed: reading stops at the byte limit, a model-supplied `max_bytes` is clamped to `FetchConfig.max_bytes_ceiling`, and the whole fetch is bounded by `FetchConfig.total_timeout_s`. `read_document` downloads through the same guard and hands Docling a local path, never a URL, so Docling cannot follow its own redirects outside policy. To reach an internal data source, name it in `FetchConfig.allow_private_hosts` (hostnames or CIDRs).
   - **Cloud metadata endpoints are denied unconditionally and cannot be allowlisted.** `allow_private_hosts` cannot open them, by design: `169.254.169.254`, `169.254.170.2`, `168.63.129.16`, `100.100.100.200`, `192.0.0.192` and `fd00:ec2::254`. Note `168.63.129.16` (Azure's wireserver) is a *public* address that nothing else would block; Azure users should expect it to be refused.
   - Known residual: the total deadline is enforced by a watchdog that shuts down the connections opened during the call; on expiry `guarded_fetch` raises `FetchDeadlineExceeded` (an `httpx.HTTPError`). It does **not** bound DNS resolution inside `validate_url`, and the TCP/TLS connect is bounded only by the client's per-phase timeout (`FetchConfig.timeout_s`).
-  - Known residual: the host is resolved for validation and then resolved again by the HTTP client, so a DNS-rebinding race is not closed (IP pinning is on the [roadmap](docs/ROADMAP.md)). `web_search` / `web_extract` call a fixed Tavily endpoint and are not filtered; an MCP server you install makes its own network calls, which the harness cannot filter.
+  - Known residual: the host is resolved for validation and then resolved again by the HTTP client, so a DNS-rebinding race is not closed (IP pinning is on the [roadmap](https://github.com/jspv/sheath/blob/main/docs/ROADMAP.md)). `web_search` / `web_extract` call a fixed Tavily endpoint and are not filtered; an MCP server you install makes its own network calls, which the harness cannot filter.
 - **Handle integrity.** Metadata the model sees for a handle (schema, row count, preview) is derived by the harness from the bytes on disk **when the handle is created**, never reported by the sandboxed code that wrote them — and it is re-derived, not believed, when a manifest is rehydrated onto a root that outlived its process. The handle **record** is immutable: reusing an existing id is refused and reported. In the container tier the handle **bytes** are immutable too, because `handles/` is a read-only mount. As defence in depth (and as the only tamper signal in the `local` tier), a content digest is recorded when the metadata is derived and checked on every read; a mismatch raises `HandleTamperedError`. The digest (sha256, version-tagged) covers the file's length, its first 64 KiB and its last 64 KiB, so it is not a whole-file check. Handle ids chosen by sandboxed code must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. The parent↔sandbox exchange is bounded (1 MiB emit payload, 8 MiB control file, 256 new handles per run; see the configuration table).
 - **Bounded results and reads.** Every built-in tool result has a ceiling: `run_python` keeps the head and tail of `stdout`/`stderr` (`SandboxConfig.max_output_bytes` each) and stores a large emitted result as a handle; `inspect_handle`, `read_file`, `list_files` and `search` cap what they return. The harness reads sandbox-written and fetched data with bounded memory: files are streamed, only regular files are opened (a FIFO cannot block it), a dataframe handle is never materialized in the host process (previews read one record batch, `inspect_handle(stats=True)` reads footer statistics, and `publish_handle` converts inside the sandbox), and HTTP bodies are streamed up to the byte limit under a total deadline. Document inputs are bounded too: a `read_document` URL download is capped at `FetchConfig.max_bytes` and refused, not truncated, when larger, and a workspace path is copied privately and capped at `SheathConfig.max_input_bytes`. A dataframe whose first row group exceeds 16 MiB gets no head rows or preview (`head_omitted` / "preview omitted"), because Arrow would decode the whole group.
 - **Residual risks.** The harness still parses the parquet footer and first record batch of a file sandboxed code wrote, and an oversized data page is decoded whole. Container-tier disk use is unbounded (`max_file_size_mb` applies to the `local` tier only). DNS rebinding between validation and connect is not closed, and the fetch deadline does not cover DNS resolution (see Layer 3). The `local` tier provides none of the guarantees in this section.
+- **Model-provider storage.** The built-in OpenAI client stores conversations at OpenAI by default. Because this agent sends fetched web pages, documents and workspace data to the model, `create_agent` sends `store=False`, so conversation history is kept in-process and OpenAI is asked not to retain it for later retrieval. That is a request to the provider, not a guarantee of zero retention: the provider's own logging and your account's data controls still apply, and the content is still sent to the model. Opt back in per agent with `default_options={"store": True}`.
 - **Tool isolation.** Wrap stateful tools such as MCP servers in `tool_factory` so each conversation gets its own instance (see [MCP servers](#mcp-servers)).
 
 > The **container tier** is the default and provides real isolation. Select `local` explicitly with `SheathConfig.sandbox.backend = "local"` (or `SHEATH_SANDBOX_BACKEND=local`) to opt out; both sit behind the same `SandboxExecutor` interface.
@@ -520,21 +535,44 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 ## Development
 
 ```bash
-uv run pytest          # full suite — no network or API keys required
+uv sync --extra agui --extra docling   # the extras the full suite exercises
+uv run pytest                          # full suite — no network or API keys required
 uv run ruff check .
 ```
 
+With every extra installed, a few tests still skip: the three `search` tests that exercise ripgrep skip when `rg` is not on `PATH`, and the container-tier tests skip when no container runtime is usable. Without the `agui` extra the AG-UI tests skip too.
+
 CI (`.github/workflows/tests.yml`) runs lint and the suite on every push and pull request, and publishing requires it. The container-tier tests run there when a runtime is usable (ubuntu-latest has one) and build the sandbox image; they skip only when none is.
 
-Testing is a first-class principle: **tests are written before implementation for every unit** (TDD). The fast suite runs deterministically against a stub chat client (no API cost); live tests are gated behind `SHEATH_LIVE=1`. `safe_path` and the spill logic are held to the highest bar.
+Testing is a first-class principle: **tests are written before implementation for every unit** (TDD). The fast suite runs deterministically against a stub chat client (no API cost); live tests are opt-in and gated by environment variables. `safe_path` and the spill logic are held to the highest bar.
 
-Design specs and phased implementation plans for each feature live under [`docs/superpowers/`](docs/superpowers/).
+**Live tests** run against real services and are skipped unless you opt in:
+
+| Variable | Needs | Cost |
+|---|---|---|
+| `SHEATH_LIVE=1` | `OPENAI_API_KEY` (and `TAVILY_API_KEY` for the web test) in `.env` | paid model calls |
+| `SHEATH_LIVE_AGUI=1` | the `agui` extra and `OPENAI_API_KEY` | paid model calls |
+| `SHEATH_LIVE_DOCLING=1` | the `docling` extra (models download on first use) | local, no API cost |
+
+```bash
+SHEATH_LIVE=1 SHEATH_LIVE_AGUI=1 SHEATH_LIVE_DOCLING=1 uv run pytest
+```
+
+Live tests that run code (`run_python`) use the default container sandbox, so they also need a usable container runtime.
+
+**Evals** run the agent on 10 find-and-analyze tasks (some fetch live web pages, so answers vary) and write each task's final answer, any error, the tools used and the status events as JSON. They do not grade the answers, so read them. `SHEATH_EVAL_MODEL` picks the model (default: the shipped default) and `SHEATH_EVAL_OUT` picks where `results/` and `runs/` go, so runs for different models do not overwrite each other:
+
+```bash
+SHEATH_EVAL_MODEL=gpt-5-mini SHEATH_EVAL_OUT=/tmp/evals/gpt-5-mini uv run python evals/run_evals.py [task_id ...]
+```
+
+Design specs and phased implementation plans for each feature live under [`docs/superpowers/`](https://github.com/jspv/sheath/tree/main/docs/superpowers).
 
 ## Project layout
 
 ```
 sheath/
-  config.py      SheathConfig / SandboxConfig / FetchConfig / SearchConfig
+  config.py      SheathConfig / SandboxConfig / FetchConfig / SearchConfig / DocumentConfig
   paths.py       safe_path() — the single security chokepoint
   workspace.py   trust zones: protected dirs, per-run exchange dir, bounded no-follow reads
   procio.py      child-process runner with bounded output capture
@@ -546,16 +584,21 @@ sheath/
   conversation.py  persistent multi-turn Conversation (workspace + MAF AgentSession)
   manager.py       SessionManager: continuous-session registry + lazy TTL
   spill.py       large/structured tool & MCP returns → handles (MAF result_parser)
+  status.py      StatusEvent / StatusBus: the live status feed
+  mcp_status.py  MCP server logging + progress notifications → status events
+  publish.py     publishing workspace files to the host: types and parent-side validation
   agui.py        AG-UI event stream (status overlay over agent-framework-ag-ui)
   bundles.py     capability bundles (code / files / web) + their instructions
   egress.py      egress policy: internal-address denylist + redirect re-validation
-  tools/         the agent's tools (files, search, fetch, code, inspect, web)
-  runtime/       in-sandbox helpers (load/save/emit)
+  testing.py     StubChatClient: a deterministic chat client for tests (no API)
+  tools/         the agent's tools (files, search, fetch, code, inspect, web, documents, deliver);
+                 registry.py wraps the Session-bound implementations as agent-ready callables
+  runtime/       in-sandbox helpers (load/save/emit/publish), the script runner and the Containerfile
   api.py         Sheath / solve() / Result
   cli.py         thin streaming CLI
 docs/superpowers/  design specs + phased implementation plans
 examples/          runnable samples (minimal AG-UI server; full CopilotKit + MCP app)
-evals/             eval harness
+evals/             10-task eval harness for comparing models (see Development)
 tests/             mirror of the package (unit + integration + security tests)
 ```
 
@@ -563,9 +606,9 @@ tests/             mirror of the package (unit + integration + security tests)
 
 **Implemented:** foundation (handles, sandbox, path-jail); the agent loop + tool surface; the `Sheath`/`solve()` API + CLI; web research (Tavily search/extract, Markdown fetch); **document ingestion** (`read_document` via Docling — PDF/spreadsheet → Markdown with tables); **live status updates** (built-in, developer, and MCP tools → an `on_status` feed / `--verbose`); an **AG-UI / CopilotKit** integration (`Sheath.agui_stream`); a **container sandbox tier** (hardened Podman/Docker isolation behind `SandboxExecutor`); and a **session lifecycle** model (ephemeral one-shot `solve`; persistent continuous `aopen`/`aask`/`aclose` with optional idle TTL).
 
-The **security-hardening phase** (zero-trust handle metadata, container-by-default, egress guard, per-conversation tools) and the **workspace trust zones** work (read-only harness state in the sandbox, per-run exchange directory, bounded tool results and reads) are delivered; see [`docs/ROADMAP.md`](docs/ROADMAP.md) for residuals.
+The **security-hardening phase** (zero-trust handle metadata, container-by-default, egress guard, per-conversation tools) and the **workspace trust zones** work (read-only harness state in the sandbox, per-run exchange directory, bounded tool results and reads) are delivered; see [`docs/ROADMAP.md`](https://github.com/jspv/sheath/blob/main/docs/ROADMAP.md) for residuals.
 
-**Planned** (documented under [`docs/superpowers/`](docs/superpowers/)):
+**Planned** (documented under [`docs/superpowers/`](https://github.com/jspv/sheath/tree/main/docs/superpowers)):
 
 - **Micro-VM sandbox tier** — gVisor / Firecracker, behind the same `SandboxExecutor` interface.
 - **MAF skills + memory providers** (v1.1) and a MAF Workflow durability / HITL outer shell.

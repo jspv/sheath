@@ -1,9 +1,10 @@
 # Changelog
 
-Apart from the rename below, changes are additive: existing call sites keep working with
-the defaults.
+0.2.0 is a breaking release: the project was renamed, the default model and several defaults
+changed, and the minimum framework versions rose. Entries marked **Breaking** or
+**Behavior change** need action when upgrading from `tether-harness` 0.1.x.
 
-## Unreleased
+## 0.2.0 — 2026-10-16
 
 ### Conversation history stays local (`store=False`)
 - **Behavior change (privacy):** the built-in OpenAI client stores conversations at OpenAI by

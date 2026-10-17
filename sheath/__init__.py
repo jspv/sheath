@@ -17,7 +17,7 @@ from .manager import SessionManager
 from .status import StatusBus, StatusEvent, report_progress
 from .tools.registry import build_tools
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 __all__ = [
     "Sheath", "Result", "solve", "ToolFactory", "tool_factory",
