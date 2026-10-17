@@ -3,19 +3,24 @@ tasks, record the tool-call trace + final answer + any error per task, and write
 result file each task completes so progress can be inspected live.
 
 Run: uv run python evals/run_evals.py [task_id ...]   (no args = all)
-Requires OPENAI_API_KEY in .env (uses gpt-5-mini).
+Requires OPENAI_API_KEY in .env. SHEATH_EVAL_MODEL picks the model (default gpt-6.1-sol);
+SHEATH_EVAL_OUT picks where results/ and runs/ go (default: next to this file), so runs for
+different models do not overwrite or contaminate each other.
 """
 
+import asyncio
 import json
+import os
 import sys
 import traceback
 from pathlib import Path
 
 from sheath import SandboxConfig, Sheath, SheathConfig
 
-RESULTS = Path(__file__).resolve().parent / "results"
-RUNS = Path(__file__).resolve().parent / "runs"
-MODEL = "gpt-5-mini"
+OUT = Path(os.environ.get("SHEATH_EVAL_OUT") or Path(__file__).resolve().parent)
+RESULTS = OUT / "results"
+RUNS = OUT / "runs"
+MODEL = os.environ.get("SHEATH_EVAL_MODEL", "gpt-6.1-sol")
 
 
 def _short(value, limit=400):
@@ -84,39 +89,39 @@ TASKS = [
 ]
 
 
-def run_task(task: dict) -> dict:
+async def run_task(task: dict) -> dict:
     RUNS.mkdir(parents=True, exist_ok=True)
     # Evals measure model behavior and should not require a container runtime.
-    cfg = SheathConfig(root_dir=RUNS / task["id"], model=MODEL,
-                       sandbox=SandboxConfig(backend="local"))
+    cfg = SheathConfig(root_dir=RUNS, model=MODEL, sandbox=SandboxConfig(backend="local"))
     h = Sheath(cfg)
-    if task.get("seed"):
-        task["seed"](h.session)
 
-    trace = []
-    h.solve_problem = task["prompt"]
-
-    def on_tool_call(name, kwargs, result):
-        trace.append({"tool": name,
-                      "args": {k: _short(v, 120) for k, v in kwargs.items()},
-                      "result": _short(result)})
-
+    # Status events carry the emitting tool and a message, not the call arguments or result.
+    events: list[dict] = []
     record = {"id": task["id"], "prompt": task["prompt"]}
+    conv = None
     try:
-        result = h.solve(task["prompt"], on_tool_call=on_tool_call)
+        conv = await h.aopen(task["id"])
+        if task.get("seed"):
+            task["seed"](conv.session)
+        conv.session.subscribe(
+            lambda ev: events.append({"tool": ev.tool, "message": _short(ev.message, 200)}))
+        result = await conv.aask(task["prompt"])
         record.update({
             "final_text": result.final_text,
             "error": result.error,
-            "n_tool_calls": len(trace),
-            "tools_used": sorted({t["tool"] for t in trace}),
-            "trace": trace,
+            "n_status_events": len(events),
+            "tools_used": sorted({e["tool"] for e in events} - {"sheath"}),
+            "trace": events,
             "handles": list(result.handles),
             "files": result.files,
         })
     except Exception as e:  # noqa: BLE001
         record.update({"final_text": "", "error": f"SHEATH CRASH: {type(e).__name__}: {e}",
-                       "n_tool_calls": len(trace), "trace": trace,
+                       "n_status_events": len(events), "trace": events,
                        "traceback": traceback.format_exc()})
+    finally:
+        if conv is not None:
+            await conv.aclose()
     return record
 
 
@@ -126,11 +131,11 @@ def main():
     tasks = [t for t in TASKS if not wanted or t["id"] in wanted]
     for task in tasks:
         print(f"=== running {task['id']} ===", flush=True)
-        record = run_task(task)
+        record = asyncio.run(run_task(task))
         (RESULTS / f"{task['id']}.json").write_text(json.dumps(record, indent=2), encoding="utf-8")
         status = "ERROR" if record.get("error") else "ok"
         print(f"  {task['id']}: {status} | tools={record.get('tools_used')} | "
-              f"calls={record.get('n_tool_calls')}", flush=True)
+              f"events={record.get('n_status_events')}", flush=True)
         print(f"  answer: {_short(record.get('final_text', ''), 200)}", flush=True)
     print("=== done ===", flush=True)
 

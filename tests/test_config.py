@@ -3,7 +3,7 @@ from sheath.config import FetchConfig, SheathConfig, SandboxConfig
 
 def test_defaults_are_sensible():
     cfg = SheathConfig()
-    assert cfg.model == "gpt-5-mini"
+    assert cfg.model == "gpt-6.1-sol"
     assert cfg.spill_threshold_bytes == 8192
     assert cfg.max_spill_bytes == 100 * 1024 * 1024
     assert cfg.max_spill_bytes > cfg.spill_threshold_bytes  # a real spill-over zone

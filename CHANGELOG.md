@@ -5,6 +5,16 @@ the defaults.
 
 ## Unreleased
 
+### Default model is now `gpt-6.1-sol`
+- **Behavior change:** the built-in OpenAI client, the CLI `--model` flag and `SheathConfig.model`
+  default to `gpt-6.1-sol` (previously `gpt-5-mini`). It costs more per token; pass
+  `--model gpt-5-mini` or `SheathConfig(model="gpt-5-mini")` to keep the old model, which your
+  account may still serve. Chosen from a 10-task eval against `gpt-5-mini`, `gpt-5.4-mini` and
+  `gpt-6-luna`: all answered the checkable tasks correctly, but `gpt-6-luna` stated data-quality
+  checks in 0 of 10 answers where `gpt-6.1-sol` did in 7 of 10.
+- `evals/run_evals.py` was ported to the current conversation API (it had been calling removed
+  `solve(on_tool_call=...)` and `Sheath.session`), and takes `SHEATH_EVAL_MODEL` / `SHEATH_EVAL_OUT`.
+
 ### Dependency upgrades (minimum versions raised)
 - **Breaking for installs:** requires `agent-framework-core>=1.22.0` and
   `agent-framework-openai>=1.17.0` (previously `>=1.8.1`); the `agui` extra requires

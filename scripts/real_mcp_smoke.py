@@ -64,7 +64,7 @@ async def main() -> None:
         args=["-c", f"cd {MSGRAPH_DIR} && exec uv run msgraph-mcp"],
     )
 
-    h = Sheath(SheathConfig(model="gpt-5-mini"), bundles=("code", "files"))
+    h = Sheath(SheathConfig(model="gpt-6.1-sol"), bundles=("code", "files"))
     result = await h.asolve(
         "Using the msgraph tools, fetch my single most recent email INCLUDING its "
         "full body, then report only its subject, sender, and date. Do not summarize "

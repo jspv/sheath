@@ -12,7 +12,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_live_gather_act_verify(tmp_path):
-    cfg = SheathConfig(root_dir=tmp_path / "r", model="gpt-5-mini")
+    cfg = SheathConfig(root_dir=tmp_path / "r")
     h = Sheath(cfg)
 
     async def run():

@@ -104,7 +104,7 @@ uv run sheath "What is the total EU revenue in 2025, excluding invalid rows?"
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--model` | `gpt-5-mini` | Model for the built-in OpenAI client (reads `OPENAI_API_KEY`, or `AZURE_OPENAI_*` for Azure routing). The CLI uses that client; for other providers drive the sheath from Python with your own client — see [Bring your own model client](#bring-your-own-model-client) |
+| `--model` | `gpt-6.1-sol` | Model for the built-in OpenAI client (reads `OPENAI_API_KEY`, or `AZURE_OPENAI_*` for Azure routing). The CLI uses that client; for other providers drive the sheath from Python with your own client — see [Bring your own model client](#bring-your-own-model-client) |
 | `--root` | a fresh session dir | Workspace root (the confinement boundary) |
 | `-v`, `--verbose` | off | Print live tool status to stderr as the task runs (see [Live status updates](#live-status-updates)) |
 
@@ -127,7 +127,7 @@ def query_sales(region: str) -> list[dict]:
 # With no client passed, the sheath builds the default OpenAI client (reads OPENAI_API_KEY).
 # `model` configures ONLY that default client — to use Azure / Foundry / any other provider,
 # pass your own MAF chat client (see "Bring your own model client"); `model` is then ignored.
-h = Sheath(SheathConfig(model="gpt-5-mini"))
+h = Sheath(SheathConfig(model="gpt-6.1-sol"))
 result = h.solve(
     "Total EU revenue in 2025, excluding invalid rows?",
     tools=[query_sales],          # plain Python callables; auto-wrapped + spill-handled
@@ -173,7 +173,7 @@ async def main():
     # part — it binds the agent to one session root + sandbox. The build call itself is standard MAF.
     async with Session.create(SheathConfig()) as session:
         agent = await session.create_agent(
-            OpenAIChatClient(model="gpt-5-mini", env_file_path=".env"),
+            OpenAIChatClient(model="gpt-6.1-sol", env_file_path=".env"),
             agent_instructions="Reconcile EU sales and flag anomalies.",  # your task prompt
             tools=[query_sales, mcp],          # plain callables + MCPTools, spill-handled for you
             bundles=("code", "files", "web"),  # which built-in tool families to include
@@ -316,7 +316,7 @@ from sheath import Sheath, SheathConfig
 #  from there, e.g. command="sh", args=["-c", "cd /path/to/server && exec uv run its-cmd"].)
 mcp = MCPStdioTool(name="msgraph", command="uv", args=["run", "msgraph-mcp"])
 
-h = Sheath(SheathConfig(model="gpt-5-mini"))
+h = Sheath(SheathConfig(model="gpt-6.1-sol"))
 result = h.solve("List the subjects of my 5 most recent emails.", tools=[mcp])
 print(result.final_text)
 ```
@@ -493,7 +493,7 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 
 | Field | Default | Notes |
 |---|---|---|
-| `model` | `"gpt-5-mini"` | Used only by the built-in OpenAI client; ignored when you inject a `client` |
+| `model` | `"gpt-6.1-sol"` | Used only by the built-in OpenAI client; ignored when you inject a `client` |
 | `spill_threshold_bytes` | `8192` | Lower edge of the spill-over zone: a tool return over this becomes a handle |
 | `max_spill_bytes` | `100 MiB` | Upper edge: a return larger than this is **rejected loudly** (`SpillLimitExceeded`), never silently stored |
 | `max_context_window_tokens` | `128_000` | Fed to MAF compaction |

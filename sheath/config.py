@@ -92,7 +92,7 @@ class DocumentConfig:
 
 @dataclass
 class SheathConfig:
-    model: str = "gpt-5-mini"  # only used by the built-in OpenAI client; ignored when you inject a client
+    model: str = "gpt-6.1-sol"  # only used by the built-in OpenAI client; ignored when you inject a client
     spill_threshold_bytes: int = 8192          # lower edge: tool returns over this become handles
     max_spill_bytes: int = 100 * 1024 * 1024   # upper edge: a return over this is rejected, not stored
     max_context_window_tokens: int = 128_000

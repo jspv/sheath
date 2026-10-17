@@ -16,7 +16,7 @@ from .status import StatusEvent
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sheath", description="Run the data-integration sheath.")
     p.add_argument("problem", help="The task to solve.")
-    p.add_argument("--model", default="gpt-5-mini",
+    p.add_argument("--model", default="gpt-6.1-sol",
                    help="Model for the built-in OpenAI client (the CLI uses that client; "
                         "to use another provider, drive Sheath from Python with your own client).")
     p.add_argument("--root", default=None, help="Workspace root dir (default: a fresh session dir).")
