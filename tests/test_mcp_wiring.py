@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 from agent_framework import FunctionTool
-from tether import TetherConfig, Session
-from tether.testing import StubChatClient, text, tool_call
+from sheath import SheathConfig, Session
+from sheath.testing import StubChatClient, text, tool_call
 
 
 class FakeMCPTool:
@@ -29,7 +29,7 @@ class FakeMCPTool:
 
 
 def test_create_agent_connects_and_spills_mcp(tmp_path):
-    cfg = TetherConfig(root_dir=tmp_path / "r", spill_threshold_bytes=64)
+    cfg = SheathConfig(root_dir=tmp_path / "r", spill_threshold_bytes=64)
     mcp = FakeMCPTool()
     client = StubChatClient([
         tool_call("mcp_query", {"q": "widgets"}),
@@ -52,7 +52,7 @@ def test_create_agent_connects_and_spills_mcp(tmp_path):
 
 
 def test_mcp_closed_even_on_error(tmp_path):
-    cfg = TetherConfig(root_dir=tmp_path / "r")
+    cfg = SheathConfig(root_dir=tmp_path / "r")
     mcp = FakeMCPTool()
 
     async def run():
@@ -86,7 +86,7 @@ class _BadMCPTool:
 
 
 def test_mcp_connect_failure_names_server_and_closes_prior(tmp_path):
-    cfg = TetherConfig(root_dir=tmp_path / "r")
+    cfg = SheathConfig(root_dir=tmp_path / "r")
     good = FakeMCPTool()
     bad = _BadMCPTool()
 

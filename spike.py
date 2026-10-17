@@ -14,7 +14,7 @@ import asyncio
 
 from agent_framework import create_harness_agent
 from agent_framework.observability import (
-    configure_otel_providers,  # call with enable_console_exporters=True to dump spans/metrics
+    configure_otel_providers,  # noqa: F401  call with enable_console_exporters=True to dump spans/metrics
     enable_instrumentation,
 )
 from agent_framework.openai import OpenAIChatClient
@@ -67,7 +67,7 @@ async def main() -> None:
     # gpt-4o-mini: cheap, reliable at multi-step tool calling, non-pro tier.
     client = OpenAIChatClient(model="gpt-4o-mini", env_file_path=".env")
 
-    # Q1: the built-in tether == the single coherent loop, with todo +
+    # Q1: the built-in sheath == the single coherent loop, with todo +
     # compaction + max-iteration cap baked in. No WorkflowBuilder graph.
     agent = create_harness_agent(
         client,
@@ -85,8 +85,8 @@ async def main() -> None:
         tools=[list_datasets, read_dataset, sum_values, verify_no_zero_rows],
         max_context_window_tokens=8192,
         max_output_tokens=1024,
-        # Trim the built-in tether tool surface: a small local model gets
-        # distracted by the todo/mode/memory/web-search tools the tether
+        # Trim the built-in sheath tool surface: a small local model gets
+        # distracted by the todo/mode/memory/web-search tools the sheath
         # injects by default. Keep only our sharp data tools + compaction.
         disable_todo=True,
         disable_mode=True,

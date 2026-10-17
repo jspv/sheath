@@ -2,7 +2,7 @@
 
 import pytest
 
-from tether.paths import safe_filename, validate_segment
+from sheath.paths import safe_filename, validate_segment
 
 
 @pytest.mark.parametrize("bad", ["", ".", "..", "../x", "a/b", "a\\b", "/abs", "x\x00y",

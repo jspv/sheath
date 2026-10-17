@@ -1,7 +1,7 @@
-"""CopilotKit / AG-UI backend for the tether, with an MCP server wired in.
+"""CopilotKit / AG-UI backend for the sheath, with an MCP server wired in.
 
 The browser talks to a CopilotKit Next.js app, which proxies each request to this
-endpoint as an AG-UI ``RunAgentInput``. ``tether.agui_stream`` resolves the
+endpoint as an AG-UI ``RunAgentInput``. ``sheath.agui_stream`` resolves the
 request's ``threadId`` to a persistent conversation and streams AG-UI events back.
 
 The demo ``sales`` MCP server (``mcp_server.py``) is attached per request — see
@@ -23,17 +23,17 @@ from agent_framework import MCPStdioTool
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from tether import Tether, TetherConfig
+from sheath import Sheath, SheathConfig
 
 app = FastAPI()
 
-# Put session/sandbox output in a temp dir, NOT the default ./.tether under the repo.
+# Put session/sandbox output in a temp dir, NOT the default ./.sheath under the repo.
 # Why: the agent's run_python writes scripts into the session dir; with `uvicorn --reload`
 # watching the repo, those writes would hot-reload the server mid-conversation — aborting the
 # in-flight response and wiping the in-memory SessionManager. Keeping the session root outside
 # the watched tree avoids that; --reload then only restarts on actual source edits.
-_SESSIONS = Path(tempfile.gettempdir()) / "tether-copilotkit-sessions"
-tether = Tether(TetherConfig(root_dir=_SESSIONS))  # default OpenAI client (needs OPENAI_API_KEY)
+_SESSIONS = Path(tempfile.gettempdir()) / "sheath-copilotkit-sessions"
+sheath = Sheath(SheathConfig(root_dir=_SESSIONS))  # default OpenAI client (needs OPENAI_API_KEY)
 
 _MCP_SERVER = Path(__file__).with_name("mcp_server.py")
 
@@ -59,7 +59,7 @@ async def agent(request: Request) -> StreamingResponse:
     async def sse():
         # agui_stream repairs the replayed tool-call/result ordering for us (CopilotKit emits
         # tool results before their call, which the OpenAI API would otherwise reject).
-        async for event in tether.agui_stream(input_data, tools=[_sales_mcp()]):
+        async for event in sheath.agui_stream(input_data, tools=[_sales_mcp()]):
             yield encoder.encode(event)    # -> "data: {json}\n\n"
 
     return StreamingResponse(sse(), media_type="text/event-stream")

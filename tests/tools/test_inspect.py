@@ -1,12 +1,12 @@
 import pandas as pd
 import pytest
 
-from tether import TetherConfig, Session
-from tether.tools.inspect import inspect_handle
+from sheath import SheathConfig, Session
+from sheath.tools.inspect import inspect_handle
 
 
 def _session(tmp_path):
-    return Session.create(TetherConfig(root_dir=tmp_path / "r"))
+    return Session.create(SheathConfig(root_dir=tmp_path / "r"))
 
 
 def test_inspect_text_handle_returns_more_preview(tmp_path):
@@ -85,7 +85,7 @@ def test_inspect_json_preview_is_bounded_raw_text(tmp_path):
 
 
 def test_inspect_checks_the_digest(tmp_path):
-    from tether.handles import HandleTamperedError
+    from sheath.handles import HandleTamperedError
     sess = _session(tmp_path)
     h = sess.store.put("abc", source="s")
     (sess.root / h.path).write_text("tampered!")
@@ -96,7 +96,7 @@ def test_inspect_checks_the_digest(tmp_path):
 def test_inspect_skips_head_when_first_row_group_is_too_large(tmp_path, monkeypatch):
     import pyarrow.parquet as pq
 
-    import tether.handles as handles
+    import sheath.handles as handles
     sess = _session(tmp_path)
     monkeypatch.setattr(handles, "_MAX_PREVIEW_GROUP_BYTES", 10)
     h = sess.store.put(pd.DataFrame({"a": list(range(100))}), source="s")
@@ -137,7 +137,7 @@ def test_footer_stats_missing_for_a_column_report_none(tmp_path):
 
 
 def test_footer_stats_partial_missing_group_is_not_reported():
-    from tether.tools.inspect import _footer_stats
+    from sheath.tools.inspect import _footer_stats
     S = type("S", (), {})
 
     def stat(lo, hi):

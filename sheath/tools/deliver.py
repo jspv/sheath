@@ -26,7 +26,7 @@ _DATAFRAME_FORMATS = ("csv", "xlsx", "parquet", "json")
 # argv, never by string interpolation, so nothing model-supplied is ever executed as code.
 _CONVERT_SCRIPT = """\
 import sys
-from tether_sandbox import load
+from sheath_sandbox import load
 
 handle_id, fmt, out = sys.argv[1:4]
 df = load(handle_id)
@@ -101,7 +101,7 @@ def _outputs_dir(session: Session) -> Path:
     outputs = session.root / _OUTPUTS
     _ensure_real_dir(outputs)
     if workspace.is_protected(session.root, outputs.resolve()):
-        raise ValueError("outputs/ is a tether-managed directory; refusing to write there")
+        raise ValueError("outputs/ is a sheath-managed directory; refusing to write there")
     return outputs
 
 

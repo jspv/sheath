@@ -1,11 +1,11 @@
 import inspect
 
-from tether import TetherConfig, Session
-from tether.tools.registry import build_tools
+from sheath import SheathConfig, Session
+from sheath.tools.registry import build_tools
 
 
 def _session(tmp_path):
-    return Session.create(TetherConfig(root_dir=tmp_path / "r"))
+    return Session.create(SheathConfig(root_dir=tmp_path / "r"))
 
 
 def test_build_tools_returns_expected_named_callables(tmp_path):
@@ -47,7 +47,7 @@ def test_wrapped_tools_actually_work(tmp_path):
     tools = {t.__name__: t for t in build_tools(sess)}
     tools["write_file"]("a.txt", "hello\nworld\n")
     assert tools["read_file"]("a.txt") == "hello\nworld\n"
-    out = tools["run_python"](code="from tether_sandbox import emit\nemit(5)\n")
+    out = tools["run_python"](code="from sheath_sandbox import emit\nemit(5)\n")
     assert out["result"] == 5
     # search via the wrapped closure (regression: the package re-export shadowed the
     # `search` submodule, so the closure called the function as if it were a module).

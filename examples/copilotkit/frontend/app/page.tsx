@@ -5,9 +5,9 @@ import { CopilotSidebar } from "@copilotkit/react-ui";
 export default function Home() {
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", padding: "3rem", maxWidth: 720 }}>
-      <h1>tether × CopilotKit</h1>
+      <h1>sheath × CopilotKit</h1>
       <p>
-        The chat sidebar on the right talks to the tether AG-UI backend, which has a
+        The chat sidebar on the right talks to the sheath AG-UI backend, which has a
         <code> sales </code> MCP server wired in. Try asking:
       </p>
       <ul>
@@ -23,7 +23,7 @@ export default function Home() {
 
       <CopilotSidebar
         defaultOpen
-        labels={{ title: "tether assistant", initial: "Ask me about 2025 sales 👋" }}
+        labels={{ title: "sheath assistant", initial: "Ask me about 2025 sales 👋" }}
       />
     </main>
   );

@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from tether.handles import HandleStore
+from sheath.handles import HandleStore
 
 
 def test_put_and_get_json_roundtrip(tmp_path):
@@ -117,7 +117,7 @@ def test_register_external_record_round_trips(tmp_path):
 
 
 def test_handle_store_rehydrates_manifest_and_counter(tmp_path):
-    from tether.handles import HandleStore
+    from sheath.handles import HandleStore
     s1 = HandleStore(tmp_path)
     h1 = s1.put({"a": 1}, source="t")
     h2 = s1.put("hello", source="t")
@@ -131,9 +131,9 @@ def test_handle_store_rehydrates_manifest_and_counter(tmp_path):
 
 def test_rehydrate_skips_corrupt_record(tmp_path):
     import json
-    from tether.handles import HandleStore
+    from sheath.handles import HandleStore
     HandleStore(tmp_path).put({"a": 1}, source="t")   # valid h1, persists manifest
-    mf = tmp_path / ".tether" / "manifest.json"
+    mf = tmp_path / ".sheath" / "manifest.json"
     data = json.loads(mf.read_text())
     data["bad"] = {"id": "bad"}                        # missing required Handle fields
     mf.write_text(json.dumps(data))
@@ -143,7 +143,7 @@ def test_rehydrate_skips_corrupt_record(tmp_path):
 
 def test_describe_dataframe_matches_put(tmp_path):
     """A described file and a put() handle agree exactly — the parity property that
-    replaces the hand-maintained duplication in runtime/tether_sandbox.py."""
+    replaces the hand-maintained duplication in runtime/sheath_sandbox.py."""
     store = HandleStore(tmp_path / "r")
     df = pd.DataFrame({"i": range(10), "s": ["a"] * 10, "f": [1.5] * 10})
     handle = store.put(df, source="t")
@@ -363,7 +363,7 @@ def test_describe_textual_does_not_read_the_whole_file(tmp_path, monkeypatch):
 
 def _forge_manifest(root, records):
     import json
-    (root / ".tether" / "manifest.json").write_text(json.dumps(records), encoding="utf-8")
+    (root / ".sheath" / "manifest.json").write_text(json.dumps(records), encoding="utf-8")
 
 
 def test_rehydrate_rederives_forged_metadata(tmp_path):
@@ -424,7 +424,7 @@ def test_rehydrate_one_bad_record_does_not_abort_the_rest(tmp_path):
 # --- handle bytes are digest-verified on read --------------------------------------------
 
 def test_get_detects_bytes_overwritten_after_creation(tmp_path):
-    from tether.handles import HandleTamperedError
+    from sheath.handles import HandleTamperedError
 
     store = HandleStore(tmp_path)
     h = store.put("benign content", source="t")
@@ -436,7 +436,7 @@ def test_get_detects_bytes_overwritten_after_creation(tmp_path):
 
 def test_get_detects_in_place_overwrite_of_the_same_length(tmp_path):
     """A same-length overwrite leaves ``bytes`` correct; only the digest catches it."""
-    from tether.handles import HandleTamperedError
+    from sheath.handles import HandleTamperedError
 
     store = HandleStore(tmp_path)
     h = store.put("benign content", source="t")
@@ -447,7 +447,7 @@ def test_get_detects_in_place_overwrite_of_the_same_length(tmp_path):
 
 
 def test_get_detects_tampering_with_an_adopted_handle(tmp_path):
-    from tether.handles import HandleTamperedError
+    from sheath.handles import HandleTamperedError
 
     store = HandleStore(tmp_path)
     (tmp_path / "handles" / "child.txt").write_text("child output", encoding="utf-8")
@@ -474,7 +474,7 @@ def test_untampered_handles_round_trip_unchanged(tmp_path):
 
 def test_handle_with_no_digest_still_loads(tmp_path):
     """Tolerance: a record carrying no digest has nothing to check against, so get() reads."""
-    from tether.handles import Handle
+    from sheath.handles import Handle
 
     store = HandleStore(tmp_path)
     (tmp_path / "handles" / "legacy.txt").write_text("legacy bytes", encoding="utf-8")
@@ -588,7 +588,7 @@ def _big_binary(store, size):
 
 
 def test_digest_detects_tail_edit_of_large_file(tmp_path):
-    from tether.handles import HandleTamperedError
+    from sheath.handles import HandleTamperedError
 
     store = HandleStore(tmp_path)
     h = _big_binary(store, 3 * _WIN)
@@ -599,7 +599,7 @@ def test_digest_detects_tail_edit_of_large_file(tmp_path):
 
 
 def test_digest_detects_head_edit_of_large_file(tmp_path):
-    from tether.handles import HandleTamperedError
+    from sheath.handles import HandleTamperedError
 
     store = HandleStore(tmp_path)
     h = _big_binary(store, 3 * _WIN)
@@ -611,7 +611,7 @@ def test_digest_detects_head_edit_of_large_file(tmp_path):
 @pytest.mark.parametrize("size", [100, _WIN, _WIN + 1, _WIN + 5000, 2 * _WIN])
 def test_digest_fully_covers_files_up_to_two_windows(tmp_path, size):
     """Up to 128 KiB the digest is the whole file: an edit at ANY offset is detected."""
-    from tether.handles import HandleTamperedError
+    from sheath.handles import HandleTamperedError
 
     for offset in (0, _WIN - 1, _WIN, size // 2, size - 1):
         if offset >= size:
@@ -634,7 +634,7 @@ def test_digest_middle_of_file_over_two_windows_is_the_documented_residual(tmp_p
 @pytest.mark.parametrize("size", [0, 10, _WIN, _WIN + 1, 2 * _WIN, 2 * _WIN + 1, 5 * _WIN])
 def test_digest_is_deterministic_and_no_false_positive(tmp_path, size):
     import os
-    from tether.handles import _digest_file
+    from sheath.handles import _digest_file
 
     p = tmp_path / "f.bin"
     p.write_bytes(os.urandom(size))
@@ -664,7 +664,7 @@ def test_parquet_footer_rewrite_over_two_windows_is_detected(tmp_path):
     """The motivating case: a parquet footer (schema + row count) lives at the tail."""
     import os
     import struct
-    from tether.handles import HandleTamperedError
+    from sheath.handles import HandleTamperedError
 
     store = HandleStore(tmp_path)
     df = pd.DataFrame({"a": [os.urandom(16).hex() for _ in range(30000)]})
@@ -681,7 +681,7 @@ def test_parquet_footer_rewrite_over_two_windows_is_detected(tmp_path):
 
 
 def test_digest_none_still_tolerated_for_a_large_file(tmp_path):
-    from tether.handles import Handle
+    from sheath.handles import Handle
 
     store = HandleStore(tmp_path)
     p = tmp_path / "handles" / "big.bin"
@@ -694,7 +694,7 @@ def test_digest_none_still_tolerated_for_a_large_file(tmp_path):
 def test_digest_from_before_the_format_change_is_not_accepted(tmp_path):
     """An old-format (untagged) digest must fail verification, never silently pass."""
     import hashlib
-    from tether.handles import HandleTamperedError
+    from sheath.handles import HandleTamperedError
 
     store = HandleStore(tmp_path)
     h = store.put("hello", source="t")
@@ -711,7 +711,7 @@ def test_digest_from_before_the_format_change_is_not_accepted(tmp_path):
 def test_manifest_lives_in_state_dir(tmp_path):
     store = HandleStore(tmp_path)
     store.put("hello", source="t")
-    assert (tmp_path / ".tether" / "manifest.json").is_file()
+    assert (tmp_path / ".sheath" / "manifest.json").is_file()
     assert not (tmp_path / "handles" / "_manifest.json").exists()
 
 
@@ -723,14 +723,14 @@ def test_legacy_manifest_is_migrated(tmp_path):
         {"h1": {"id": "h1", "kind": "text", "path": "handles/h1.txt", "source": "old"}}))
     store = HandleStore(tmp_path)
     assert store.get("h1") == "old data"
-    assert (tmp_path / ".tether" / "manifest.json").is_file()
+    assert (tmp_path / ".sheath" / "manifest.json").is_file()
     assert not (tmp_path / "handles" / "_manifest.json").exists()
     assert HandleStore(tmp_path).get("h1") == "old data"      # survives a second reopen
 
 
 def test_store_refuses_a_symlinked_handles_dir(tmp_path):
     import pytest
-    from tether.workspace import WorkspaceTamperedError
+    from sheath.workspace import WorkspaceTamperedError
     outside = tmp_path / "outside"
     outside.mkdir()
     root = tmp_path / "root"
@@ -785,7 +785,7 @@ def test_adopt_file_rejects_bad_ids_kinds_and_non_regular_sources(tmp_path):
 
 def test_adopt_file_refuses_reuse_of_an_id_or_destination(tmp_path):
     import pytest
-    from tether.handles import HandleIdReuseError
+    from sheath.handles import HandleIdReuseError
     store = HandleStore(tmp_path)
     first = store.put("one", source="t")                 # h1
     src = tmp_path / "f.txt"
@@ -830,7 +830,7 @@ def test_dataframe_preview_and_schema_are_capped(tmp_path):
 
 def test_verify_returns_the_path_and_checks_the_digest(tmp_path):
     import pytest
-    from tether.handles import HandleTamperedError
+    from sheath.handles import HandleTamperedError
     store = HandleStore(tmp_path)
     handle = store.put("abc", source="t")
     path = store.verify(handle.id)
@@ -845,7 +845,7 @@ def test_verify_returns_the_path_and_checks_the_digest(tmp_path):
 def test_oversized_first_row_group_is_never_decoded(tmp_path, monkeypatch):
     import pandas as pd
     import pyarrow.parquet as pq
-    import tether.handles as handles_mod
+    import sheath.handles as handles_mod
 
     def boom(self, *a, **k):
         raise AssertionError("iter_batches must not run on an oversized first row group")
@@ -871,13 +871,13 @@ def test_first_row_group_under_the_limit_still_previews(tmp_path):
 def test_first_group_too_large_helper(tmp_path):
     import pandas as pd
     import pyarrow.parquet as pq
-    from tether.handles import first_group_too_large
+    from sheath.handles import first_group_too_large
     path = tmp_path / "f.parquet"
     pd.DataFrame({"a": range(10)}).to_parquet(path)
     pf = pq.ParquetFile(path)
     assert first_group_too_large(pf) is None
     size = pf.metadata.row_group(0).total_byte_size
-    import tether.handles as m
+    import sheath.handles as m
     old = m._MAX_PREVIEW_GROUP_BYTES
     m._MAX_PREVIEW_GROUP_BYTES = size - 1
     try:
@@ -889,7 +889,7 @@ def test_first_group_too_large_helper(tmp_path):
 def test_legacy_manifest_read_is_capped(tmp_path, monkeypatch):
     import json
 
-    import tether.handles as handles_mod
+    import sheath.handles as handles_mod
     (tmp_path / "handles").mkdir()
     (tmp_path / "handles" / "h1.txt").write_text("old data")
     payload = json.dumps({"h1": {"id": "h1", "kind": "text", "path": "handles/h1.txt",

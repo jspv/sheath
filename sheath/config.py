@@ -1,4 +1,4 @@
-"""Typed configuration for the tether."""
+"""Typed configuration for the sheath."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ from typing import Literal
 def _default_sandbox_backend() -> str:
     """Shipped default: the container tier, i.e. real isolation.
 
-    ``TETHER_SANDBOX_BACKEND`` overrides it. Setting it to ``local`` opts out of isolation
+    ``SHEATH_SANDBOX_BACKEND`` overrides it. Setting it to ``local`` opts out of isolation
     entirely, so it is only for environments that have made that choice deliberately --
     CI and the test suite, which must run without a container runtime. An explicit
     ``SandboxConfig(backend=...)`` argument still wins over the variable.
     """
-    return os.environ.get("TETHER_SANDBOX_BACKEND", "container")
+    return os.environ.get("SHEATH_SANDBOX_BACKEND", "container")
 
 
 @dataclass
@@ -28,16 +28,16 @@ class SandboxConfig:
     access. Use it only for development or fully trusted input. ``backend="container"`` runs
     code in a hardened OCI container (no network by default, read-only root filesystem, all
     capabilities dropped, ``no-new-privileges``, pids/memory/cpu limits, only the session root
-    and the tether runtime mounted, no host environment).
+    and the sheath runtime mounted, no host environment).
 
-    ``backend`` defaults to ``"container"``; ``TETHER_SANDBOX_BACKEND`` overrides that default
+    ``backend`` defaults to ``"container"``; ``SHEATH_SANDBOX_BACKEND`` overrides that default
     (it selects the *tier*, not the container runtime). ``require_isolation=True`` is the
     stricter assertion on top: it refuses a local backend however it was selected -- an
     explicit ``backend="local"`` or an env-var-selected one -- at ``Session.create``, and a
     missing runtime or image raises, never falling back.
     ``build_on_demand`` controls whether a missing image or pip layer is built on first use;
     ``None`` means "build unless isolation is required" (a host requiring isolation should
-    pre-build with ``tether-build-sandbox`` and gate startup on ``sandbox_preflight``).
+    pre-build with ``sheath-build-sandbox`` and gate startup on ``sandbox_preflight``).
     """
 
     timeout_s: float = 30.0
@@ -91,7 +91,7 @@ class DocumentConfig:
 
 
 @dataclass
-class TetherConfig:
+class SheathConfig:
     model: str = "gpt-5-mini"  # only used by the built-in OpenAI client; ignored when you inject a client
     spill_threshold_bytes: int = 8192          # lower edge: tool returns over this become handles
     max_spill_bytes: int = 100 * 1024 * 1024   # upper edge: a return over this is rejected, not stored
@@ -104,7 +104,7 @@ class TetherConfig:
     max_new_handles: int = 256                 # records adopted per run
     max_publish_bytes: int = 100 * 1024 * 1024  # largest file publish_file/publish() will deliver
     max_input_bytes: int = 100 * 1024 * 1024    # largest user upload add_input() will accept
-    root_dir: Path | None = None  # None -> a fresh one-shot dir ./.tether/runs/run-XXXXXXXX
+    root_dir: Path | None = None  # None -> a fresh one-shot dir ./.sheath/runs/run-XXXXXXXX
     cleanup: bool = False  # delete the root on async-context exit (throwaway runs)
     idle_ttl_s: float | None = None  # continuous-session idle TTL (None = never expire)
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)

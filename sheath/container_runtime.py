@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
-from .config import SandboxConfig, TetherConfig
+from .config import SandboxConfig, SheathConfig
 
 _RUNTIME_DIR = Path(__file__).resolve().parent / "runtime"
 _CONTAINERFILE = _RUNTIME_DIR / "Containerfile"
@@ -91,7 +91,7 @@ def _py_tag() -> str:
 def image_tag(preinstalled: tuple[str, ...]) -> str:
     """Stable image tag keyed by the Python version + the (order-independent) preinstalled set."""
     digest = hashlib.sha256((_py_tag() + "|" + ",".join(sorted(preinstalled))).encode()).hexdigest()
-    return f"tether-sandbox:{digest[:12]}"
+    return f"sheath-sandbox:{digest[:12]}"
 
 
 def image_exists(runtime: str, tag: str, run: Callable = subprocess.run) -> bool:
@@ -109,8 +109,8 @@ def image_exists(runtime: str, tag: str, run: Callable = subprocess.run) -> bool
 
 
 def build_command_hint(config: SandboxConfig) -> str:
-    """The `tether-build-sandbox` invocation that pre-builds exactly what ``config`` asks for."""
-    parts = ["tether-build-sandbox", "--preinstalled", *config.preinstalled]
+    """The `sheath-build-sandbox` invocation that pre-builds exactly what ``config`` asks for."""
+    parts = ["sheath-build-sandbox", "--preinstalled", *config.preinstalled]
     if config.pip_packages:
         parts += ["--pip", *config.pip_packages]
     if config.container_runtime:
@@ -157,7 +157,7 @@ def ensure_image(runtime: str, tag: str, config: SandboxConfig,
 
 def layer_dir(config: SandboxConfig, base: Path | None = None) -> Path:
     """Host cache dir for the provisioned package layer, keyed by packages + Python version."""
-    base = base or (Path.home() / ".tether" / "pkgcache")
+    base = base or (Path.home() / ".sheath" / "pkgcache")
     digest = hashlib.sha256(
         (_py_tag() + "|" + ",".join(sorted(config.pip_packages))).encode()
     ).hexdigest()
@@ -185,7 +185,7 @@ def ensure_layer(runtime: str, config: SandboxConfig, base: Path | None = None,
     tag = image_tag(config.preinstalled)
     ensure_image(runtime, tag, config, run,
                  timeout_s=_remaining(deadline, f"building sandbox image {tag}"))
-    name = f"tether-layer-{secrets.token_hex(8)}"
+    name = f"sheath-layer-{secrets.token_hex(8)}"
     cmd = [runtime, "run", "--rm", "--name", name]
     # See ContainerSandbox._build_run_argv: rootless podman maps the host user to container-root,
     # so the host-owned /layer bind mount is unwritable to the hardening --user. keep-id maps the
@@ -226,7 +226,7 @@ class PreflightReport:
     problems: list[str] = field(default_factory=list)
 
 
-def sandbox_preflight(config: SandboxConfig | TetherConfig, *,
+def sandbox_preflight(config: SandboxConfig | SheathConfig, *,
                       which: Callable[[str], str | None] = shutil.which,
                       run: Callable = subprocess.run,
                       layer_base: Path | None = None) -> PreflightReport:
@@ -236,7 +236,7 @@ def sandbox_preflight(config: SandboxConfig | TetherConfig, *,
     PATH, that the image exists (bounded ``image inspect``), and that the ``pip_packages``
     layer is provisioned. Intended for host startup / catalog load.
     """
-    cfg = config.sandbox if isinstance(config, TetherConfig) else config
+    cfg = config.sandbox if isinstance(config, SheathConfig) else config
     problems: list[str] = []
     if cfg.backend != "container":
         if cfg.require_isolation:
@@ -268,15 +268,15 @@ def sandbox_preflight(config: SandboxConfig | TetherConfig, *,
 
 
 def _build_sandbox_main(argv: list[str] | None = None) -> None:
-    """Console-script entry (``tether-build-sandbox``): pre-build the sandbox image and layer.
+    """Console-script entry (``sheath-build-sandbox``): pre-build the sandbox image and layer.
 
     Accepts the same inputs a host puts in ``SandboxConfig`` so a deploy step builds exactly
     the image tag (and pip layer) the host will ask for. ``--check`` only runs the preflight.
     """
     defaults = SandboxConfig()
     parser = argparse.ArgumentParser(
-        prog="tether-build-sandbox",
-        description="Pre-build the tether sandbox image (and pip layer) for a SandboxConfig.")
+        prog="sheath-build-sandbox",
+        description="Pre-build the sheath sandbox image (and pip layer) for a SandboxConfig.")
     parser.add_argument("--preinstalled", nargs="*", default=list(defaults.preinstalled),
                         help="packages baked into the image (SandboxConfig.preinstalled)")
     parser.add_argument("--pip", nargs="*", default=[],

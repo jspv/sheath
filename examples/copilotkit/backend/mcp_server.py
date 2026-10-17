@@ -1,7 +1,7 @@
 """A tiny self-contained stdio MCP server for the CopilotKit example.
 
 It exposes one tool, ``sales_rows(region)``, that returns a full year of daily
-rows — deliberately large and structured so the tether's spill middleware turns
+rows — deliberately large and structured so the sheath's spill middleware turns
 the return into a typed handle (instead of flooding the model's context). The
 agent then writes ``run_python`` to load that handle and compute the answer.
 

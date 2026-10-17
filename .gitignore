@@ -17,8 +17,8 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 
-# Tether session artifacts
-.tether/
+# Sheath session artifacts
+.sheath/
 
 # Demo / eval run workspaces (anchored to repo root so nested dirs like
 # .github/workflows are not caught by the "work*" glob)

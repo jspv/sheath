@@ -1,24 +1,24 @@
 import asyncio
 
-from tether import TetherConfig
-from tether.conversation import Conversation
-from tether.testing import StubChatClient, text, tool_call
+from sheath import SheathConfig
+from sheath.conversation import Conversation
+from sheath.testing import StubChatClient, text, tool_call
 
 
 def _save(hid, value):
-    return tool_call("run_python", {"code": f"from tether_sandbox import save\nsave({hid!r}, {value!r})\n"})
+    return tool_call("run_python", {"code": f"from sheath_sandbox import save\nsave({hid!r}, {value!r})\n"})
 
 
 def test_conversation_persists_workspace_across_turns(tmp_path):
     # StubChatClient consumes its script linearly across run() calls, so 4 steps = 2 turns.
     client = StubChatClient([
         _save("h1", {"x": 1}), text("saved"),
-        tool_call("run_python", {"code": "from tether_sandbox import load, save\nsave('h2', load('h1'))\n"}),
+        tool_call("run_python", {"code": "from sheath_sandbox import load, save\nsave('h2', load('h1'))\n"}),
         text("done"),
     ])
 
     async def run():
-        conv = await Conversation.acreate(id="c1", config=TetherConfig(root_dir=tmp_path / "r"),
+        conv = await Conversation.acreate(id="c1", config=SheathConfig(root_dir=tmp_path / "r"),
                                           client=client, tools=[], bundles=("code",))
         r1 = await conv.aask("save it")
         r2 = await conv.aask("reload it")            # turn 2 reuses the same workspace
@@ -36,7 +36,7 @@ def test_conversation_keep_on_close(tmp_path):
     client = StubChatClient([text("hi")])
 
     async def run():
-        conv = await Conversation.acreate(id="c2", config=TetherConfig(root_dir=tmp_path / "k"),
+        conv = await Conversation.acreate(id="c2", config=SheathConfig(root_dir=tmp_path / "k"),
                                           client=client, tools=[], bundles=(), reap_on_close=False)
         await conv.aask("hello")
         root = conv.session.root
@@ -51,7 +51,7 @@ def test_conversation_aclose_is_idempotent(tmp_path):
     client = StubChatClient([text("hi")])
 
     async def run():
-        conv = await Conversation.acreate(id="c4", config=TetherConfig(root_dir=tmp_path / "i"),
+        conv = await Conversation.acreate(id="c4", config=SheathConfig(root_dir=tmp_path / "i"),
                                           client=client, tools=[], bundles=())
         await conv.aask("hello")
         await conv.aclose()
@@ -66,7 +66,7 @@ def test_conversation_error_is_non_fatal(tmp_path):
             raise RuntimeError("model boom")
 
     async def run():
-        conv = await Conversation.acreate(id="c3", config=TetherConfig(root_dir=tmp_path / "e"),
+        conv = await Conversation.acreate(id="c3", config=SheathConfig(root_dir=tmp_path / "e"),
                                           client=_Boom([text("x")]), tools=[], bundles=())
         r = await conv.aask("go")                    # error captured, conversation survives
         ok = r.error is not None and "RuntimeError" in r.error
@@ -79,7 +79,7 @@ def test_conversation_error_is_non_fatal(tmp_path):
 def _conv(tmp_path):
     async def make():
         return await Conversation.acreate(
-            id="c1", config=TetherConfig(root_dir=tmp_path / "c1"),
+            id="c1", config=SheathConfig(root_dir=tmp_path / "c1"),
             client=StubChatClient([text("ok")]), bundles=("files",))
     return make
 
@@ -96,7 +96,7 @@ def _fake_stream(events, gate=None):
 def test_agui_turn_holds_the_lock_and_stamps_activity(tmp_path, monkeypatch):
     async def run():
         conv = await _conv(tmp_path)()
-        monkeypatch.setattr("tether.agui.agui_event_stream", _fake_stream(["a", "b"]))
+        monkeypatch.setattr("sheath.agui.agui_event_stream", _fake_stream(["a", "b"]))
         conv.last_activity = 0.0
         seen, busy = [], []
         async for event in conv.astream_agui({"messages": []}):
@@ -113,7 +113,7 @@ def test_agui_turns_on_one_conversation_are_serialized(tmp_path, monkeypatch):
     async def run():
         conv = await _conv(tmp_path)()
         gate = asyncio.Event()
-        monkeypatch.setattr("tether.agui.agui_event_stream", _fake_stream(["x"], gate))
+        monkeypatch.setattr("sheath.agui.agui_event_stream", _fake_stream(["x"], gate))
         order = []
 
         async def turn(label):
@@ -136,7 +136,7 @@ def test_agui_turns_on_one_conversation_are_serialized(tmp_path, monkeypatch):
 def test_abandoned_agui_stream_releases_the_lock(tmp_path, monkeypatch):
     async def run():
         conv = await _conv(tmp_path)()
-        monkeypatch.setattr("tether.agui.agui_event_stream", _fake_stream(["a", "b", "c"]))
+        monkeypatch.setattr("sheath.agui.agui_event_stream", _fake_stream(["a", "b", "c"]))
         stream = conv.astream_agui({"messages": []})
         assert await stream.__anext__() == "a"
         assert conv.busy
@@ -160,7 +160,7 @@ def test_closing_agui_stream_tears_down_inner_stream_while_lock_held(tmp_path, m
             finally:
                 seen.append(conv.busy)
 
-        monkeypatch.setattr("tether.agui.agui_event_stream", fake)
+        monkeypatch.setattr("sheath.agui.agui_event_stream", fake)
         stream = conv.astream_agui({"messages": []})
         assert await stream.__anext__() == "a"
         await stream.aclose()
@@ -276,7 +276,7 @@ def test_agui_turn_survives_concurrent_aclose_and_later_turns_refuse(tmp_path, m
             seen_root.append(root.exists())
             yield "b"
 
-        monkeypatch.setattr("tether.agui.agui_event_stream", fake)
+        monkeypatch.setattr("sheath.agui.agui_event_stream", fake)
         events = []
 
         async def consume():
@@ -300,7 +300,7 @@ def test_agui_turn_survives_concurrent_aclose_and_later_turns_refuse(tmp_path, m
 
 
 def test_aclose_wait_is_bounded(tmp_path, monkeypatch):
-    import tether.conversation as conversation_mod
+    import sheath.conversation as conversation_mod
 
     monkeypatch.setattr(conversation_mod, "_CLOSE_WAIT_S", 0.05)
 

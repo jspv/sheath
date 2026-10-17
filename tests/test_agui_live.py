@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
-_RUN = os.environ.get("TETHER_LIVE_AGUI") == "1"
+_RUN = os.environ.get("SHEATH_LIVE_AGUI") == "1"
 _HAS_AGUI = importlib.util.find_spec("agent_framework_ag_ui") is not None
 pytestmark = pytest.mark.skipif(
     not (_RUN and _HAS_AGUI),
-    reason="set TETHER_LIVE_AGUI=1 and install the 'agui' extra to run AG-UI live tests",
+    reason="set SHEATH_LIVE_AGUI=1 and install the 'agui' extra to run AG-UI live tests",
 )
 
 _FIXTURE = str(Path(__file__).parent / "fixtures" / "mcp_progress_server.py")
@@ -19,13 +19,13 @@ def _event_types(events):
     return [type(e).__name__ for e in events]
 
 
-def _collect(input_data, **tether_kwargs):
+def _collect(input_data, **sheath_kwargs):
     import asyncio
 
-    from tether import Tether, TetherConfig
+    from sheath import Sheath, SheathConfig
 
     async def run():
-        h = Tether(TetherConfig(), **tether_kwargs)
+        h = Sheath(SheathConfig(), **sheath_kwargs)
         return [ev async for ev in h.agui_stream(input_data)]
 
     return asyncio.run(run())
@@ -40,7 +40,7 @@ def test_agui_stream_emits_lifecycle_toolcall_and_status():
     types = _event_types(events)
     assert "RunStartedEvent" in types and "RunFinishedEvent" in types
     assert "ToolCallStartEvent" in types                       # built-in run_python surfaced
-    statuses = [e for e in events if type(e).__name__ == "CustomEvent" and getattr(e, "name", "") == "tether.status"]
+    statuses = [e for e in events if type(e).__name__ == "CustomEvent" and getattr(e, "name", "") == "sheath.status"]
     assert any(s.value.get("tool") == "run_python" for s in statuses)
 
 
@@ -67,6 +67,6 @@ def test_agui_stream_overlays_mcp_status():
          "threadId": "t", "runId": "r"},
         tools=[mcp], bundles=(),
     )
-    statuses = [e for e in events if type(e).__name__ == "CustomEvent" and getattr(e, "name", "") == "tether.status"]
+    statuses = [e for e in events if type(e).__name__ == "CustomEvent" and getattr(e, "name", "") == "sheath.status"]
     assert any(s.value.get("tool") == "mcp:statusfix" for s in statuses)   # MCP logging overlaid
     assert any(s.value.get("tool") == "slow" and s.value.get("current") is not None for s in statuses)  # MCP progress

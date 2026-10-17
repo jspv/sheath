@@ -1,11 +1,11 @@
 import httpx
 
-from tether import TetherConfig, Session
-from tether.tools.web import web_extract, web_search
+from sheath import SheathConfig, Session
+from sheath.tools.web import web_extract, web_search
 
 
 def _session(tmp_path, api_key="test-key"):
-    cfg = TetherConfig(root_dir=tmp_path / "r")
+    cfg = SheathConfig(root_dir=tmp_path / "r")
     cfg.search.api_key = api_key
     return Session.create(cfg)
 

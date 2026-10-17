@@ -2,18 +2,18 @@ import asyncio
 
 import pytest
 
-from tether import TetherConfig, Tether, tool_factory
-from tether.manager import SessionManager
-from tether.testing import StubChatClient, text
+from sheath import SheathConfig, Sheath, tool_factory
+from sheath.manager import SessionManager
+from sheath.testing import StubChatClient, text
 
 
-def _tether(tmp_path):
-    return Tether(TetherConfig(root_dir=tmp_path / "base"), client=StubChatClient([text("x")]))
+def _sheath(tmp_path):
+    return Sheath(SheathConfig(root_dir=tmp_path / "base"), client=StubChatClient([text("x")]))
 
 
 def test_open_is_reuse_or_create_and_isolated_roots(tmp_path):
     async def run():
-        m = SessionManager(_tether(tmp_path))
+        m = SessionManager(_sheath(tmp_path))
         a = await m.aopen("t1")
         a2 = await m.aopen("t1")          # same id -> same Conversation
         b = await m.aopen("t2")           # different id -> different Conversation + root
@@ -27,7 +27,7 @@ def test_open_is_reuse_or_create_and_isolated_roots(tmp_path):
 
 def test_get_and_close_are_idempotent(tmp_path):
     async def run():
-        m = SessionManager(_tether(tmp_path))
+        m = SessionManager(_sheath(tmp_path))
         c = await m.aopen("t1")
         assert m.get("t1") is c
         await m.close("t1")
@@ -39,7 +39,7 @@ def test_get_and_close_are_idempotent(tmp_path):
 
 def test_lazy_ttl_expiry(tmp_path):
     async def run():
-        m = SessionManager(_tether(tmp_path), idle_ttl_s=60)
+        m = SessionManager(_sheath(tmp_path), idle_ttl_s=60)
         c1 = await m.aopen("t1")
         c1.last_activity -= 1000          # simulate idle past the TTL
         assert m.get("t1") is None        # lazy expiry on get
@@ -54,7 +54,7 @@ def test_open_rejects_path_traversal_id(tmp_path):
     # An untrusted threadId must not escape the base via separators/.. — it would be rmtree'd on
     # close. The open fails closed (ValueError) before any workspace is created.
     async def run():
-        m = SessionManager(_tether(tmp_path))
+        m = SessionManager(_sheath(tmp_path))
         for bad in ("../../../etc/evil", "a/b", "..", r"a\b"):
             with pytest.raises(ValueError):
                 await m.aopen(bad)
@@ -66,7 +66,7 @@ def test_open_rejects_path_traversal_id(tmp_path):
 
 def test_sweep_reaps_idle(tmp_path):
     async def run():
-        m = SessionManager(_tether(tmp_path), idle_ttl_s=60)
+        m = SessionManager(_sheath(tmp_path), idle_ttl_s=60)
         c = await m.aopen("t1")
         c.last_activity -= 1000
         await m.sweep()
@@ -97,21 +97,21 @@ def test_each_conversation_gets_its_own_tool_instance(tmp_path):
         return instance
 
     async def run():
-        tether = Tether(TetherConfig(root_dir=tmp_path / "base"),
+        sheath = Sheath(SheathConfig(root_dir=tmp_path / "base"),
                         client=StubChatClient([text("x")]),
                         tools=[tool_factory(build)])
         try:
-            a = await tether.aopen("conv-a")
-            b = await tether.aopen("conv-b")
+            a = await sheath.aopen("conv-a")
+            b = await sheath.aopen("conv-b")
             assert a is not b
             assert len(built) == 2
             assert built[0] is not built[1]   # no shared connection across conversations
 
-            await tether._sessions().close("conv-a")
+            await sheath._sessions().close("conv-a")
             assert built[0].closed is True
             assert built[1].closed is False   # closing one must not close the other's
         finally:
-            await tether.aclose_sessions()
+            await sheath.aclose_sessions()
 
     asyncio.run(run())
 
@@ -119,7 +119,7 @@ def test_each_conversation_gets_its_own_tool_instance(tmp_path):
 @pytest.mark.parametrize("bad", ["", ".", "..", "a/b", "a\\b", "x\x00y", "a\nb", "x" * 300])
 def test_conversation_ids_must_be_a_single_safe_segment(tmp_path, bad):
     async def run():
-        m = SessionManager(_tether(tmp_path))
+        m = SessionManager(_sheath(tmp_path))
         with pytest.raises(ValueError):
             await m.aopen(bad)
 
@@ -128,7 +128,7 @@ def test_conversation_ids_must_be_a_single_safe_segment(tmp_path, bad):
 
 def test_busy_conversation_is_never_expired(tmp_path):
     async def run():
-        m = SessionManager(_tether(tmp_path), idle_ttl_s=0.01)
+        m = SessionManager(_sheath(tmp_path), idle_ttl_s=0.01)
         conv = await m.aopen("t1")
         async with conv._lock:                    # a turn is in flight
             await asyncio.sleep(0.05)             # well past the TTL
@@ -142,7 +142,7 @@ def test_busy_conversation_is_never_expired(tmp_path):
 
 def test_reopening_a_live_conversation_counts_as_activity(tmp_path):
     async def run():
-        m = SessionManager(_tether(tmp_path), idle_ttl_s=60)
+        m = SessionManager(_sheath(tmp_path), idle_ttl_s=60)
         conv = await m.aopen("t1")
         conv.last_activity -= 30
         before = conv.last_activity
@@ -155,13 +155,13 @@ def test_reopening_a_live_conversation_counts_as_activity(tmp_path):
 
 def test_agui_stream_keeps_an_active_thread_alive_past_its_ttl(tmp_path, monkeypatch):
     async def run():
-        h = Tether(TetherConfig(root_dir=tmp_path / "base", idle_ttl_s=0.5),
+        h = Sheath(SheathConfig(root_dir=tmp_path / "base", idle_ttl_s=0.5),
                    client=StubChatClient([text("x")]))
 
         async def fake(agent, bus, input_data, **kwargs):
             yield "event"
 
-        monkeypatch.setattr("tether.agui.agui_event_stream", fake)
+        monkeypatch.setattr("sheath.agui.agui_event_stream", fake)
         convs = []
         for turn in range(4):                      # 4 turns, 0.2 s apart: 0.6 s > TTL overall
             async for _ in h.agui_stream({"threadId": "t1", "messages": []}):
@@ -180,13 +180,13 @@ def test_agui_stream_keeps_an_active_thread_alive_past_its_ttl(tmp_path, monkeyp
 
 def test_closing_agui_stream_leaves_conversation_idle_immediately(tmp_path, monkeypatch):
     async def run():
-        h = Tether(TetherConfig(root_dir=tmp_path / "base"), client=StubChatClient([text("x")]))
+        h = Sheath(SheathConfig(root_dir=tmp_path / "base"), client=StubChatClient([text("x")]))
 
         async def fake(agent, bus, input_data, **kwargs):
             yield "a"
             yield "b"
 
-        monkeypatch.setattr("tether.agui.agui_event_stream", fake)
+        monkeypatch.setattr("sheath.agui.agui_event_stream", fake)
         stream = h.agui_stream({"threadId": "t1", "messages": []})
         assert await stream.__anext__() == "a"
         await stream.aclose()
@@ -202,7 +202,7 @@ def test_manager_close_waits_for_a_running_turn(tmp_path):
     from tests.test_conversation import _GatedAgent
 
     async def run():
-        m = SessionManager(_tether(tmp_path))
+        m = SessionManager(_sheath(tmp_path))
         c = await m.aopen("t1")
         root = c.session.root
         agent = c.agent = _GatedAgent(root)
@@ -235,7 +235,7 @@ def _block_teardown(conv):
 
 def test_reaping_an_expired_id_does_not_stall_opens_of_other_ids(tmp_path):
     async def run():
-        m = SessionManager(_tether(tmp_path), idle_ttl_s=60)
+        m = SessionManager(_sheath(tmp_path), idle_ttl_s=60)
         old = await m.aopen("t1")
         old.last_activity -= 1000
         gate, started = _block_teardown(old)
@@ -254,7 +254,7 @@ def test_reaping_an_expired_id_does_not_stall_opens_of_other_ids(tmp_path):
 
 def test_reopening_an_expired_id_gets_a_root_that_survives_the_old_teardown(tmp_path):
     async def run():
-        m = SessionManager(_tether(tmp_path), idle_ttl_s=60)
+        m = SessionManager(_sheath(tmp_path), idle_ttl_s=60)
         old = await m.aopen("t1")
         old.last_activity -= 1000
         gate, started = _block_teardown(old)
@@ -279,7 +279,7 @@ def test_open_during_a_sweep_or_close_teardown_keeps_its_root(tmp_path, how):
     # The old conversation's teardown rmtree's the per-id root; a replacement created while
     # it is still running must not have its workspace deleted from under it.
     async def run():
-        m = SessionManager(_tether(tmp_path), idle_ttl_s=60)
+        m = SessionManager(_sheath(tmp_path), idle_ttl_s=60)
         old = await m.aopen("t1")
         old.last_activity -= 1000
         gate, started = _block_teardown(old)

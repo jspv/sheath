@@ -85,13 +85,13 @@ def read_file(session: Session, path: str, offset: int = 0, limit: int = _DEFAUL
 def write_file(session: Session, path: str, content: str) -> str:
     """Write ``content`` to a file under the root, creating parent dirs. Returns a confirmation.
 
-    Paths that resolve into a tether-managed directory (handles/, inputs/, .scripts/,
-    .tether/) are refused: those hold state the harness vouches for.
+    Paths that resolve into a sheath-managed directory (handles/, inputs/, .scripts/,
+    .sheath/) are refused: those hold state the harness vouches for.
     """
     with session.file_io():
         target = safe_path(session.root, path)
         if workspace.is_protected(session.root, target):
-            raise ValueError(f"{path!r} is in a directory managed by tether; write elsewhere "
+            raise ValueError(f"{path!r} is in a directory managed by sheath; write elsewhere "
                              "(e.g. under outputs/) and use save() in run_python for handles")
         data = content.encode("utf-8")   # before truncating: a bad string must not empty it
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -110,7 +110,7 @@ def write_file(session: Session, path: str, content: str) -> str:
 def list_files(session: Session, path: str = ".") -> list[str]:
     """List regular files (recursively) under ``path`` as root-relative POSIX paths.
 
-    Links and tether's private state directory are skipped. At most ``_MAX_LISTED`` paths
+    Links and sheath's private state directory are skipped. At most ``_MAX_LISTED`` paths
     are returned, followed by a note saying how many were left out.
     """
     with session.file_io():
@@ -123,7 +123,7 @@ def list_files(session: Session, path: str = ".") -> list[str]:
             if p.is_symlink() or not p.is_file():
                 continue
             rel = p.relative_to(session.root)
-            if rel.parts[0] == ".tether":
+            if rel.parts[0] == ".sheath":
                 continue
             if len(out) < _MAX_LISTED:
                 out.append(rel.as_posix())

@@ -5,7 +5,7 @@ The root is bind-mounted read-write into the sandbox, so anything directly under
 a link sandboxed code planted. Four *protected* directories are created by the parent
 before any sandboxed code runs and are mounted read-only into the container, so sandboxed
 code can neither write inside them nor replace them. Sandbox-to-parent data travels only
-through a per-run directory under ``.tether/runs/``, and is read here with no-follow,
+through a per-run directory under ``.sheath/runs/``, and is read here with no-follow,
 regular-file-only, size-capped opens.
 """
 
@@ -19,8 +19,8 @@ from pathlib import Path
 
 from .paths import validate_segment
 
-PROTECTED_DIRS: tuple[str, ...] = ("handles", "inputs", ".scripts", ".tether")
-_STATE = ".tether"
+PROTECTED_DIRS: tuple[str, ...] = ("handles", "inputs", ".scripts", ".sheath")
+_STATE = ".sheath"
 _STATE_SUBDIRS: tuple[str, ...] = ("tmp", "runs")
 
 
@@ -48,8 +48,8 @@ def _require_real_dir(path: Path, shown: str, root: Path) -> None:
 
 
 def verify_layout(root: Path | str) -> None:
-    """Raise unless every protected directory, and the parent's own ``.tether/tmp`` and
-    ``.tether/runs``, is a real directory (never follows a link)."""
+    """Raise unless every protected directory, and the parent's own ``.sheath/tmp`` and
+    ``.sheath/runs``, is a real directory (never follows a link)."""
     root = Path(root)
     for name in PROTECTED_DIRS:
         _require_real_dir(root / name, name, root)
@@ -58,7 +58,7 @@ def verify_layout(root: Path | str) -> None:
 
 
 def ensure_layout(root: Path | str) -> None:
-    """Create the protected directories (and ``.tether/tmp``, ``.tether/runs``); refuse a
+    """Create the protected directories (and ``.sheath/tmp``, ``.sheath/runs``); refuse a
     root where one exists as anything else."""
     root = Path(root)
     for name in PROTECTED_DIRS:
@@ -69,7 +69,7 @@ def ensure_layout(root: Path | str) -> None:
         for sub in _STATE_SUBDIRS:
             path = root / _STATE / sub
             if not os.path.lexists(path):
-                path.mkdir()          # no parents: .tether was just proven a real directory
+                path.mkdir()          # no parents: .sheath was just proven a real directory
     verify_layout(root)
 
 
@@ -123,7 +123,7 @@ def state_dir(root: Path | str) -> Path:
 
 
 def _state_subdir(root: Path | str, sub: str) -> Path:
-    """``.tether/<sub>``, created if missing, refused if it is a link or not a directory.
+    """``.sheath/<sub>``, created if missing, refused if it is a link or not a directory.
 
     Never ``mkdir(parents=True, exist_ok=True)``: that would follow a planted link at either
     level and put parent-owned files wherever it points.
@@ -144,7 +144,7 @@ def scratch_dir(root: Path | str) -> Path:
 
 
 def new_run_dir(root: Path | str) -> Path:
-    """Create and return a fresh per-run exchange directory under ``.tether/runs/``."""
+    """Create and return a fresh per-run exchange directory under ``.sheath/runs/``."""
     path = _state_subdir(root, "runs") / secrets.token_hex(8)
     path.mkdir()
     return path

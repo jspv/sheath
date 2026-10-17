@@ -1,8 +1,8 @@
-from tether import TetherConfig, Session
+from sheath import SheathConfig, Session
 
 
 def _session(tmp_path):
-    return Session.create(TetherConfig(root_dir=tmp_path / "r"))
+    return Session.create(SheathConfig(root_dir=tmp_path / "r"))
 
 
 def test_tools_for_code_bundle_includes_core(tmp_path):
@@ -29,23 +29,23 @@ def test_read_document_is_in_web_bundle(tmp_path):
 
 def test_web_instructions_mention_read_document(tmp_path):
     sess = _session(tmp_path)
-    assert "read_document" in sess.tether_instructions("web")
+    assert "read_document" in sess.sheath_instructions("web")
 
 
-def test_tether_instructions_compose_by_bundle(tmp_path):
+def test_sheath_instructions_compose_by_bundle(tmp_path):
     sess = _session(tmp_path)
-    core_only = sess.tether_instructions()  # always includes core
+    core_only = sess.sheath_instructions()  # always includes core
     assert "handle" in core_only.lower()
-    with_code = sess.tether_instructions("code")
+    with_code = sess.sheath_instructions("code")
     assert "run_python" in with_code
     assert "load(" in with_code
     # web fragment only appears when web is selected
-    assert "web_search" not in sess.tether_instructions("code")
-    assert "web_search" in sess.tether_instructions("web")
+    assert "web_search" not in sess.sheath_instructions("code")
+    assert "web_search" in sess.sheath_instructions("web")
 
 
 def test_public_exports_for_host_integration():
-    import tether
+    import sheath
     for name in ("PublishedFile", "OnPublish", "PublishError", "sandbox_preflight",
                  "PreflightReport", "SandboxRuntimeUnavailable"):
-        assert hasattr(tether, name) and name in tether.__all__
+        assert hasattr(sheath, name) and name in sheath.__all__

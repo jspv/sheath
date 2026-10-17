@@ -165,7 +165,7 @@ class HandleStore:
     def __init__(self, root: Path | str) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        # Creates handles/ and .tether/ as real directories, or refuses the root if either
+        # Creates handles/ and .sheath/ as real directories, or refuses the root if either
         # exists as a link: every write below lands inside one of them.
         workspace.ensure_layout(self.root)
         self.dir = self.root / "handles"
@@ -355,7 +355,7 @@ class HandleStore:
     def _register_record(self, record: dict[str, Any]) -> Handle:
         """Register a handle whose file already exists (manifest rehydration, or ``register``).
 
-        **The record is untrusted.** The manifest lives at ``<root>/.tether/manifest.json``,
+        **The record is untrusted.** The manifest lives at ``<root>/.sheath/manifest.json``,
         which the container tier mounts read-only, but the local tier gives sandboxed code
         no such barrier, and a manifest migrated from the pre-trust-zone location
         (``handles/_manifest.json``) was sandbox-writable. Only ``id``, ``kind``, ``path`` and ``source`` are taken from the record -- the
@@ -551,7 +551,7 @@ class HandleStore:
     def _save_manifest(self) -> None:
         """Persist {id: summary} atomically so a new HandleStore on this root can rehydrate.
 
-        Lives under ``.tether/``, which sandboxed code cannot write in the container tier.
+        Lives under ``.sheath/``, which sandboxed code cannot write in the container tier.
         Rewrites the whole manifest on every mutation -- fine at handle frequency.
         """
         with self._lock:

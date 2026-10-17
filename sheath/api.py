@@ -1,4 +1,4 @@
-"""Public entry point: Tether / solve() returning a Result."""
+"""Public entry point: Sheath / solve() returning a Result."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
-from .config import TetherConfig
+from .config import SheathConfig
 from .publish import OnPublish
 from .status import StatusEvent
 
@@ -64,20 +64,20 @@ def _dotenv_value(name: str) -> str | None:
     return dotenv_values(".env").get(name)
 
 
-class Tether:
-    """Reusable tether: builds a Session per run via the composable create_agent path."""
+class Sheath:
+    """Reusable sheath: builds a Session per run via the composable create_agent path."""
 
-    def __init__(self, config: TetherConfig | None = None, client: Any | None = None,
+    def __init__(self, config: SheathConfig | None = None, client: Any | None = None,
                  *, tools: list | None = None,
                  bundles: tuple[str, ...] = ("code", "files", "web"),
                  on_status: _StatusSink | None = None,
                  agent_instructions: str | None = None,
                  on_publish: OnPublish | None = None) -> None:
-        cfg = config or TetherConfig()
+        cfg = config or SheathConfig()
         if cfg.search.api_key is None:
             key = os.environ.get("TAVILY_API_KEY") or _dotenv_value("TAVILY_API_KEY")
             if key:
-                # A copy: constructing a Tether must not rewrite the caller's config, and
+                # A copy: constructing a Sheath must not rewrite the caller's config, and
                 # must not export a .env file into this process's environment.
                 cfg = dataclasses.replace(
                     cfg, search=dataclasses.replace(cfg.search, api_key=key))
@@ -112,7 +112,7 @@ class Tether:
         not safe to first-touch ``aopen`` from multiple OS threads — drive continuous sessions from
         one loop, the v1 contract for both AG-UI and the async terminal loop.
 
-        ``agent_instructions`` and ``on_publish`` override the Tether-level defaults for this
+        ``agent_instructions`` and ``on_publish`` override the Sheath-level defaults for this
         conversation.
         """
         return await self._sessions().aopen(session_id, tools=tools,
@@ -138,7 +138,7 @@ class Tether:
         auto-allocated dir, so parallel ``solve``/``asolve`` calls are isolated. With a **pinned**
         ``root_dir`` they share that dir — and since the default reaps it on completion, concurrent
         one-shots on the same pinned root are unsafe (the first to finish deletes it mid-run). For
-        concurrent one-shots either leave ``root_dir`` unset or use a separate Tether per call.
+        concurrent one-shots either leave ``root_dir`` unset or use a separate Sheath per call.
         """
         from .conversation import Conversation
 
@@ -184,9 +184,9 @@ class Tether:
 
 
 def solve(problem: str, *, tools: list | None = None,
-          config: TetherConfig | None = None, client: Any | None = None,
+          config: SheathConfig | None = None, client: Any | None = None,
           on_status: _StatusSink | None = None, keep: bool = False,
           agent_instructions: str | None = None) -> Result:
-    """One-shot convenience: build a Tether and solve a single problem (ephemeral unless keep)."""
-    return Tether(config, client=client, tools=tools, on_status=on_status,
+    """One-shot convenience: build a Sheath and solve a single problem (ephemeral unless keep)."""
+    return Sheath(config, client=client, tools=tools, on_status=on_status,
                   agent_instructions=agent_instructions).solve(problem, keep=keep)

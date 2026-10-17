@@ -1,8 +1,8 @@
-from tether.config import TetherConfig, SearchConfig
+from sheath.config import SheathConfig, SearchConfig
 
 
 def test_search_config_defaults():
-    cfg = TetherConfig()
+    cfg = SheathConfig()
     assert isinstance(cfg.search, SearchConfig)
     assert cfg.search.provider == "tavily"
     assert cfg.search.api_key is None
@@ -11,4 +11,4 @@ def test_search_config_defaults():
 
 
 def test_search_config_independent_between_instances():
-    assert TetherConfig().search is not TetherConfig().search
+    assert SheathConfig().search is not SheathConfig().search

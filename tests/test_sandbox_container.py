@@ -1,12 +1,12 @@
-from tether.config import SandboxConfig
-from tether.sandbox import _RunContext
-from tether.sandbox_container import ContainerSandbox
+from sheath.config import SandboxConfig
+from sheath.sandbox import _RunContext
+from sheath.sandbox_container import ContainerSandbox
 
 
 def _ctx(tmp_path, config, publish_enabled=False):
     return _RunContext(
         script_rel=".scripts/inline_x.py", argv=["EU", "2025"], root=tmp_path,
-        run_dir=tmp_path / ".tether" / "runs" / "tok", config=config,
+        run_dir=tmp_path / ".sheath" / "runs" / "tok", config=config,
         publish_enabled=publish_enabled,
     )
 
@@ -29,7 +29,7 @@ def test_run_argv_maps_userns_for_podman_only(tmp_path):
 def test_run_argv_blocks_network_by_default(tmp_path):
     cfg = SandboxConfig(backend="container")
     sb = _sandbox(tmp_path, cfg)
-    argv = sb._build_run_argv(_ctx(tmp_path, cfg), "tether-sandbox:abc", layer=None)
+    argv = sb._build_run_argv(_ctx(tmp_path, cfg), "sheath-sandbox:abc", layer=None)
     assert argv[:2] == ["podman", "run"]
     assert "--network" in argv and argv[argv.index("--network") + 1] == "none"
     assert "--read-only" in argv and "--cap-drop" in argv
@@ -39,19 +39,19 @@ def test_run_argv_blocks_network_by_default(tmp_path):
 def test_run_argv_enables_network_when_configured(tmp_path):
     cfg = SandboxConfig(backend="container", network=True)
     sb = _sandbox(tmp_path, cfg)
-    argv = sb._build_run_argv(_ctx(tmp_path, cfg), "tether-sandbox:abc", layer=None)
+    argv = sb._build_run_argv(_ctx(tmp_path, cfg), "sheath-sandbox:abc", layer=None)
     assert "--network" not in argv                          # network not blocked
 
 
 def test_run_argv_mounts_root_and_runtime_and_translates_paths(tmp_path):
     cfg = SandboxConfig(backend="container")
     sb = _sandbox(tmp_path, cfg)
-    argv = sb._build_run_argv(_ctx(tmp_path, cfg), "tether-sandbox:abc", layer=None)
+    argv = sb._build_run_argv(_ctx(tmp_path, cfg), "sheath-sandbox:abc", layer=None)
     joined = " ".join(argv)
     assert f"{tmp_path}:/workspace:rw" in joined            # root mount
     assert ":/runtime:ro" in joined                         # runtime mount (read-only)
-    assert "TETHER_ROOT=/workspace" in joined              # path translated into the container
-    assert "TETHER_RUN_DIR=/tether-run" in joined
+    assert "SHEATH_ROOT=/workspace" in joined              # path translated into the container
+    assert "SHEATH_RUN_DIR=/sheath-run" in joined
     assert "PYTHONPATH=/runtime" in joined
     # the command ends by running the runner with the relative script path + user args
     assert argv[-5:] == ["python", "/runtime/_runner.py", ".scripts/inline_x.py", "EU", "2025"]
@@ -61,7 +61,7 @@ def test_run_argv_mounts_layer_and_extends_pythonpath(tmp_path):
     cfg = SandboxConfig(backend="container", pip_packages=("rich",))
     sb = _sandbox(tmp_path, cfg)
     layer = tmp_path / "layer"
-    argv = sb._build_run_argv(_ctx(tmp_path, cfg), "tether-sandbox:abc", layer=layer)
+    argv = sb._build_run_argv(_ctx(tmp_path, cfg), "sheath-sandbox:abc", layer=layer)
     joined = " ".join(argv)
     assert f"{layer}:/pkgs:ro" in joined
     assert "PYTHONPATH=/runtime:/pkgs" in joined
@@ -70,7 +70,7 @@ def test_run_argv_mounts_layer_and_extends_pythonpath(tmp_path):
 def test_run_argv_applies_resource_limits(tmp_path):
     cfg = SandboxConfig(backend="container", max_memory_mb=512, max_cpus=1.5)
     sb = _sandbox(tmp_path, cfg)
-    argv = sb._build_run_argv(_ctx(tmp_path, cfg), "tether-sandbox:abc", layer=None)
+    argv = sb._build_run_argv(_ctx(tmp_path, cfg), "sheath-sandbox:abc", layer=None)
     assert "--memory" in argv and argv[argv.index("--memory") + 1] == "512m"
     assert "--cpus" in argv and argv[argv.index("--cpus") + 1] == "1.5"
     assert "--pids-limit" in argv
@@ -85,9 +85,9 @@ def test_run_argv_mounts_protected_dirs_read_only(tmp_path):
     argv = _sandbox(tmp_path, cfg)._build_run_argv(_ctx(tmp_path, cfg), "img:abc", layer=None)
     mounts = _mounts(argv)
     assert f"{tmp_path}:/workspace:rw" in mounts
-    for name in ("handles", "inputs", ".scripts", ".tether"):
+    for name in ("handles", "inputs", ".scripts", ".sheath"):
         assert f"{tmp_path / name}:/workspace/{name}:ro" in mounts
-    assert f"{tmp_path / '.tether' / 'runs' / 'tok'}:/tether-run:rw" in mounts
+    assert f"{tmp_path / '.sheath' / 'runs' / 'tok'}:/sheath-run:rw" in mounts
     # the workspace mount comes first so the read-only mounts overlay it
     assert mounts.index(f"{tmp_path}:/workspace:rw") < mounts.index(
         f"{tmp_path / 'handles'}:/workspace/handles:ro")
@@ -98,23 +98,23 @@ def test_run_argv_passes_the_run_dir_protocol_env(tmp_path):
     sb = _sandbox(tmp_path, cfg)
     argv = sb._build_run_argv(_ctx(tmp_path, cfg), "img:abc", layer=None)
     envs = [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
-    assert "TETHER_ROOT=/workspace" in envs and "TETHER_RUN_DIR=/tether-run" in envs
-    assert not any(e.startswith(("TETHER_EMIT", "TETHER_REGISTRY", "TETHER_NEW_HANDLES",
-                                 "TETHER_PUBLISH")) for e in envs)
+    assert "SHEATH_ROOT=/workspace" in envs and "SHEATH_RUN_DIR=/sheath-run" in envs
+    assert not any(e.startswith(("SHEATH_EMIT", "SHEATH_REGISTRY", "SHEATH_NEW_HANDLES",
+                                 "SHEATH_PUBLISH")) for e in envs)
     argv = sb._build_run_argv(_ctx(tmp_path, cfg, publish_enabled=True), "img:abc", layer=None)
-    assert "TETHER_PUBLISH_ENABLED=1" in [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
+    assert "SHEATH_PUBLISH_ENABLED=1" in [argv[i + 1] for i, a in enumerate(argv) if a == "-e"]
 
 
 def test_timed_out_container_that_cannot_be_removed_is_orphaned(tmp_path, monkeypatch):
-    from tether import sandbox_container
-    from tether.procio import BoundedRun
+    from sheath import sandbox_container
+    from sheath.procio import BoundedRun
 
     cfg = SandboxConfig(backend="container")
     sb = _sandbox(tmp_path, cfg)
-    monkeypatch.setattr("tether.container_runtime.ensure_image", lambda *a, **k: None)
+    monkeypatch.setattr("sheath.container_runtime.ensure_image", lambda *a, **k: None)
     monkeypatch.setattr(sandbox_container, "run_bounded",
                         lambda *a, **k: BoundedRun("", "", -9, True))
-    monkeypatch.setattr(sb, "_remove_container", lambda name: "\ntether: WARNING: stuck")
+    monkeypatch.setattr(sb, "_remove_container", lambda name: "\nsheath: WARNING: stuck")
     launched = sb._launch(_ctx(tmp_path, cfg))
     assert launched.orphaned and launched.killed_by == "timeout"
 

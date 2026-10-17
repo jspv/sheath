@@ -1,5 +1,5 @@
 [project]
-name = "tether-harness"
+name = "sheath"
 dynamic = ["version"]
 description = "Data-integration agent harness on Microsoft Agent Framework"
 readme = "README.md"
@@ -45,14 +45,14 @@ docling = ["docling>=2.0"]         # heavy + downloads models; opt-in. Enables r
 agui = ["agent-framework-ag-ui>=1.0.0rc4"]
 
 [project.urls]
-Homepage = "https://github.com/jspv/tether"
-Repository = "https://github.com/jspv/tether"
-Issues = "https://github.com/jspv/tether/issues"
+Homepage = "https://github.com/jspv/sheath"
+Repository = "https://github.com/jspv/sheath"
+Issues = "https://github.com/jspv/sheath/issues"
 
 [project.scripts]
-tether = "tether.cli:main"
-tether-prefetch-docling = "tether.tools.documents:_prefetch_main"
-tether-build-sandbox = "tether.container_runtime:_build_sandbox_main"
+sheath = "sheath.cli:main"
+sheath-prefetch-docling = "sheath.tools.documents:_prefetch_main"
+sheath-build-sandbox = "sheath.container_runtime:_build_sandbox_main"
 
 [dependency-groups]
 dev = [
@@ -69,16 +69,16 @@ testpaths = ["tests"]
 addopts = "-q"
 
 [tool.hatch.version]
-path = "tether/__init__.py"
+path = "sheath/__init__.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["tether"]
+packages = ["sheath"]
 
 [tool.hatch.build.targets.sdist]
 # Ship only the package; hatchling always adds the metadata files (README, LICENSE,
 # pyproject). This keeps dev cruft out of the sdist — spike script, scratch workspaces,
 # eval runs, internal design notes, and the examples' node_modules.
-only-include = ["tether"]
+only-include = ["sheath"]
 
 [build-system]
 requires = ["hatchling"]

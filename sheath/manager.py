@@ -43,22 +43,22 @@ class InMemoryConversationStore:
 
 
 def _conv_root(config: Any, conv_id: str) -> Path:
-    """Isolated per-conversation root. Uses config.root_dir as a base, else ./.tether/sessions.
+    """Isolated per-conversation root. Uses config.root_dir as a base, else ./.sheath/sessions.
 
     ``conv_id`` may be untrusted (e.g. an AG-UI ``threadId``). It must name a *single* child of the
     base — a separator or ``..`` would let it nest under another conversation or escape the base
     entirely, and on close it would be ``rmtree``'d (see ``Conversation.aclose``). We reject
     separators up front and run the result through ``safe_path`` as a containment backstop.
     """
-    base = Path(config.root_dir) if config.root_dir else (Path.cwd() / ".tether" / "sessions")
+    base = Path(config.root_dir) if config.root_dir else (Path.cwd() / ".sheath" / "sessions")
     validate_segment(conv_id, what="conversation id")
     return safe_path(base, conv_id)
 
 
 class SessionManager:
-    def __init__(self, tether: Any, *, idle_ttl_s: float | None = None,
+    def __init__(self, sheath: Any, *, idle_ttl_s: float | None = None,
                  store: ConversationStore | None = None) -> None:
-        self._tether = tether
+        self._sheath = sheath
         self._ttl = idle_ttl_s
         self._store: ConversationStore = store or InMemoryConversationStore()
         self._lock = asyncio.Lock()
@@ -84,7 +84,7 @@ class SessionManager:
         an expired conversation (whose teardown may wait for a running turn) happens outside
         the manager lock; only opens of that same id wait for it.
 
-        ``agent_instructions`` and ``on_publish`` override the Tether defaults for a conversation
+        ``agent_instructions`` and ``on_publish`` override the Sheath defaults for a conversation
         being *created*; re-opening a live id returns the existing conversation unchanged.
         """
         while True:
@@ -116,18 +116,18 @@ class SessionManager:
                       on_publish) -> Conversation:
         conv_id = session_id if session_id is not None else uuid.uuid4().hex
         config = dataclasses.replace(
-            self._tether.config, root_dir=str(_conv_root(self._tether.config, conv_id)))
+            self._sheath.config, root_dir=str(_conv_root(self._sheath.config, conv_id)))
         from .api import expand_tools
 
         conv = await Conversation.acreate(
-            id=conv_id, config=config, client=self._tether._make_client(),
-            tools=expand_tools(self._tether._tools) + expand_tools(tools),
-            bundles=bundles if bundles is not None else self._tether._bundles,
+            id=conv_id, config=config, client=self._sheath._make_client(),
+            tools=expand_tools(self._sheath._tools) + expand_tools(tools),
+            bundles=bundles if bundles is not None else self._sheath._bundles,
             reap_on_close=True,
             agent_instructions=(agent_instructions if agent_instructions is not None
-                                else self._tether._agent_instructions),
+                                else self._sheath._agent_instructions),
             on_publish=(on_publish if on_publish is not None
-                        else self._tether._on_publish),
+                        else self._sheath._on_publish),
         )
         self._store.put(conv_id, conv)
         return conv

@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-from tether.paths import PathEscapesRootError, safe_path
+from sheath.paths import PathEscapesRootError, safe_path
 
 
 def test_simple_relative_path_resolves_under_root(tmp_path):

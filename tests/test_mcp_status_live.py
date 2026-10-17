@@ -3,8 +3,8 @@ from pathlib import Path
 
 from agent_framework import MCPStdioTool
 
-from tether import Tether, TetherConfig
-from tether.testing import StubChatClient, text, tool_call
+from sheath import Sheath, SheathConfig
+from sheath.testing import StubChatClient, text, tool_call
 
 _FIXTURE = str(Path(__file__).parent / "fixtures" / "mcp_progress_server.py")
 
@@ -13,7 +13,7 @@ def test_mcp_logging_and_progress_reach_on_status(tmp_path):
     events = []
     mcp = MCPStdioTool(name="statusfix", command=sys.executable, args=[_FIXTURE])
     client = StubChatClient([tool_call("slow", {"n": 3}), text("done")])
-    h = Tether(TetherConfig(root_dir=tmp_path / "r"), client=client,
+    h = Sheath(SheathConfig(root_dir=tmp_path / "r"), client=client,
                 tools=[mcp], on_status=events.append)
     result = h.solve("go")
 

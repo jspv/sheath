@@ -1,4 +1,4 @@
-"""Serve the tether to an AG-UI client (e.g. CopilotKit) over SSE.
+"""Serve the sheath to an AG-UI client (e.g. CopilotKit) over SSE.
 
 Run with the agui extra installed:
     uv sync --prerelease=allow --extra agui
@@ -12,10 +12,10 @@ from ag_ui.encoder import EventEncoder
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from tether import Tether
+from sheath import Sheath
 
 app = FastAPI()
-tether = Tether()
+sheath = Sheath()
 
 
 @app.post("/agent")
@@ -24,7 +24,7 @@ async def agent(request: Request) -> StreamingResponse:
     encoder = EventEncoder()
 
     async def sse():
-        async for event in tether.agui_stream(input_data):
+        async for event in sheath.agui_stream(input_data):
             yield encoder.encode(event)         # -> "data: {json}\n\n"
 
     return StreamingResponse(sse(), media_type="text/event-stream")

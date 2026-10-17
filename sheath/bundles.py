@@ -3,7 +3,7 @@
 The data substrate (handle store + spill + inspect_handle) is always-on CORE.
 ``code`` / ``files`` / ``web`` / ``deliver`` are opt-in layers (``deliver`` is only exposed when
 the host configured an ``on_publish`` callback). Each contributes (a) tool names
-and (b) a ``tether_instructions`` fragment the model reads to operate the tools.
+and (b) a ``sheath_instructions`` fragment the model reads to operate the tools.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ BUNDLE_INSTRUCTIONS: dict[str, str] = {
     "deliver": (
         "To give the user a file, write it under outputs/ and deliver it with "
         "publish_file(path, name=None, description=None), or from run_python with "
-        "`from tether_sandbox import publish; publish(path, name=None, description=None)`. "
+        "`from sheath_sandbox import publish; publish(path, name=None, description=None)`. "
         "publish_handle(handle_id, format='csv'|'xlsx'|'parquet'|'json', name=None) delivers a "
         "handle directly. Publish only final files the user asked for, and tell the user the "
         "delivered file name."

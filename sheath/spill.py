@@ -3,7 +3,7 @@
 A plugged-in capability (a plain tool function or an MCP server tool) returns its raw
 Python value; MAF calls our ``result_parser`` on it *before serialization*. We write an
 oversized/structured value to the handle store and return the lightweight handle summary
-the model sees; small values defer to MAF's default parsing. The tether's own built-in
+the model sees; small values defer to MAF's default parsing. The sheath's own built-in
 tools are NOT given this parser -- they already manage their own output.
 """
 

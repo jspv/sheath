@@ -17,7 +17,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from . import bundles as _bundles
-from .config import TetherConfig, SandboxConfig
+from .config import SheathConfig, SandboxConfig
 from .handles import Handle, HandleStore
 from .paths import safe_filename, validate_segment
 from .publish import OnPublish, PublishError, validate_publication
@@ -37,7 +37,7 @@ class Session:
     root: Path
     store: HandleStore
     sandbox: SandboxExecutor
-    config: TetherConfig
+    config: SheathConfig
     on_publish: OnPublish | None = None
     _mcp_connected: list[Any] = field(default_factory=list, init=False, repr=False)
     status_bus: StatusBus = field(default_factory=StatusBus, init=False, repr=False)
@@ -46,7 +46,7 @@ class Session:
     io_lock: Any = field(default_factory=threading.RLock, init=False, repr=False)
 
     @classmethod
-    def create(cls, config: TetherConfig, *, on_publish: OnPublish | None = None,
+    def create(cls, config: SheathConfig, *, on_publish: OnPublish | None = None,
                bundles: tuple[str, ...] | None = None) -> "Session":
         """Open the workspace. Sandbox ``publish()`` is enabled only when ``on_publish`` is set
         and the ``deliver`` bundle is selected (``bundles=None`` means all bundles)."""
@@ -55,7 +55,7 @@ class Session:
         # sandbox -- so it cannot simply be created last. Instead, a root this call brought
         # into being is removed again if anything downstream fails. Without that, every
         # failed start on a machine with no container runtime left an empty
-        # .tether/runs/run-XXXX behind, one per attempt. A root that already existed (a pinned
+        # .sheath/runs/run-XXXX behind, one per attempt. A root that already existed (a pinned
         # root_dir, a resumed thread) is never touched: it is not ours to delete.
         try:
             store = HandleStore(root)
@@ -90,7 +90,7 @@ class Session:
                 continue
             rel = p.relative_to(self.root)
             top = rel.parts[0]
-            if top in ("handles", ".scripts", ".tether") or top.startswith("_"):
+            if top in ("handles", ".scripts", ".sheath") or top.startswith("_"):
                 continue
             out.append(rel.as_posix())
         return out
@@ -131,7 +131,7 @@ class Session:
         wanted = _bundles.tool_names_for(bundles, exclude=self._unavailable_bundles())
         return [t for t in build_tools(self) if t.__name__ in wanted]
 
-    def tether_instructions(self, *bundles: str) -> str:
+    def sheath_instructions(self, *bundles: str) -> str:
         """The operating-manual text (core + selected bundles)."""
         return _bundles.instructions_for(bundles, exclude=self._unavailable_bundles())
 
@@ -162,7 +162,7 @@ class Session:
 
     def _publish(self, path: str, *, name: str | None, description: str | None,
                  source: str) -> dict:
-        with tempfile.TemporaryDirectory(prefix="tether-publish-") as snap:
+        with tempfile.TemporaryDirectory(prefix="sheath-publish-") as snap:
             try:
                 pf = validate_publication(self.root, path, name=name, description=description,
                                           source=source, max_bytes=self.config.max_publish_bytes,
@@ -281,7 +281,7 @@ class Session:
         """Build a MAF agent over the selected bundles plus developer tools/MCP.
 
         Plain callables are spill-wrapped; MCP servers are connected and their tools get
-        the spill parser (Task 5). Operational instructions ride in ``tether_instructions``.
+        the spill parser (Task 5). Operational instructions ride in ``sheath_instructions``.
         """
         from agent_framework import create_harness_agent  # local: heavy dep, imported at call time
 
@@ -300,7 +300,7 @@ class Session:
         return create_harness_agent(
             client,
             name=name,
-            harness_instructions=self.tether_instructions(*bundles),
+            harness_instructions=self.sheath_instructions(*bundles),
             agent_instructions=agent_instructions,
             tools=builtin + external,
             disable_todo=True,
@@ -348,12 +348,12 @@ class Session:
             shutil.rmtree(self.root)
 
 
-def _resolve_root(config: TetherConfig) -> tuple[Path, bool]:
+def _resolve_root(config: SheathConfig) -> tuple[Path, bool]:
     """Return ``(root, pre_existing)``, creating the root.
 
     A pinned ``root_dir`` is used verbatim. Otherwise a fresh directory is created under
-    ``./.tether/runs/`` with ``mkdtemp``, which is atomic: two threads or processes can
-    never be handed the same root. That base is deliberately not ``./.tether/sessions/``,
+    ``./.sheath/runs/`` with ``mkdtemp``, which is atomic: two threads or processes can
+    never be handed the same root. That base is deliberately not ``./.sheath/sessions/``,
     where conversation roots are named by a caller-supplied id.
     """
     if config.root_dir is not None:
@@ -361,7 +361,7 @@ def _resolve_root(config: TetherConfig) -> tuple[Path, bool]:
         pre_existing = root.exists()
         root.mkdir(parents=True, exist_ok=True)
         return root, pre_existing
-    base = Path.cwd() / ".tether" / "runs"
+    base = Path.cwd() / ".sheath" / "runs"
     base.mkdir(parents=True, exist_ok=True)
     return Path(tempfile.mkdtemp(prefix="run-", dir=base)).resolve(), False
 
@@ -461,7 +461,7 @@ def _build_sandbox(root: Path, store: HandleStore, sandbox_config: SandboxConfig
 
     Four guards, in order: (1) the isolation requirement -- ``require_isolation=True``
     refuses anything but the container tier, however it was selected (an explicit
-    ``backend="local"`` or ``TETHER_SANDBOX_BACKEND=local``); (2) the backend name, which
+    ``backend="local"`` or ``SHEATH_SANDBOX_BACKEND=local``); (2) the backend name, which
     fails closed on anything but ``local``/``container``; (3) runtime *liveness*, not mere
     presence; (4) construction. A missing container runtime is a hard error, never a
     fallback: silently dropping to the local tier would hand back a no-isolation sandbox
@@ -476,7 +476,7 @@ def _build_sandbox(root: Path, store: HandleStore, sandbox_config: SandboxConfig
         raise ValueError(
             f"unknown sandbox backend {sandbox_config.backend!r}; expected 'container' "
             f"(real isolation, the default) or 'local' (NO isolation). Note "
-            f"TETHER_SANDBOX_BACKEND selects the tier, not the container runtime -- "
+            f"SHEATH_SANDBOX_BACKEND selects the tier, not the container runtime -- "
             f"use SandboxConfig.container_runtime for that."
         )
     if sandbox_config.backend == "container":
@@ -497,7 +497,7 @@ def _build_sandbox(root: Path, store: HandleStore, sandbox_config: SandboxConfig
             raise SandboxRuntimeUnavailable(
                 f"{e}\n\nrun_python executes model-authored code, which is why the "
                 f"container backend is the default. Install and start a runtime, or set "
-                f'TetherConfig.sandbox.backend = "local" (or TETHER_SANDBOX_BACKEND=local) '
+                f'SheathConfig.sandbox.backend = "local" (or SHEATH_SANDBOX_BACKEND=local) '
                 f"to run it with no isolation."
             ) from e
         # Deliberately outside the try: only the probe's RuntimeErrors mean "no usable

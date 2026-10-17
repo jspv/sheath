@@ -2,14 +2,14 @@ import asyncio
 
 import pytest
 
-from tether import TetherConfig, Tether, report_progress
-from tether.api import ToolFactory, expand_tools, tool_factory
-from tether.testing import StubChatClient, text, tool_call
+from sheath import SheathConfig, Sheath, report_progress
+from sheath.api import ToolFactory, expand_tools, tool_factory
+from sheath.testing import StubChatClient, text, tool_call
 
 
 def test_solve_is_ephemeral_by_default(tmp_path):
     client = StubChatClient([text("the answer")])
-    h = Tether(TetherConfig(root_dir=tmp_path / "r"), client=client)
+    h = Sheath(SheathConfig(root_dir=tmp_path / "r"), client=client)
     result = h.solve("go")
     assert result.final_text == "the answer"
     assert not (tmp_path / "r").exists()             # one-shot reaped its workspace
@@ -17,7 +17,7 @@ def test_solve_is_ephemeral_by_default(tmp_path):
 
 def test_solve_keep_retains_workspace(tmp_path):
     client = StubChatClient([text("the answer")])
-    h = Tether(TetherConfig(root_dir=tmp_path / "k"), client=client)
+    h = Sheath(SheathConfig(root_dir=tmp_path / "k"), client=client)
     result = h.solve("go", keep=True)
     assert (tmp_path / "k").exists()                 # audit trail retained
     assert result.session_dir == tmp_path / "k"
@@ -27,7 +27,7 @@ def test_aopen_returns_persistent_conversation(tmp_path):
     import asyncio
 
     async def run():
-        h = Tether(TetherConfig(root_dir=tmp_path / "base"), client=StubChatClient([text("x")]))
+        h = Sheath(SheathConfig(root_dir=tmp_path / "base"), client=StubChatClient([text("x")]))
         conv = await h.aopen("t1")
         same = await h.aopen("t1")
         assert conv is same                          # open-or-create via the manager
@@ -47,7 +47,7 @@ def noisy(n: int) -> str:
 def test_on_status_receives_tool_events_end_to_end(tmp_path):
     events = []
     client = StubChatClient([tool_call("noisy", {"n": 1}), text("done")])
-    h = Tether(TetherConfig(root_dir=tmp_path / "s"), client=client,
+    h = Sheath(SheathConfig(root_dir=tmp_path / "s"), client=client,
                 tools=[noisy], on_status=events.append)
     result = h.solve("go")
     assert result.final_text == "done"
@@ -60,7 +60,7 @@ def test_on_status_receives_tool_events_end_to_end(tmp_path):
 def test_on_status_can_be_passed_per_call(tmp_path):
     events = []
     client = StubChatClient([tool_call("noisy", {"n": 1}), text("done")])
-    h = Tether(TetherConfig(root_dir=tmp_path / "s2"), client=client, tools=[noisy])
+    h = Sheath(SheathConfig(root_dir=tmp_path / "s2"), client=client, tools=[noisy])
     h.solve("go", on_status=events.append)                # per-call sets the sink
     assert any(e.message == "step A" for e in events)
 
@@ -70,7 +70,7 @@ def test_raising_on_status_does_not_break_the_run(tmp_path):
         raise RuntimeError("subscriber boom")
 
     client = StubChatClient([tool_call("noisy", {"n": 1}), text("done")])
-    h = Tether(TetherConfig(root_dir=tmp_path / "s3"), client=client,
+    h = Sheath(SheathConfig(root_dir=tmp_path / "s3"), client=client,
                 tools=[noisy], on_status=boom)
     result = h.solve("go")
     assert result.final_text == "done"                    # status is best-effort; run completes
@@ -90,8 +90,8 @@ def fetch_big(n: int) -> dict:
 
 
 def test_solve_sync_returns_answer_and_spills(tmp_path):
-    cfg = TetherConfig(root_dir=tmp_path / "r", spill_threshold_bytes=64)
-    h = Tether(cfg, client=_client(), tools=[fetch_big])
+    cfg = SheathConfig(root_dir=tmp_path / "r", spill_threshold_bytes=64)
+    h = Sheath(cfg, client=_client(), tools=[fetch_big])
     result = h.solve("go")
     assert result.final_text == "the answer"
     assert result.handles  # developer tool spilled
@@ -99,8 +99,8 @@ def test_solve_sync_returns_answer_and_spills(tmp_path):
 
 
 def test_asolve_matches_solve(tmp_path):
-    cfg = TetherConfig(root_dir=tmp_path / "r2", spill_threshold_bytes=64)
-    h = Tether(cfg, client=_client(), tools=[fetch_big])
+    cfg = SheathConfig(root_dir=tmp_path / "r2", spill_threshold_bytes=64)
+    h = Sheath(cfg, client=_client(), tools=[fetch_big])
     result = asyncio.run(h.asolve("go"))
     assert result.final_text == "the answer"
     assert result.handles
@@ -112,8 +112,8 @@ class _FailingClient(StubChatClient):
 
 
 def test_solve_preserves_error_on_agent_failure(tmp_path):
-    cfg = TetherConfig(root_dir=tmp_path / "err")
-    h = Tether(cfg, client=_FailingClient([text("unused")]), tools=[])
+    cfg = SheathConfig(root_dir=tmp_path / "err")
+    h = Sheath(cfg, client=_FailingClient([text("unused")]), tools=[])
     result = h.solve("go", keep=True)       # keep retains the work-so-far / audit trail
     assert result.error is not None
     assert "RuntimeError" in result.error
@@ -167,7 +167,7 @@ def test_tool_factory_rejects_a_non_callable():
 
 
 def test_asolve_expands_factories_per_call(tmp_path):
-    from tether.testing import StubChatClient, text
+    from sheath.testing import StubChatClient, text
 
     built = []
 
@@ -178,7 +178,7 @@ def test_asolve_expands_factories_per_call(tmp_path):
     build_tool = tool_factory(build)
 
     async def run():
-        h = Tether(TetherConfig(root_dir=tmp_path / "r"),
+        h = Sheath(SheathConfig(root_dir=tmp_path / "r"),
                    client=StubChatClient([text("x")]), tools=[build_tool])
         await h.asolve("go")
         await h.asolve("go")
@@ -189,27 +189,27 @@ def test_asolve_expands_factories_per_call(tmp_path):
 
 def test_constructor_reads_dotenv_without_exporting_it(tmp_path, monkeypatch):
     import os
-    from tether import Tether, TetherConfig
-    from tether.testing import StubChatClient, text
+    from sheath import Sheath, SheathConfig
+    from sheath.testing import StubChatClient, text
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("SOME_OTHER_SECRET", raising=False)
     (tmp_path / ".env").write_text("TAVILY_API_KEY=tvly-from-file\nSOME_OTHER_SECRET=s3cret\n")
-    cfg = TetherConfig()
-    h = Tether(cfg, client=StubChatClient([text("x")]))
+    cfg = SheathConfig()
+    h = Sheath(cfg, client=StubChatClient([text("x")]))
     assert h.config.search.api_key == "tvly-from-file"
     assert cfg.search.api_key is None                  # the caller's object is untouched
     assert "TAVILY_API_KEY" not in os.environ and "SOME_OTHER_SECRET" not in os.environ
 
 
 def test_environment_key_wins_over_dotenv_and_explicit_key_wins_over_both(tmp_path, monkeypatch):
-    from tether import Tether, TetherConfig
-    from tether.config import SearchConfig
-    from tether.testing import StubChatClient, text
+    from sheath import Sheath, SheathConfig
+    from sheath.config import SearchConfig
+    from sheath.testing import StubChatClient, text
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".env").write_text("TAVILY_API_KEY=from-file\n")
     monkeypatch.setenv("TAVILY_API_KEY", "from-env")
     client = StubChatClient([text("x")])
-    assert Tether(TetherConfig(), client=client).config.search.api_key == "from-env"
-    explicit = TetherConfig(search=SearchConfig(api_key="explicit"))
-    assert Tether(explicit, client=client).config is explicit
+    assert Sheath(SheathConfig(), client=client).config.search.api_key == "from-env"
+    explicit = SheathConfig(search=SearchConfig(api_key="explicit"))
+    assert Sheath(explicit, client=client).config is explicit

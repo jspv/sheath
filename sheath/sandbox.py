@@ -68,7 +68,7 @@ class SandboxQuarantinedError(RuntimeError):
 
 @dataclass
 class ControlPlaneLimits:
-    """Bounds on the parent<->child control channel. Defaults mirror TetherConfig."""
+    """Bounds on the parent<->child control channel. Defaults mirror SheathConfig."""
     max_emit_bytes: int = 1024 * 1024
     max_control_bytes: int = 8 * 1024 * 1024
     max_new_handles: int = 256
@@ -100,7 +100,7 @@ class _RunContext:
     script_rel: str          # user script path relative to root
     argv: list[str]          # user args (already str-coerced)
     root: Path
-    run_dir: Path            # per-run exchange directory (.tether/runs/<token>)
+    run_dir: Path            # per-run exchange directory (.sheath/runs/<token>)
     config: SandboxConfig
     publish_enabled: bool = False
 
@@ -110,7 +110,7 @@ class _OrchestratedSandbox:
 
     Runs are serialized by ``self.lock`` (an ``RLock`` the Session also takes for its own file
     work in the root), so no sandboxed code is running while the parent validates or writes
-    paths under the root. Each run gets a fresh exchange directory under ``.tether/runs/``;
+    paths under the root. Each run gets a fresh exchange directory under ``.sheath/runs/``;
     it is the only place the parent reads sandbox-written data from, and every such read is
     no-follow, regular-file-only and size-capped (``workspace.read_control_file``).
     """
@@ -172,7 +172,7 @@ class _OrchestratedSandbox:
                 return ExecResult(
                     stdout=launched.stdout, stderr=launched.stderr, result=None,
                     error=((launched.stderr.strip() + "\n") if launched.stderr.strip() else "")
-                          + "tether: the sandbox could not be stopped; nothing it produced "
+                          + "sheath: the sandbox could not be stopped; nothing it produced "
                             "was ingested",
                     exit_code=launched.exit_code, killed_by=launched.killed_by)
 
@@ -209,13 +209,13 @@ class _OrchestratedSandbox:
         try:
             raw = workspace.read_control_file(run_dir, "emit.json", self.limits.max_emit_bytes)
         except ControlFileError as e:
-            return None, f"tether: emit payload {e}; save a handle instead"
+            return None, f"sheath: emit payload {e}; save a handle instead"
         if raw is None:
             return None, None
         try:
             return json.loads(raw.decode("utf-8", errors="replace")), None
         except (ValueError, RecursionError) as e:   # JSONDecodeError is a ValueError
-            return None, f"tether: malformed emit payload: {type(e).__name__}: {e}"
+            return None, f"sheath: malformed emit payload: {type(e).__name__}: {e}"
 
     def _ingest_new_handles(self, run_dir: Path) -> tuple[list[str], str | None]:
         """Adopt handles the child saved; return (ids, error).
@@ -231,7 +231,7 @@ class _OrchestratedSandbox:
             raw = workspace.read_control_file(run_dir, "new_handles.jsonl",
                                               self.limits.max_control_bytes)
         except ControlFileError as e:
-            return ids, f"tether: control file {e}; no handles ingested"
+            return ids, f"sheath: control file {e}; no handles ingested"
         if raw is None:
             return ids, None
         reused: dict[str, None] = {}   # distinct rejected ids, insertion-ordered
@@ -243,7 +243,7 @@ class _OrchestratedSandbox:
             if not line:
                 continue
             if len(ids) >= self.limits.max_new_handles:
-                cap_error = (f"tether: too many new handles (cap "
+                cap_error = (f"sheath: too many new handles (cap "
                              f"{self.limits.max_new_handles}); later records dropped")
                 break
             try:
@@ -265,11 +265,11 @@ class _OrchestratedSandbox:
             shown = list(reused)[:_MAX_REPORTED_IDS]
             more = ", ..." if len(reused) > _MAX_REPORTED_IDS else ""
             # Bounded by construction: the length cannot grow with the number of records.
-            parts.append(f"tether: save rejected for {reused_count} record(s): handle id "
+            parts.append(f"sheath: save rejected for {reused_count} record(s): handle id "
                          f"already exists and handles are immutable; ids: "
                          f"{', '.join(shown)}{more}")
         if rejected:
-            parts.append(f"tether: {rejected} handle record(s) rejected (invalid id or kind, "
+            parts.append(f"sheath: {rejected} handle record(s) rejected (invalid id or kind, "
                          f"or the saved file was missing or unreadable)")
         if cap_error:
             parts.append(cap_error)
@@ -288,18 +288,18 @@ class _OrchestratedSandbox:
             raw = workspace.read_control_file(run_dir, "publish.jsonl",
                                               _MAX_PUBLISH_CONTROL_BYTES)
         except ControlFileError as e:
-            return [], f"tether: publish control file {e}; publication requests ignored"
+            return [], f"sheath: publish control file {e}; publication requests ignored"
         if raw is None:
             return [], None
         lines = [ln for ln in raw.decode("utf-8", errors="replace").splitlines() if ln.strip()]
         if not lines:
             return [], None
         if exit_code != 0:
-            return [], (f"tether: {len(lines)} publication request(s) ignored because the "
+            return [], (f"sheath: {len(lines)} publication request(s) ignored because the "
                         "script did not exit cleanly")
         notes: list[str] = []
         if len(lines) > _MAX_PUBLISH_REQUESTS:
-            notes.append(f"tether: too many publication requests (cap {_MAX_PUBLISH_REQUESTS}); "
+            notes.append(f"sheath: too many publication requests (cap {_MAX_PUBLISH_REQUESTS}); "
                          "later requests dropped")
         records: list[dict] = []
         for line in lines[:_MAX_PUBLISH_REQUESTS]:
@@ -340,17 +340,17 @@ class LocalSubprocessSandbox(_OrchestratedSandbox):
             "PATH": _minimal_path(),
             "HOME": str(ctx.root),
             "TMPDIR": str(ctx.root),
-            "TETHER_ROOT": str(ctx.root),
-            "TETHER_RUN_DIR": str(ctx.run_dir),
+            "SHEATH_ROOT": str(ctx.root),
+            "SHEATH_RUN_DIR": str(ctx.run_dir),
             "PYTHONPATH": str(_RUNTIME_DIR),
         }
         if ctx.publish_enabled:
-            env["TETHER_PUBLISH_ENABLED"] = "1"
+            env["SHEATH_PUBLISH_ENABLED"] = "1"
         run = run_bounded([sys.executable, str(_RUNNER), str(script_abs), *ctx.argv],
                           cwd=ctx.root, env=env, timeout=ctx.config.timeout_s,
                           cap=ctx.config.max_output_bytes, preexec_fn=self._limits())
         if run.timed_out:
-            return _LaunchResult(run.stdout, run.stderr + "\ntether: killed (timeout)",
+            return _LaunchResult(run.stdout, run.stderr + "\nsheath: killed (timeout)",
                                  -1, killed_by="timeout")
         return _LaunchResult(run.stdout, run.stderr, run.returncode)
 

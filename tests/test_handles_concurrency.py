@@ -1,6 +1,6 @@
 import threading
 
-from tether.handles import HandleStore
+from sheath.handles import HandleStore
 
 
 def test_concurrent_puts_all_succeed_with_distinct_ids(tmp_path):

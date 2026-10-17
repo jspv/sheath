@@ -3,8 +3,8 @@ import os
 
 import pytest
 
-from tether import workspace
-from tether.workspace import (ControlFileError, WorkspaceTamperedError, ensure_layout,
+from sheath import workspace
+from sheath.workspace import (ControlFileError, WorkspaceTamperedError, ensure_layout,
                               is_protected, iter_bounded_lines, new_run_dir,
                               read_control_file, require_regular, scratch_dir, verify_layout)
 
@@ -43,7 +43,7 @@ def test_is_protected(tmp_path):
     ensure_layout(tmp_path)
     root = tmp_path.resolve()
     assert is_protected(root, root / "handles" / "h1.json")
-    assert is_protected(root, root / ".tether")
+    assert is_protected(root, root / ".sheath")
     assert not is_protected(root, root / "outputs" / "a.csv")
     assert not is_protected(root, root)
 
@@ -56,7 +56,7 @@ def test_is_protected_case_variant_on_case_insensitive_fs(tmp_path):
     if (tmp_path / "HANDLES").exists():
         # Case-insensitive filesystem (e.g., macOS APFS)
         assert is_protected(root, root / "HANDLES" / "x")
-        assert is_protected(root, root / ".TETHER")
+        assert is_protected(root, root / ".SHEATH")
     else:
         # Case-sensitive filesystem
         pytest.skip("case-sensitive filesystem")
@@ -73,8 +73,8 @@ def test_run_dirs_are_unique_and_under_state(tmp_path):
     ensure_layout(tmp_path)
     a, b = new_run_dir(tmp_path), new_run_dir(tmp_path)
     assert a != b and a.is_dir() and b.is_dir()
-    assert a.parent == tmp_path.resolve() / ".tether" / "runs"
-    assert scratch_dir(tmp_path) == tmp_path.resolve() / ".tether" / "tmp"
+    assert a.parent == tmp_path.resolve() / ".sheath" / "runs"
+    assert scratch_dir(tmp_path) == tmp_path.resolve() / ".sheath" / "tmp"
     assert scratch_dir(tmp_path).is_dir()
 
 
@@ -161,7 +161,7 @@ def test_iter_bounded_lines_mixed_endings():
 def test_ensure_layout_creates_real_state_subdirs(tmp_path):
     ensure_layout(tmp_path)
     for sub in ("tmp", "runs"):
-        p = tmp_path / ".tether" / sub
+        p = tmp_path / ".sheath" / sub
         assert p.is_dir() and not p.is_symlink()
 
 
@@ -170,8 +170,8 @@ def test_layout_refuses_a_planted_state_subdir_link(tmp_path, sub):
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     root = tmp_path / "root"
-    (root / ".tether").mkdir(parents=True)
-    os.symlink(elsewhere, root / ".tether" / sub)      # e.g. carried over from an old root
+    (root / ".sheath").mkdir(parents=True)
+    os.symlink(elsewhere, root / ".sheath" / sub)      # e.g. carried over from an old root
     with pytest.raises(WorkspaceTamperedError):
         ensure_layout(root)
     with pytest.raises(WorkspaceTamperedError):
@@ -184,8 +184,8 @@ def test_layout_refuses_a_planted_state_subdir_link(tmp_path, sub):
 @pytest.mark.parametrize("sub", ["tmp", "runs"])
 def test_verify_layout_refuses_a_file_state_subdir(tmp_path, sub):
     ensure_layout(tmp_path)
-    (tmp_path / ".tether" / sub).rmdir()
-    (tmp_path / ".tether" / sub).write_text("x")
+    (tmp_path / ".sheath" / sub).rmdir()
+    (tmp_path / ".sheath" / sub).write_text("x")
     with pytest.raises(WorkspaceTamperedError):
         verify_layout(tmp_path)
 
@@ -195,8 +195,8 @@ def test_scratch_and_run_dir_never_follow_a_link_planted_after_layout(tmp_path):
     elsewhere = tmp_path.parent / (tmp_path.name + "-elsewhere")
     elsewhere.mkdir()
     for sub in ("tmp", "runs"):
-        (tmp_path / ".tether" / sub).rmdir()
-        os.symlink(elsewhere, tmp_path / ".tether" / sub)
+        (tmp_path / ".sheath" / sub).rmdir()
+        os.symlink(elsewhere, tmp_path / ".sheath" / sub)
     with pytest.raises(WorkspaceTamperedError):
         scratch_dir(tmp_path)
     with pytest.raises(WorkspaceTamperedError):

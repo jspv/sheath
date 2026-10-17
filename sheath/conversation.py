@@ -15,7 +15,7 @@ import shutil
 import time
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
-from .config import TetherConfig
+from .config import SheathConfig
 from .publish import OnPublish
 from .session import Session
 
@@ -46,14 +46,14 @@ class Conversation:
         self._closed = False
 
     @classmethod
-    async def acreate(cls, *, id: str, config: TetherConfig, client: Any,
+    async def acreate(cls, *, id: str, config: SheathConfig, client: Any,
                       tools: list | None = None, bundles: tuple[str, ...] = ("code", "files", "web"),
                       reap_on_close: bool = True,
                       agent_instructions: str | None = None,
                       on_publish: OnPublish | None = None) -> "Conversation":
         """Open the workspace, build the agent once, start a MAF conversation thread.
 
-        ``agent_instructions`` (the host's domain system prompt) is appended after tether's
+        ``agent_instructions`` (the host's domain system prompt) is appended after sheath's
         operating manual by MAF: ``<core + bundle instructions>\\n\\n<agent_instructions>``.
         """
         session = Session.create(config, on_publish=on_publish, bundles=bundles)

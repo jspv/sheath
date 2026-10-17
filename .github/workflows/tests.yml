@@ -34,7 +34,7 @@ jobs:
         run: uv sync --locked --prerelease=allow --extra agui
 
       - name: Lint
-        run: uv run ruff check tether tests
+        run: uv run ruff check sheath tests
 
       # The suite pins the sandbox to the local tier (tests/conftest.py), and the unit tests
       # need no network or keys. The container-tier tests run here, not skip: ubuntu-latest

@@ -1,4 +1,4 @@
-"""Thin CLI over Tether.solve()."""
+"""Thin CLI over Sheath.solve()."""
 
 from __future__ import annotations
 
@@ -7,18 +7,18 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from .api import Tether
-from .config import TetherConfig
+from .api import Sheath
+from .config import SheathConfig
 from .sandbox import SandboxRuntimeUnavailable
 from .status import StatusEvent
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="tether", description="Run the data-integration tether.")
+    p = argparse.ArgumentParser(prog="sheath", description="Run the data-integration sheath.")
     p.add_argument("problem", help="The task to solve.")
     p.add_argument("--model", default="gpt-5-mini",
                    help="Model for the built-in OpenAI client (the CLI uses that client; "
-                        "to use another provider, drive Tether from Python with your own client).")
+                        "to use another provider, drive Sheath from Python with your own client).")
     p.add_argument("--root", default=None, help="Workspace root dir (default: a fresh session dir).")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Print live tool status to stderr as the task runs.")
@@ -43,9 +43,9 @@ def make_status_printer(write: Callable[[str], None] | None = None):
 def run_cli(argv: list[str] | None = None, client=None) -> int:
     args = build_parser().parse_args(argv)
     on_status = make_status_printer() if args.verbose else None
-    cfg = TetherConfig(model=args.model,
+    cfg = SheathConfig(model=args.model,
                         root_dir=Path(args.root) if args.root else None)
-    result = Tether(cfg, client=client).solve(args.problem, on_status=on_status)
+    result = Sheath(cfg, client=client).solve(args.problem, on_status=on_status)
     if result.final_text:
         print(result.final_text)
     if result.error:

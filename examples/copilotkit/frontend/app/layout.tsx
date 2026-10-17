@@ -2,8 +2,8 @@ import type { ReactNode } from "react";
 import { Providers } from "./providers";
 
 export const metadata = {
-  title: "tether × CopilotKit",
-  description: "CopilotKit frontend for the tether AG-UI backend",
+  title: "sheath × CopilotKit",
+  description: "CopilotKit frontend for the sheath AG-UI backend",
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

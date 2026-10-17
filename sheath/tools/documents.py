@@ -2,7 +2,7 @@
 
 The source may be a workspace-relative path (resolved + jailed by safe_path) or an http(s)
 URL (downloaded through the egress guard into the harness-private scratch directory
-``.tether/tmp/`` first, so Docling only ever receives a local path and never makes its own
+``.sheath/tmp/`` first, so Docling only ever receives a local path and never makes its own
 network requests). A workspace file is likewise snapshotted into scratch under the session
 lock, so sandboxed code cannot swap it while it is being read. The markdown is stored as a text handle
 and only the summary is returned, keeping large document text out of the model's context.
@@ -206,11 +206,11 @@ def prefetch_models(downloader: Callable[..., object] | None = None, *, ocr: boo
 
 
 def _prefetch_main() -> None:
-    """Console-script entry (``tether-prefetch-docling``): warm the Docling model cache."""
+    """Console-script entry (``sheath-prefetch-docling``): warm the Docling model cache."""
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="tether-prefetch-docling",
+        prog="sheath-prefetch-docling",
         description="Pre-download Docling models so the first read_document call is fast.",
     )
     parser.add_argument("--ocr", action="store_true",

@@ -161,11 +161,11 @@ def _search_python(root: Path, base: Path, pattern: str, ignore_case: bool,
                "ignore_case": ignore_case, "max_matches": max_matches, "glob": glob}
     # Outside the root (the host's private temp dir, mode 0600): inside it, the scan would
     # find the request file -- which contains the pattern -- and report it as a hit.
-    fd, req_path = tempfile.mkstemp(prefix="tether-search-", suffix=".json")
+    fd, req_path = tempfile.mkstemp(prefix="sheath-search-", suffix=".json")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(request, f)
-        run = run_bounded([sys.executable, "-I", "-m", "tether.tools._search_worker",
+        run = run_bounded([sys.executable, "-I", "-m", "sheath.tools._search_worker",
                            req_path], timeout=_PY_TIMEOUT_S, cap=_PY_OUTPUT_CAP,
                           cwd=tempfile.gettempdir())
     finally:

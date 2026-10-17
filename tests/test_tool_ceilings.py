@@ -5,15 +5,15 @@ import json
 import pandas as pd
 import pytest
 
-from tether import Session, TetherConfig
-from tether.tools.registry import build_tools
+from sheath import Session, SheathConfig
+from sheath.tools.registry import build_tools
 
 _CEILING = 64_000   # bytes of JSON; well under any model context window
 
 
 @pytest.fixture
 def hostile(tmp_path):
-    sess = Session.create(TetherConfig(root_dir=tmp_path / "r"))
+    sess = Session.create(SheathConfig(root_dir=tmp_path / "r"))
     (sess.root / "one_line.txt").write_text("x" * 5_000_000)
     for i in range(3000):
         (sess.root / f"f{i:04d}.txt").write_text("needle " + "y" * 2000 + "\n")
@@ -32,7 +32,7 @@ def _tool(sess, name):
     lambda s, t, f: _tool(s, "search")("needle", ".", None, False, 10**9),
     lambda s, t, f: _tool(s, "run_python")("print('A' * 5_000_000)"),
     lambda s, t, f: _tool(s, "run_python")(
-        "from tether_sandbox import emit\nemit('Z' * 500_000)"),
+        "from sheath_sandbox import emit\nemit('Z' * 500_000)"),
     lambda s, t, f: _tool(s, "inspect_handle")(t, 10**9, True),
     lambda s, t, f: _tool(s, "inspect_handle")(f, 10**9, True),
 ])

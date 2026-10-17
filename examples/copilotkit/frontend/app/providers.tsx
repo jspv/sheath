@@ -21,7 +21,7 @@ if (typeof window !== "undefined") {
 export function Providers({ children }: { children: ReactNode }) {
   // `agent` matches the key registered in CopilotRuntime's `agents` map (app/api/copilotkit/route.ts).
   return (
-    <CopilotKit runtimeUrl="/api/copilotkit" agent="tether">
+    <CopilotKit runtimeUrl="/api/copilotkit" agent="sheath">
       {children}
     </CopilotKit>
   );

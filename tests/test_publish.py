@@ -5,7 +5,7 @@ import os
 
 import pytest
 
-from tether.publish import PublishError, PublishedFile, validate_publication
+from sheath.publish import PublishError, PublishedFile, validate_publication
 
 MAX = 1024
 
@@ -170,9 +170,9 @@ def test_symlink_loop_in_a_parent_component_is_a_publish_error(tmp_path):
 
 def test_state_dir_is_not_publishable(tmp_path):
     import pytest
-    from tether.publish import PublishError, validate_publication
-    (tmp_path / ".tether").mkdir()
-    (tmp_path / ".tether" / "manifest.json").write_text("{}")
+    from sheath.publish import PublishError, validate_publication
+    (tmp_path / ".sheath").mkdir()
+    (tmp_path / ".sheath" / "manifest.json").write_text("{}")
     with pytest.raises(PublishError, match="internal"):
-        validate_publication(tmp_path, ".tether/manifest.json", name=None, description=None,
+        validate_publication(tmp_path, ".sheath/manifest.json", name=None, description=None,
                              source="t", max_bytes=1000)

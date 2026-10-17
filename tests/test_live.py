@@ -3,17 +3,17 @@ import os
 
 import pytest
 
-from tether import Tether, TetherConfig
+from sheath import Sheath, SheathConfig
 
 pytestmark = pytest.mark.skipif(
-    os.environ.get("TETHER_LIVE") != "1",
-    reason="set TETHER_LIVE=1 (and OPENAI_API_KEY in .env) to run the live smoke test",
+    os.environ.get("SHEATH_LIVE") != "1",
+    reason="set SHEATH_LIVE=1 (and OPENAI_API_KEY in .env) to run the live smoke test",
 )
 
 
 def test_live_gather_act_verify(tmp_path):
-    cfg = TetherConfig(root_dir=tmp_path / "r", model="gpt-5-mini")
-    h = Tether(cfg)
+    cfg = SheathConfig(root_dir=tmp_path / "r", model="gpt-5-mini")
+    h = Sheath(cfg)
 
     async def run():
         # solve() is one-shot and builds/reaps its own session, so seed a handle on a

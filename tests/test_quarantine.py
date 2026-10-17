@@ -6,10 +6,10 @@ import subprocess
 
 import pytest
 
-from tether import Session, TetherConfig
-from tether.config import SandboxConfig
-from tether.procio import BoundedRun
-from tether.sandbox import SandboxQuarantinedError
+from sheath import Session, SheathConfig
+from sheath.config import SandboxConfig
+from sheath.procio import BoundedRun
+from sheath.sandbox import SandboxQuarantinedError
 
 
 class _FakeRuntime:
@@ -54,15 +54,15 @@ class _FakeRuntime:
 
 @pytest.fixture
 def quarantined(tmp_path, monkeypatch):
-    import tether.container_runtime as cr
-    import tether.sandbox_container as sc
-    from tether.sandbox_container import ContainerSandbox
+    import sheath.container_runtime as cr
+    import sheath.sandbox_container as sc
+    from sheath.sandbox_container import ContainerSandbox
 
     fake = _FakeRuntime()
     monkeypatch.setattr(cr, "ensure_image", lambda *a, **k: None)
     monkeypatch.setattr(sc, "run_bounded", fake.bounded)
     monkeypatch.setattr(sc.subprocess, "run", fake.run)
-    sess = Session.create(TetherConfig(root_dir=tmp_path / "r"), on_publish=lambda pf: {})
+    sess = Session.create(SheathConfig(root_dir=tmp_path / "r"), on_publish=lambda pf: {})
     sb = ContainerSandbox(root=sess.root, store=sess.store, runtime="podman",
                           config=SandboxConfig(backend="container", timeout_s=1))
     sess.sandbox = sb
@@ -129,10 +129,10 @@ def test_inspect_saying_no_such_container_also_clears(quarantined):
 
 
 def test_false_orphan_when_rm_fails_but_container_is_gone(tmp_path, monkeypatch):
-    import tether.container_runtime as cr
-    import tether.sandbox_container as sc
-    from tether.handles import HandleStore
-    from tether.sandbox_container import ContainerSandbox
+    import sheath.container_runtime as cr
+    import sheath.sandbox_container as sc
+    from sheath.handles import HandleStore
+    from sheath.sandbox_container import ContainerSandbox
 
     fake = _FakeRuntime()
     fake.inspect_gone = True                      # the container already exited and was --rm'd
@@ -151,10 +151,10 @@ _SOCKET_ERR = ("Error: unable to connect to Podman socket: Get \"http://d/v5.0.0
 
 
 def _container_sandbox(tmp_path, monkeypatch, fake):
-    import tether.container_runtime as cr
-    import tether.sandbox_container as sc
-    from tether.handles import HandleStore
-    from tether.sandbox_container import ContainerSandbox
+    import sheath.container_runtime as cr
+    import sheath.sandbox_container as sc
+    from sheath.handles import HandleStore
+    from sheath.sandbox_container import ContainerSandbox
 
     monkeypatch.setattr(cr, "ensure_image", lambda *a, **k: None)
     monkeypatch.setattr(sc, "run_bounded", fake.bounded)
@@ -189,8 +189,8 @@ def test_unreachable_runtime_does_not_clear_an_existing_quarantine(quarantined):
 
 
 @pytest.mark.parametrize("text", [
-    'Error: no such container "tether-abc"',                         # podman
-    "Error response from daemon: No such container: tether-abc",     # docker
+    'Error: no such container "sheath-abc"',                         # podman
+    "Error response from daemon: No such container: sheath-abc",     # docker
 ])
 def test_runtime_no_such_container_message_clears_quarantine(quarantined, text):
     sess, fake = quarantined
@@ -200,8 +200,8 @@ def test_runtime_no_such_container_message_clears_quarantine(quarantined, text):
 
 
 @pytest.mark.parametrize("text", [
-    'Error: no such container "tether-abc"',
-    "Error response from daemon: No such container: tether-abc",
+    'Error: no such container "sheath-abc"',
+    "Error response from daemon: No such container: sheath-abc",
 ])
 def test_no_such_container_at_timeout_is_not_orphaned(tmp_path, monkeypatch, text):
     fake = _FakeRuntime()
@@ -213,7 +213,7 @@ def test_no_such_container_at_timeout_is_not_orphaned(tmp_path, monkeypatch, tex
 
 
 def test_local_sandbox_quarantine_check_is_a_noop(tmp_path):
-    sess = Session.create(TetherConfig(root_dir=tmp_path / "r"))
+    sess = Session.create(SheathConfig(root_dir=tmp_path / "r"))
     sess.sandbox.check_quarantine()
     with sess.file_io():
         pass

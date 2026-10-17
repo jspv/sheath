@@ -2626,6 +2626,55 @@ wheels = [
 ]
 
 [[package]]
+name = "sheath"
+source = { editable = "." }
+dependencies = [
+    { name = "agent-framework-core" },
+    { name = "agent-framework-openai" },
+    { name = "httpx" },
+    { name = "mcp" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "python-dotenv" },
+    { name = "trafilatura" },
+]
+
+[package.optional-dependencies]
+agui = [
+    { name = "agent-framework-ag-ui" },
+]
+docling = [
+    { name = "docling" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "agent-framework-ag-ui", marker = "extra == 'agui'", specifier = ">=1.0.0rc4" },
+    { name = "agent-framework-core", specifier = ">=1.8.1" },
+    { name = "agent-framework-openai", specifier = ">=1.8.1" },
+    { name = "docling", marker = "extra == 'docling'", specifier = ">=2.0" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "mcp", specifier = ">=1.27" },
+    { name = "pandas", specifier = ">=2.0" },
+    { name = "pyarrow", specifier = ">=15.0" },
+    { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "trafilatura", specifier = ">=2.0.0" },
+]
+provides-extras = ["agui", "docling"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "pytest", specifier = ">=8.0" },
+    { name = "ruff", specifier = ">=0.6" },
+]
+
+[[package]]
 name = "shellingham"
 version = "1.5.4"
 source = { registry = "https://pypi.org/simple" }
@@ -2706,55 +2755,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/46/58/8c37dea7bbf769b20d58e7ace7e5edfe65b849442b00ffcdd56be88697c6/tabulate-0.10.0.tar.gz", hash = "sha256:e2cfde8f79420f6deeffdeda9aaec3b6bc5abce947655d17ac662b126e48a60d", size = 91754, upload-time = "2026-03-04T18:55:34.402Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/99/55/db07de81b5c630da5cbf5c7df646580ca26dfaefa593667fc6f2fe016d2e/tabulate-0.10.0-py3-none-any.whl", hash = "sha256:f0b0622e567335c8fabaaa659f1b33bcb6ddfe2e496071b743aa113f8774f2d3", size = 39814, upload-time = "2026-03-04T18:55:31.284Z" },
-]
-
-[[package]]
-name = "tether-harness"
-source = { editable = "." }
-dependencies = [
-    { name = "agent-framework-core" },
-    { name = "agent-framework-openai" },
-    { name = "httpx" },
-    { name = "mcp" },
-    { name = "pandas" },
-    { name = "pyarrow" },
-    { name = "python-dotenv" },
-    { name = "trafilatura" },
-]
-
-[package.optional-dependencies]
-agui = [
-    { name = "agent-framework-ag-ui" },
-]
-docling = [
-    { name = "docling" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "agent-framework-ag-ui", marker = "extra == 'agui'", specifier = ">=1.0.0rc4" },
-    { name = "agent-framework-core", specifier = ">=1.8.1" },
-    { name = "agent-framework-openai", specifier = ">=1.8.1" },
-    { name = "docling", marker = "extra == 'docling'", specifier = ">=2.0" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "mcp", specifier = ">=1.27" },
-    { name = "pandas", specifier = ">=2.0" },
-    { name = "pyarrow", specifier = ">=15.0" },
-    { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "trafilatura", specifier = ">=2.0.0" },
-]
-provides-extras = ["agui", "docling"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8.0" },
-    { name = "ruff", specifier = ">=0.6" },
 ]
 
 [[package]]

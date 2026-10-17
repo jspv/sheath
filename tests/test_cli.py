@@ -1,6 +1,6 @@
-from tether.cli import make_status_printer, run_cli
-from tether.status import StatusEvent
-from tether.testing import StubChatClient, text, tool_call
+from sheath.cli import make_status_printer, run_cli
+from sheath.status import StatusEvent
+from sheath.testing import StubChatClient, text, tool_call
 
 
 def test_status_printer_formats_event():
@@ -13,7 +13,7 @@ def test_status_printer_formats_event():
 
 def test_verbose_prints_tool_status_to_stderr(tmp_path, capsys):
     client = StubChatClient([
-        tool_call("run_python", {"code": "from tether_sandbox import emit\nemit(1)\n"}),
+        tool_call("run_python", {"code": "from sheath_sandbox import emit\nemit(1)\n"}),
         text("done"),
     ])
     code = run_cli(["go", "-v", "--root", str(tmp_path / "r")], client=client)
@@ -42,13 +42,13 @@ def test_main_prints_the_message_and_exits_2_without_a_runtime(monkeypatch, caps
     """The plan's bar: not a traceback, and not a silent local run."""
     import pytest
 
-    from tether.sandbox import SandboxRuntimeUnavailable
+    from sheath.sandbox import SandboxRuntimeUnavailable
 
     def unavailable(*a, **kw):
         raise SandboxRuntimeUnavailable("no container runtime found: ...\n\nrun_python ...")
 
-    monkeypatch.setattr("tether.cli.run_cli", unavailable)
-    from tether.cli import main
+    monkeypatch.setattr("sheath.cli.run_cli", unavailable)
+    from sheath.cli import main
 
     with pytest.raises(SystemExit) as excinfo:
         main()
@@ -64,12 +64,12 @@ def test_runtime_unavailable_message_states_the_opt_out_once(tmp_path, monkeypat
     user read 'install podman or docker ... set backend local' twice in one error."""
     import pytest
 
-    from tether.config import SandboxConfig
-    from tether.handles import HandleStore
-    from tether.sandbox import SandboxRuntimeUnavailable
-    from tether.session import _build_sandbox
+    from sheath.config import SandboxConfig
+    from sheath.handles import HandleStore
+    from sheath.sandbox import SandboxRuntimeUnavailable
+    from sheath.session import _build_sandbox
 
-    monkeypatch.setattr("tether.container_runtime.detect_runtime",
+    monkeypatch.setattr("sheath.container_runtime.detect_runtime",
                         lambda override, which=None: (_ for _ in ()).throw(
                             RuntimeError("no container runtime found: neither podman nor "
                                          "docker is on PATH")))

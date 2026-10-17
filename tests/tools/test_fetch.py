@@ -1,12 +1,12 @@
 import httpx
 
-from tether import TetherConfig, Session
-from tether.config import FetchConfig
-from tether.tools.fetch import fetch_url
+from sheath import SheathConfig, Session
+from sheath.config import FetchConfig
+from sheath.tools.fetch import fetch_url
 
 
 def _session(tmp_path, **fetch_kw):
-    return Session.create(TetherConfig(root_dir=tmp_path / "r",
+    return Session.create(SheathConfig(root_dir=tmp_path / "r",
                                        fetch=FetchConfig(**fetch_kw)))
 
 
@@ -49,7 +49,7 @@ def test_fetch_rejects_disallowed_scheme(tmp_path):
 def test_fetch_truncates_body_over_max_bytes(tmp_path):
     # An over-large body is truncated (and flagged), not a hard failure -- the agent can
     # still search/inspect what came back.
-    cfg = TetherConfig(root_dir=tmp_path / "r")
+    cfg = SheathConfig(root_dir=tmp_path / "r")
     cfg.fetch.max_bytes = 5
     sess = Session.create(cfg)
 
@@ -104,9 +104,9 @@ def test_fetch_follows_redirects(tmp_path):
 def test_default_client_has_user_agent_and_does_not_follow_redirects(tmp_path):
     """_default_client sets follow_redirects=False so guarded_fetch can handle redirects
     with re-validation against egress policy for each hop."""
-    from tether.tools.fetch import _default_client
+    from sheath.tools.fetch import _default_client
 
-    c = _default_client(TetherConfig().fetch)
+    c = _default_client(SheathConfig().fetch)
     try:
         assert c.follow_redirects is False
         assert "Mozilla" in c.headers["user-agent"]
@@ -297,13 +297,13 @@ def test_fetch_url_binary_over_limit_is_an_error(tmp_path):
 
 
 def test_fetch_url_deadline_is_a_structured_error(tmp_path, monkeypatch):
-    from tether.egress import FetchDeadlineExceeded
+    from sheath.egress import FetchDeadlineExceeded
     sess = _session(tmp_path)
 
     def late(*a, **k):
         raise FetchDeadlineExceeded("fetch exceeded the 120s total deadline")
 
-    monkeypatch.setattr("tether.tools.fetch.guarded_fetch", late)
+    monkeypatch.setattr("sheath.tools.fetch.guarded_fetch", late)
     out = fetch_url(sess, "https://example.com/x")
     assert "total deadline" in out["error"]
 

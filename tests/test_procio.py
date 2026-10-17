@@ -2,8 +2,8 @@ import os
 import sys
 import time
 
-from tether.config import SandboxConfig
-from tether.procio import run_bounded
+from sheath.config import SandboxConfig
+from sheath.procio import run_bounded
 
 
 def _py(code: str, **kw):
@@ -20,7 +20,7 @@ def test_large_output_keeps_head_and_tail_and_names_the_gap():
     r = _py("import sys; sys.stdout.write('A' * 500 + 'B' * 100000 + 'Z' * 500)")
     assert r.stdout.startswith("A" * 500)
     assert r.stdout.endswith("Z" * 500)
-    assert "[tether: 100000 bytes of output omitted]" in r.stdout
+    assert "[sheath: 100000 bytes of output omitted]" in r.stdout
     assert len(r.stdout) < 1200
 
 

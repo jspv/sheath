@@ -1,26 +1,26 @@
-"""TETHER-3: domain agent instructions reach the agent through Tether / aopen / asolve."""
+"""TETHER-3: domain agent instructions reach the agent through Sheath / aopen / asolve."""
 
 import asyncio
 
-from tether import Tether, TetherConfig
-from tether.conversation import Conversation
-from tether.testing import StubChatClient, text
+from sheath import Sheath, SheathConfig
+from sheath.conversation import Conversation
+from sheath.testing import StubChatClient, text
 
 
 def _instructions(agent) -> str:
     return agent.default_options["instructions"]
 
 
-def _tether(tmp_path, **kw) -> Tether:
-    cfg = TetherConfig(root_dir=tmp_path / "base")
+def _sheath(tmp_path, **kw) -> Sheath:
+    cfg = SheathConfig(root_dir=tmp_path / "base")
     cfg.search.api_key = "x"   # skip the dotenv lookup
-    return Tether(cfg, client=StubChatClient([text("ok")]), bundles=("code",), **kw)
+    return Sheath(cfg, client=StubChatClient([text("ok")]), bundles=("code",), **kw)
 
 
 def test_conversation_acreate_passes_agent_instructions(tmp_path):
     async def run():
         conv = await Conversation.acreate(
-            id="c", config=TetherConfig(root_dir=tmp_path / "r"),
+            id="c", config=SheathConfig(root_dir=tmp_path / "r"),
             client=StubChatClient([text("ok")]), bundles=("code",),
             agent_instructions="DOMAIN-X")
         try:
@@ -30,12 +30,12 @@ def test_conversation_acreate_passes_agent_instructions(tmp_path):
 
     instr = asyncio.run(run())
     assert instr.endswith("DOMAIN-X")
-    assert "run_python" in instr          # tether's operating manual is still layered first
+    assert "run_python" in instr          # sheath's operating manual is still layered first
 
 
 def test_aopen_agent_instructions(tmp_path):
     async def run():
-        t = _tether(tmp_path)
+        t = _sheath(tmp_path)
         conv = await t.aopen("s1", agent_instructions="X-AOPEN")
         try:
             return _instructions(conv.agent)
@@ -45,9 +45,9 @@ def test_aopen_agent_instructions(tmp_path):
     assert "X-AOPEN" in asyncio.run(run())
 
 
-def test_tether_default_agent_instructions(tmp_path):
+def test_sheath_default_agent_instructions(tmp_path):
     async def run():
-        t = _tether(tmp_path, agent_instructions="X-DEFAULT")
+        t = _sheath(tmp_path, agent_instructions="X-DEFAULT")
         conv = await t.aopen("s1")
         try:
             return _instructions(conv.agent)
@@ -57,9 +57,9 @@ def test_tether_default_agent_instructions(tmp_path):
     assert "X-DEFAULT" in asyncio.run(run())
 
 
-def test_aopen_value_wins_over_tether_default(tmp_path):
+def test_aopen_value_wins_over_sheath_default(tmp_path):
     async def run():
-        t = _tether(tmp_path, agent_instructions="X-DEFAULT")
+        t = _sheath(tmp_path, agent_instructions="X-DEFAULT")
         conv = await t.aopen("s1", agent_instructions="X-OVERRIDE")
         try:
             return _instructions(conv.agent)
@@ -81,7 +81,7 @@ def test_asolve_passes_agent_instructions(tmp_path, monkeypatch):
         return conv
 
     monkeypatch.setattr(Conversation, "acreate", classmethod(spy))
-    t = _tether(tmp_path, agent_instructions="X-DEFAULT")
+    t = _sheath(tmp_path, agent_instructions="X-DEFAULT")
     t.solve("go", agent_instructions="X-SOLVE")
     assert "X-SOLVE" in seen["instr"] and "X-DEFAULT" not in seen["instr"]
     t.solve("go")

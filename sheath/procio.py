@@ -46,7 +46,7 @@ class _HeadTail:
         if dropped <= 0:
             return bytes(self._head + self._tail).decode("utf-8", errors="replace")
         return (self._head.decode("utf-8", errors="replace")
-                + f"\n... [tether: {dropped} bytes of output omitted] ...\n"
+                + f"\n... [sheath: {dropped} bytes of output omitted] ...\n"
                 + self._tail.decode("utf-8", errors="replace"))
 
 

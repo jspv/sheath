@@ -26,7 +26,7 @@ def _no_real_dns(monkeypatch):
     def _stub(host: str) -> list[str]:
         return ["93.184.216.34"]
 
-    monkeypatch.setattr("tether.egress._resolve", _stub)
+    monkeypatch.setattr("sheath.egress._resolve", _stub)
 
 
 @pytest.fixture(autouse=True)
@@ -44,7 +44,7 @@ def _disabled_local_sandbox(monkeypatch):
     at class-creation time. ``test_config.py`` asserts the *shipped* default and therefore
     deletes the variable rather than relying on this fixture.
     """
-    monkeypatch.setenv("TETHER_SANDBOX_BACKEND", "local")
+    monkeypatch.setenv("SHEATH_SANDBOX_BACKEND", "local")
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +56,7 @@ def _quiet_no_isolation_warning():
     """
     import warnings
 
-    from tether.sandbox import NoSandboxIsolationWarning
+    from sheath.sandbox import NoSandboxIsolationWarning
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", NoSandboxIsolationWarning)
@@ -70,7 +70,7 @@ def _clear_runtime_probe_cache():
     Tests stub the probe with different runners, so a cached answer from one would be
     served to the next -- and with random test ordering that is a flake, not a failure.
     """
-    from tether import container_runtime
+    from sheath import container_runtime
 
     container_runtime._usable_runtime_cache.clear()
     yield

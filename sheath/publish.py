@@ -17,7 +17,7 @@ from typing import Callable
 
 from .paths import safe_filename
 
-_INTERNAL_DIRS = ("handles", ".scripts", ".tether")
+_INTERNAL_DIRS = ("handles", ".scripts", ".sheath")
 _CHUNK = 1024 * 1024
 
 
@@ -82,7 +82,7 @@ def validate_publication(root: Path | str, path: object, *, name: object, descri
         if last and not stat.S_ISREG(st.st_mode):
             raise PublishError(f"not a regular file: {path!r}")
     if rel.parts[0] in _INTERNAL_DIRS or rel.parts[0].startswith("_"):
-        raise PublishError(f"refusing to publish an internal tether file: {rel.as_posix()!r}")
+        raise PublishError(f"refusing to publish an internal sheath file: {rel.as_posix()!r}")
 
     try:
         fd = os.open(resolved, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))

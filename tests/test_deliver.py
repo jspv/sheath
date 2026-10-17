@@ -9,9 +9,9 @@ import os
 import pandas as pd
 import pytest
 
-from tether import Session, Tether, TetherConfig
-from tether.publish import PublishedFile
-from tether.testing import StubChatClient, text, tool_call
+from sheath import Session, Sheath, SheathConfig
+from sheath.publish import PublishedFile
+from sheath.testing import StubChatClient, text, tool_call
 
 
 class _Host:
@@ -30,7 +30,7 @@ class _Host:
 
 
 def _session(tmp_path, host=None, **cfg):
-    return Session.create(TetherConfig(root_dir=tmp_path / "r", **cfg), on_publish=host)
+    return Session.create(SheathConfig(root_dir=tmp_path / "r", **cfg), on_publish=host)
 
 
 def _write(sess, rel, data=b"x,y\n1,2\n"):
@@ -59,7 +59,7 @@ def test_publish_file_calls_host_once_with_size_and_sha(tmp_path):
     assert out["host"] == {"file_id": "F1"}
     assert out["name"] == "a.csv" and out["rel_path"] == "outputs/a.csv"
     assert out["size"] == len(data) and out["sha256"] == pf.sha256
-    assert (sess.root / "outputs/a.csv").read_bytes() == data   # untouched by tether
+    assert (sess.root / "outputs/a.csv").read_bytes() == data   # untouched by sheath
 
 
 @pytest.mark.parametrize("setup, path", [
@@ -102,14 +102,14 @@ def test_deliver_tools_hidden_without_callback(tmp_path):
     sess = _session(tmp_path, None)
     names = {t.__name__ for t in sess.tools("code", "deliver")}
     assert "publish_file" not in names and "publish_handle" not in names
-    assert "publish_file" not in sess.tether_instructions("code", "deliver")
+    assert "publish_file" not in sess.sheath_instructions("code", "deliver")
 
 
 def test_deliver_tools_and_instructions_with_callback(tmp_path):
     sess = _session(tmp_path, _Host())
     names = {t.__name__ for t in sess.tools("code", "deliver")}
     assert {"publish_file", "publish_handle"} <= names
-    instr = sess.tether_instructions("code", "deliver")
+    instr = sess.sheath_instructions("code", "deliver")
     assert "outputs/" in instr and "publish_file" in instr and "publish(" in instr
 
 
@@ -187,14 +187,14 @@ def test_publish_handle_replaces_symlinked_outputs_dir(tmp_path):
     assert not (sess.root / "outputs").is_symlink() and (sess.root / "outputs").is_dir()
 
 
-@pytest.mark.parametrize("target", ["handles", ".tether", "inputs/u1"])
+@pytest.mark.parametrize("target", ["handles", ".sheath", "inputs/u1"])
 def test_publish_handle_never_writes_through_outputs_link_into_protected_dir(tmp_path, target):
     host = _Host()
     sess = _session(tmp_path, host)
     victim = sess.store.put("VICTIM ORIGINAL", source="s")
     upload = sess.add_input(b"a,b\n1,2\n", input_id="u1", name="data.csv")
     attacker = sess.store.put("ATTACKER CONTENT", source="fetch_url(evil)")
-    names = {"handles": os.path.basename(victim.path), ".tether": "manifest.json",
+    names = {"handles": os.path.basename(victim.path), ".sheath": "manifest.json",
              "inputs/u1": "data.csv"}
     protected = sess.root / target
     before = {p.name: p.read_bytes() for p in protected.iterdir() if p.is_file()}
@@ -224,7 +224,7 @@ def test_publish_handle_replaces_a_file_squatting_on_outputs(tmp_path):
 # --- sandbox publish() --------------------------------------------------------------------
 
 _PUBLISH_CODE = (
-    "import os\nfrom tether_sandbox import publish\n"
+    "import os\nfrom sheath_sandbox import publish\n"
     "os.makedirs('outputs', exist_ok=True)\n"
     "open('outputs/r.csv', 'w').write('a\\n1\\n')\n"
     "publish('outputs/r.csv', name='report.csv', description='desc')\n"
@@ -265,11 +265,11 @@ def test_forged_publish_request_is_rejected(tmp_path):
     (tmp_path / "secret.txt").write_text("s")
     code = (
         "import json, os\n"
-        "with open(os.path.join(os.environ['TETHER_RUN_DIR'], 'publish.jsonl'), 'a') as f:\n"
+        "with open(os.path.join(os.environ['SHEATH_RUN_DIR'], 'publish.jsonl'), 'a') as f:\n"
         f"    f.write(json.dumps({{'path': {str(tmp_path / 'secret.txt')!r}}}) + '\\n')\n"
         "    f.write(json.dumps({'path': '../secret.txt'}) + '\\n')\n"
         "    f.write(json.dumps({'path': 'handles/_manifest.json'}) + '\\n')\n"
-        "    f.write(json.dumps({'path': '.tether/manifest.json'}) + '\\n')\n"
+        "    f.write(json.dumps({'path': '.sheath/manifest.json'}) + '\\n')\n"
         "    f.write('not json\\n')\n"
         "    f.write(json.dumps({'path': ['x']}) + '\\n')\n"
     )
@@ -302,9 +302,9 @@ HOST_RUN = contextvars.ContextVar("HOST_RUN", default=None)
 
 
 def _agent_run(tmp_path, script, host, setup=None):
-    cfg = TetherConfig(root_dir=tmp_path / "base")
+    cfg = SheathConfig(root_dir=tmp_path / "base")
     cfg.search.api_key = "x"
-    t = Tether(cfg, client=StubChatClient(script), bundles=("code", "deliver"), on_publish=host)
+    t = Sheath(cfg, client=StubChatClient(script), bundles=("code", "deliver"), on_publish=host)
 
     async def run():
         conv = await t.aopen("s1")
@@ -358,11 +358,11 @@ def test_agent_loop_continues_when_host_raises(tmp_path):
     assert final == "recovered"
 
 
-def test_aopen_on_publish_overrides_tether_default(tmp_path):
+def test_aopen_on_publish_overrides_sheath_default(tmp_path):
     calls = []
-    cfg = TetherConfig(root_dir=tmp_path / "base")
+    cfg = SheathConfig(root_dir=tmp_path / "base")
     cfg.search.api_key = "x"
-    t = Tether(cfg, client=StubChatClient([text("x")]), bundles=("deliver",),
+    t = Sheath(cfg, client=StubChatClient([text("x")]), bundles=("deliver",),
                on_publish=lambda pf: calls.append("default"))
 
     async def run():
@@ -380,7 +380,7 @@ def test_publish_handle_xlsx_reports_a_missing_engine(tmp_path):
     host = _Host()
     sess = _session(tmp_path, host)
     h = sess.store.put(pd.DataFrame({"a": [1]}), source="t")
-    from tether.tools.deliver import publish_handle
+    from sheath.tools.deliver import publish_handle
     out = publish_handle(sess, h.id, "xlsx")
     if importlib.util.find_spec("openpyxl") is None:
         assert "openpyxl" in out["error"] and host.calls == []
@@ -397,7 +397,7 @@ def test_publish_handle_never_loads_the_dataframe_in_the_parent(tmp_path, monkey
         raise AssertionError("the parent must not load a dataframe handle")
 
     monkeypatch.setattr(pd, "read_parquet", boom)
-    from tether.tools.deliver import publish_handle
+    from sheath.tools.deliver import publish_handle
     out = publish_handle(sess, h.id, "csv", "report")
     assert "error" not in out, out
     assert host.copies["report.csv"] == b"a,b\n1,x\n2,y\n"
@@ -409,14 +409,14 @@ def test_publish_handle_reports_a_failed_conversion(tmp_path):
     sess = _session(tmp_path, host)
     h = sess.store.put(pd.DataFrame({"a": [1]}), source="t")
     (sess.root / h.path).write_bytes(b"not parquet any more")     # digest mismatch
-    from tether.tools.deliver import publish_handle
+    from sheath.tools.deliver import publish_handle
     out = publish_handle(sess, h.id, "csv")
     assert "error" in out and host.calls == []
 
 
 def test_sandbox_publish_disabled_without_deliver_bundle(tmp_path):
     host = _Host()
-    sess = Session.create(TetherConfig(root_dir=tmp_path / "r"), on_publish=host,
+    sess = Session.create(SheathConfig(root_dir=tmp_path / "r"), on_publish=host,
                           bundles=("code",))
     res = sess.sandbox.run_code(_PUBLISH_CODE)
     assert "publishing is not enabled" in res.stderr and host.calls == []
@@ -424,23 +424,23 @@ def test_sandbox_publish_disabled_without_deliver_bundle(tmp_path):
 
 def test_sandbox_publish_enabled_with_deliver_bundle(tmp_path):
     host = _Host()
-    sess = Session.create(TetherConfig(root_dir=tmp_path / "r"), on_publish=host,
+    sess = Session.create(SheathConfig(root_dir=tmp_path / "r"), on_publish=host,
                           bundles=("code", "deliver"))
     assert sess.sandbox.run_code(_PUBLISH_CODE).published and len(host.calls) == 1
 
 
 def test_empty_bundle_selection_keeps_sandbox_publish(tmp_path):
     host = _Host()
-    sess = Session.create(TetherConfig(root_dir=tmp_path / "r"), on_publish=host, bundles=())
+    sess = Session.create(SheathConfig(root_dir=tmp_path / "r"), on_publish=host, bundles=())
     sess.sandbox.run_code(_PUBLISH_CODE)
     assert len(host.calls) == 1
 
 
 def test_conversation_without_deliver_disables_sandbox_publish(tmp_path):
-    from tether.conversation import Conversation
+    from sheath.conversation import Conversation
 
     async def run():
-        conv = await Conversation.acreate(id="c", config=TetherConfig(root_dir=tmp_path / "r"),
+        conv = await Conversation.acreate(id="c", config=SheathConfig(root_dir=tmp_path / "r"),
                                           client=StubChatClient([text("ok")]),
                                           bundles=("code",), on_publish=_Host())
         try:

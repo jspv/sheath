@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from tether.config import FetchConfig
-from tether.egress import (
+from sheath.config import FetchConfig
+from sheath.egress import (
     BlockedAddressError,
     FetchDeadlineExceeded,
     guarded_fetch,

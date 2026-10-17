@@ -2,13 +2,13 @@ import importlib
 
 import pytest
 
-from tether import TetherConfig, PathEscapesRootError, Session
-from tether.tools.files import write_file
-from tether.tools.search import _search_python, search
+from sheath import SheathConfig, PathEscapesRootError, Session
+from sheath.tools.files import write_file
+from sheath.tools.search import _search_python, search
 
 
 def _session(tmp_path):
-    return Session.create(TetherConfig(root_dir=tmp_path / "r"))
+    return Session.create(SheathConfig(root_dir=tmp_path / "r"))
 
 
 def _seed(sess):
@@ -64,7 +64,7 @@ def test_python_fallback_matches_directly(tmp_path):
 def test_rg_and_python_backends_agree(tmp_path):
     # The two backends must return identical results (guards env-dependent drift):
     # one hit per matching line, char-offset col, same text.
-    from tether.tools.files import write_file
+    from sheath.tools.files import write_file
 
     sess = _session(tmp_path)
     write_file(sess, "p.txt", "xx xx xx\naaé match here\nnothing\nxx again\n")
@@ -83,7 +83,7 @@ def test_rg_and_python_backends_agree(tmp_path):
 def test_long_matching_line_is_clipped(tmp_path):
     # Minified-HTML style: a single enormous line. The hit text must be bounded so a
     # search result can't flood the model context.
-    from tether.tools.files import write_file
+    from sheath.tools.files import write_file
 
     sess = _session(tmp_path)
     write_file(sess, "min.html", "x" * 100_000 + "NEEDLE" + "y" * 100_000)
@@ -95,7 +95,7 @@ def test_long_matching_line_is_clipped(tmp_path):
 
 
 def test_one_hit_per_line_even_with_multiple_matches(tmp_path):
-    from tether.tools.files import write_file
+    from sheath.tools.files import write_file
 
     sess = _session(tmp_path)
     write_file(sess, "m.txt", "xx xx xx\n")
@@ -103,7 +103,7 @@ def test_one_hit_per_line_even_with_multiple_matches(tmp_path):
 
 
 def test_invalid_regex_raises_valueerror(tmp_path):
-    from tether.tools.files import write_file
+    from sheath.tools.files import write_file
 
     sess = _session(tmp_path)
     write_file(sess, "a.txt", "hello\n")
@@ -129,7 +129,7 @@ def test_search_clamps_max_matches(tmp_path):
 @pytest.mark.skipif(__import__("shutil").which("rg") is None, reason="ripgrep not on PATH")
 def test_rg_search_skips_links_fifos_and_oversized_files_and_stops_early(tmp_path, monkeypatch):
     import os
-    search_mod = importlib.import_module("tether.tools.search")  # the package re-exports the function
+    search_mod = importlib.import_module("sheath.tools.search")  # the package re-exports the function
     monkeypatch.setattr(search_mod, "_MAX_SEARCH_FILE_BYTES", 1000)
     sess = _session(tmp_path)
     outside = tmp_path / "outside.txt"
@@ -146,7 +146,7 @@ def test_rg_search_skips_links_fifos_and_oversized_files_and_stops_early(tmp_pat
 
 def test_python_search_skips_links_fifos_and_bounds_lines(tmp_path, monkeypatch):
     import os
-    search_mod = importlib.import_module("tether.tools.search")  # the package re-exports the function
+    search_mod = importlib.import_module("sheath.tools.search")  # the package re-exports the function
     monkeypatch.setattr(search_mod.shutil, "which", lambda name: None)   # force the fallback
     sess = _session(tmp_path)
     outside = tmp_path / "outside.txt"
@@ -159,9 +159,9 @@ def test_python_search_skips_links_fifos_and_bounds_lines(tmp_path, monkeypatch)
 
 
 def _force_fallback(monkeypatch):
-    importlib.import_module("tether.tools.search")
+    importlib.import_module("sheath.tools.search")
     import sys
-    monkeypatch.setattr(sys.modules["tether.tools.search"].shutil, "which", lambda name: None)
+    monkeypatch.setattr(sys.modules["sheath.tools.search"].shutil, "which", lambda name: None)
 
 
 @pytest.mark.parametrize("glob", ["../*", "/etc/*", "a/../../*", "..\\*"])
@@ -207,7 +207,7 @@ def test_python_fallback_bounds_a_catastrophic_regex(tmp_path, monkeypatch):
     import time
 
     _force_fallback(monkeypatch)
-    search_mod = importlib.import_module("tether.tools.search")
+    search_mod = importlib.import_module("sheath.tools.search")
     monkeypatch.setattr(search_mod, "_PY_TIMEOUT_S", 1.0)
     sess = _session(tmp_path)
     (sess.root / "evil.txt").write_text("a" * 30 + "!\n")

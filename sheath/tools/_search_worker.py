@@ -5,7 +5,7 @@ backtrack for longer than the universe has existed -- inside one C call that hol
 Run in-process that would freeze the whole host; here it runs in a child that
 ``procio.run_bounded`` kills on timeout.
 
-Invoked as ``python -I -m tether.tools._search_worker <request.json>``; the request names
+Invoked as ``python -I -m sheath.tools._search_worker <request.json>``; the request names
 the root, base, pattern, flags, glob and match cap. Prints one JSON object on stdout:
 ``{"hits": [...]}`` or ``{"error": "..."}``.
 """
@@ -19,8 +19,8 @@ import stat
 import sys
 from pathlib import Path
 
-from tether import workspace
-from tether.tools.search import (_MAX_LINE_CHARS as MAX_LINE_CHARS,
+from sheath import workspace
+from sheath.tools.search import (_MAX_LINE_CHARS as MAX_LINE_CHARS,
                                  _MAX_SEARCH_FILE_BYTES as MAX_SEARCH_FILE_BYTES,
                                  _snippet as snippet)
 

@@ -1,6 +1,6 @@
-"""Translate MCP server notifications (logging + progress) into tether StatusEvents.
+"""Translate MCP server notifications (logging + progress) into sheath StatusEvents.
 
-MAF surfaces neither MCP logging nor MCP progress to the tether, so we hook the (private)
+MAF surfaces neither MCP logging nor MCP progress to the sheath, so we hook the (private)
 seams its ``MCPTool`` passes to the underlying mcp ``ClientSession``: ``logging_callback`` and
 ``message_handler``. We wrap them, chaining to the originals to preserve MAF's own behavior
 (notably the ``notifications/tools/list_changed`` reload handled inside ``message_handler``).
@@ -82,7 +82,7 @@ def inject_progress_tokens(tool: Any, server: str, token_map: dict[Any, str]) ->
         name = getattr(fn, "name", None)
         if not name:
             continue
-        token = f"tether:{server}:{name}"
+        token = f"sheath:{server}:{name}"
         merged = dict(meta_by_name.get(name) or {})
         merged["progressToken"] = token
         meta_by_name[name] = merged

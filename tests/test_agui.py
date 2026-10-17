@@ -5,8 +5,8 @@ import threading
 
 import pytest
 
-from tether.agui import merge_status, status_to_agui
-from tether.status import StatusBus, StatusEvent
+from sheath.agui import merge_status, status_to_agui
+from sheath.status import StatusBus, StatusEvent
 
 _HAS_AGUI = importlib.util.find_spec("ag_ui") is not None
 
@@ -110,7 +110,7 @@ def test_merge_status_emitted_during_final_event_is_not_lost():
 @pytest.mark.skipif(not _HAS_AGUI, reason="needs the agui extra (ag-ui-protocol)")
 def test_status_to_agui_maps_fields():
     ev = status_to_agui(StatusEvent(tool="run_python", message="running", current=1, total=3))
-    assert ev.name == "tether.status"
+    assert ev.name == "sheath.status"
     assert ev.value == {"tool": "run_python", "message": "running", "current": 1, "total": 3}
 
 
@@ -118,16 +118,16 @@ def test_status_to_agui_maps_fields():
 def test_agui_stream_reuses_workspace_per_thread(tmp_path):
     import asyncio
 
-    from tether import Tether, TetherConfig
-    from tether.testing import StubChatClient, text, tool_call
+    from sheath import Sheath, SheathConfig
+    from sheath.testing import StubChatClient, text, tool_call
 
     client = StubChatClient([
-        tool_call("run_python", {"code": "from tether_sandbox import save\nsave('h1', {'x': 1})\n"}),
+        tool_call("run_python", {"code": "from sheath_sandbox import save\nsave('h1', {'x': 1})\n"}),
         text("saved"),
-        tool_call("run_python", {"code": "from tether_sandbox import load, save\nsave('h2', load('h1'))\n"}),
+        tool_call("run_python", {"code": "from sheath_sandbox import load, save\nsave('h2', load('h1'))\n"}),
         text("done"),
     ])
-    h = Tether(TetherConfig(root_dir=tmp_path / "base"), client=client, bundles=("code",))
+    h = Sheath(SheathConfig(root_dir=tmp_path / "base"), client=client, bundles=("code",))
 
     async def run():
         async for _ in h.agui_stream({"messages": [{"role": "user", "content": "save"}], "threadId": "t1"}):
@@ -145,7 +145,7 @@ def test_agui_stream_reuses_workspace_per_thread(tmp_path):
 def test_repair_reorders_results_after_their_tool_call():
     # CopilotKit replays tool RESULTS before the assistant message that declared the calls;
     # OpenAI requires the reverse. repair_tool_message_order must rebuild a valid order.
-    from tether.agui import repair_tool_message_order
+    from sheath.agui import repair_tool_message_order
 
     msgs = [
         {"role": "user", "content": "q"},
@@ -162,7 +162,7 @@ def test_repair_reorders_results_after_their_tool_call():
 
 
 def test_repair_drops_orphan_call_but_keeps_final_answer():
-    from tether.agui import repair_tool_message_order
+    from sheath.agui import repair_tool_message_order
 
     msgs = [
         {"role": "assistant", "toolCalls": [{"id": "c1"}], "content": None},  # no matching result
@@ -174,7 +174,7 @@ def test_repair_drops_orphan_call_but_keeps_final_answer():
 
 
 def test_repair_leaves_valid_order_unchanged():
-    from tether.agui import repair_tool_message_order
+    from sheath.agui import repair_tool_message_order
 
     msgs = [
         {"role": "assistant", "toolCalls": [{"id": "c1"}], "content": None},
@@ -189,8 +189,8 @@ def test_repair_leaves_valid_order_unchanged():
 def test_agui_event_stream_errors_clearly_without_the_extra(monkeypatch):
     # Simulate the extra being absent even though it's installed in this env.
     monkeypatch.setitem(sys.modules, "agent_framework_ag_ui", None)
-    from tether.agui import agui_event_stream
-    from tether.status import StatusBus
+    from sheath.agui import agui_event_stream
+    from sheath.status import StatusBus
 
     async def run():
         gen = agui_event_stream(object(), StatusBus(), {"messages": []})

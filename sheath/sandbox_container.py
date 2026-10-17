@@ -4,11 +4,11 @@ Reuses the shared orchestration in ``_OrchestratedSandbox`` (run directory, Exec
 and only differs in ``_launch``. Mounts:
 
 - the session root at /workspace (read-write);
-- the parent-owned trees ``handles/``, ``inputs/``, ``.scripts/`` and ``.tether/`` overlaid on it
+- the parent-owned trees ``handles/``, ``inputs/``, ``.scripts/`` and ``.sheath/`` overlaid on it
   read-only, so sandboxed code can neither write into them nor replace them;
-- this run's exchange directory (``.tether/runs/<token>``) at /tether-run (read-write) -- the
+- this run's exchange directory (``.sheath/runs/<token>``) at /sheath-run (read-write) -- the
   only place the parent reads sandbox-written data from;
-- the tether runtime/ at /runtime (read-only).
+- the sheath runtime/ at /runtime (read-only).
 
 It runs ``python /runtime/_runner.py <script-rel> <args>`` with network off (by default), a
 read-only root filesystem, dropped capabilities, and memory/cpu/pid limits.
@@ -92,7 +92,7 @@ class ContainerSandbox(_OrchestratedSandbox):
         for name in workspace.PROTECTED_DIRS:
             argv += ["-v", f"{ctx.root / name}:/workspace/{name}:ro"]
         # The one writable channel back to the parent: this run's exchange directory.
-        argv += ["-v", f"{ctx.run_dir}:/tether-run:rw"]
+        argv += ["-v", f"{ctx.run_dir}:/sheath-run:rw"]
         if not cfg.network:
             argv += ["--network", "none"]
         pythonpath = "/runtime"
@@ -100,15 +100,15 @@ class ContainerSandbox(_OrchestratedSandbox):
             argv += ["-v", f"{layer}:/pkgs:ro"]
             pythonpath = "/runtime:/pkgs"
         env = {
-            "TETHER_ROOT": "/workspace",
-            "TETHER_RUN_DIR": "/tether-run",
+            "SHEATH_ROOT": "/workspace",
+            "SHEATH_RUN_DIR": "/sheath-run",
             "PYTHONPATH": pythonpath,
             "HOME": "/workspace",
             "TMPDIR": "/tmp",
             "PATH": "/usr/local/bin:/usr/bin:/bin",
         }
         if ctx.publish_enabled:
-            env["TETHER_PUBLISH_ENABLED"] = "1"
+            env["SHEATH_PUBLISH_ENABLED"] = "1"
         for key, value in env.items():
             argv += ["-e", f"{key}={value}"]
         argv += [tag, "python", "/runtime/_runner.py", ctx.script_rel, *ctx.argv]
@@ -120,7 +120,7 @@ class ContainerSandbox(_OrchestratedSandbox):
         tag = image_tag(self.config.preinstalled)
         ensure_image(self._runtime, tag, self.config)
         layer = ensure_layer(self._runtime, self.config) if self.config.pip_packages else None
-        name = f"tether-{secrets.token_hex(8)}"
+        name = f"sheath-{secrets.token_hex(8)}"
         argv = self._build_run_argv(ctx, tag, layer, name=name)
         run = run_bounded(argv, timeout=ctx.config.timeout_s,
                           cap=ctx.config.max_output_bytes)
@@ -131,7 +131,7 @@ class ContainerSandbox(_OrchestratedSandbox):
             note = self._remove_container(name)
             if note:
                 self._orphans.append(name)
-            return _LaunchResult(run.stdout, run.stderr + "\ntether: killed (timeout)" + note,
+            return _LaunchResult(run.stdout, run.stderr + "\nsheath: killed (timeout)" + note,
                                  -1, killed_by="timeout", orphaned=bool(note))
         # 137 == 128 + SIGKILL: the runtime killed the container, typically the memory cap.
         killed_by = "killed" if run.returncode == 137 else None
@@ -196,4 +196,4 @@ class ContainerSandbox(_OrchestratedSandbox):
         gone, detail = self._confirm_gone(name, _RM_TIMEOUT_S)
         if gone:
             return ""
-        return f"\ntether: WARNING: could not remove timed-out container {name}: {detail}"
+        return f"\nsheath: WARNING: could not remove timed-out container {name}: {detail}"

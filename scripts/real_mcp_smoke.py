@@ -1,8 +1,8 @@
 """Manual real-MCP smoke test (spec §12 gate).
 
-Connects the tether, via its normal public API, to a real stdio MCP server
+Connects the sheath, via its normal public API, to a real stdio MCP server
 (the local msgraph-email-calendar-mcp) and runs an agent task that pulls a
-sizeable payload. We instrument tether.spill._maybe_spill to record exactly
+sizeable payload. We instrument sheath.spill._maybe_spill to record exactly
 what type/size MAF hands our result_parser for a real MCP return -- the open
 question the gate exists to answer -- and report whether anything spilled.
 """
@@ -15,9 +15,9 @@ import sys
 
 from agent_framework import MCPStdioTool
 
-import tether.spill as spill
-from tether import Tether
-from tether.config import TetherConfig
+import sheath.spill as spill
+from sheath import Sheath
+from sheath.config import SheathConfig
 
 # Directory of a stdio MCP server to test against. Override via argv[1] or $MCP_SERVER_DIR;
 # defaults to the sibling msgraph server this gate was first run against.
@@ -64,7 +64,7 @@ async def main() -> None:
         args=["-c", f"cd {MSGRAPH_DIR} && exec uv run msgraph-mcp"],
     )
 
-    h = Tether(TetherConfig(model="gpt-5-mini"), bundles=("code", "files"))
+    h = Sheath(SheathConfig(model="gpt-5-mini"), bundles=("code", "files"))
     result = await h.asolve(
         "Using the msgraph tools, fetch my single most recent email INCLUDING its "
         "full body, then report only its subject, sender, and date. Do not summarize "

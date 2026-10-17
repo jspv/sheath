@@ -26,7 +26,7 @@ Delivered 2026-10-01; design in `docs/superpowers/specs/2026-09-17-security-hard
 Zero-trust handle metadata (the parent derives every field from the bytes, at creation and
 again on manifest rehydration; handle records are immutable and handle bytes are
 digest-verified on read; the control channel is bounded), container backend by default, an egress guard
-(`tether/egress.py`) covering `fetch_url` and `read_document`, and per-conversation tools via
+(`sheath/egress.py`) covering `fetch_url` and `read_document`, and per-conversation tools via
 `tool_factory`. Residuals are listed under Planned and Smaller carry-overs.
 
 ## Planned

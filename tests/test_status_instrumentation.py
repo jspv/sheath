@@ -1,16 +1,16 @@
 import httpx
 
-from tether import TetherConfig, Session
-from tether.spill import make_spill_parser
-from tether.status import StatusBus, bind_bus
-from tether.tools.code import run_python
-from tether.tools.documents import read_document
-from tether.tools.fetch import fetch_url
-from tether.tools.web import web_extract, web_search
+from sheath import SheathConfig, Session
+from sheath.spill import make_spill_parser
+from sheath.status import StatusBus, bind_bus
+from sheath.tools.code import run_python
+from sheath.tools.documents import read_document
+from sheath.tools.fetch import fetch_url
+from sheath.tools.web import web_extract, web_search
 
 
 def _session(tmp_path):
-    return Session.create(TetherConfig(root_dir=tmp_path / "r", spill_threshold_bytes=64))
+    return Session.create(SheathConfig(root_dir=tmp_path / "r", spill_threshold_bytes=64))
 
 
 def _collect():
@@ -33,7 +33,7 @@ def test_run_python_emits_running_status(tmp_path):
     sess = _session(tmp_path)
     bus, events = _collect()
     with bind_bus(bus):
-        run_python(sess, code="from tether_sandbox import emit\nemit(1)\n")
+        run_python(sess, code="from sheath_sandbox import emit\nemit(1)\n")
     assert any(e.tool == "run_python" for e in events)
 
 

@@ -1,4 +1,4 @@
-# tether
+# sheath
 
 > A reusable Python substrate for building autonomous data-gathering and data-integration agents — a single-agent-loop ("coding agent") harness on the [Microsoft Agent Framework](https://github.com/microsoft/agent-framework) (MAF).
 
@@ -80,10 +80,10 @@ uv sync --prerelease=allow --extra agui       # AG-UI / CopilotKit streaming
 Document ingestion uses [Docling](https://github.com/DS4SD/docling), which downloads its models on first use. To pay that cost up front (e.g. at deploy time) instead of on the first `read_document` call, prefetch them:
 
 ```bash
-tether-prefetch-docling          # add --ocr to also fetch OCR models (scanned documents)
+sheath-prefetch-docling          # add --ocr to also fetch OCR models (scanned documents)
 ```
 
-OCR is **off by default** — born-digital PDFs/Office files get their tables and structure without it. Set `TetherConfig.documents.ocr = True` for scanned/image documents.
+OCR is **off by default** — born-digital PDFs/Office files get their tables and structure without it. Set `SheathConfig.documents.ocr = True` for scanned/image documents.
 
 ### API keys
 
@@ -94,17 +94,17 @@ OPENAI_API_KEY=sk-...        # required by the default OpenAI client (see "Bring
 TAVILY_API_KEY=tvly-...      # optional — enables web_search / web_extract
 ```
 
-`TAVILY_API_KEY` is read from the environment, then from `./.env` in the current working directory. Constructing a `Tether` does not export `.env` into the process environment; the built-in OpenAI client reads `.env` itself.
+`TAVILY_API_KEY` is read from the environment, then from `./.env` in the current working directory. Constructing a `Sheath` does not export `.env` into the process environment; the built-in OpenAI client reads `.env` itself.
 
 ### Quickstart: CLI
 
 ```bash
-uv run tether "What is the total EU revenue in 2025, excluding invalid rows?"
+uv run sheath "What is the total EU revenue in 2025, excluding invalid rows?"
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--model` | `gpt-5-mini` | Model for the built-in OpenAI client (reads `OPENAI_API_KEY`, or `AZURE_OPENAI_*` for Azure routing). The CLI uses that client; for other providers drive the tether from Python with your own client — see [Bring your own model client](#bring-your-own-model-client) |
+| `--model` | `gpt-5-mini` | Model for the built-in OpenAI client (reads `OPENAI_API_KEY`, or `AZURE_OPENAI_*` for Azure routing). The CLI uses that client; for other providers drive the sheath from Python with your own client — see [Bring your own model client](#bring-your-own-model-client) |
 | `--root` | a fresh session dir | Workspace root (the confinement boundary) |
 | `-v`, `--verbose` | off | Print live tool status to stderr as the task runs (see [Live status updates](#live-status-updates)) |
 
@@ -113,21 +113,21 @@ The CLI prints the answer and leaves `[session: …]` — the directory holding 
 ### Quickstart: library
 
 ```python
-from tether import Tether, TetherConfig, solve
+from sheath import Sheath, SheathConfig, solve
 
 # One-shot convenience
 result = solve("Summarize the latest figures from https://example.com/report.pdf")
 print(result.final_text)
 
-# Reusable tether with your own tools
+# Reusable sheath with your own tools
 def query_sales(region: str) -> list[dict]:
     """Return sales rows for a region."""
     ...
 
-# With no client passed, the tether builds the default OpenAI client (reads OPENAI_API_KEY).
+# With no client passed, the sheath builds the default OpenAI client (reads OPENAI_API_KEY).
 # `model` configures ONLY that default client — to use Azure / Foundry / any other provider,
 # pass your own MAF chat client (see "Bring your own model client"); `model` is then ignored.
-h = Tether(TetherConfig(model="gpt-5-mini"))
+h = Sheath(SheathConfig(model="gpt-5-mini"))
 result = h.solve(
     "Total EU revenue in 2025, excluding invalid rows?",
     tools=[query_sales],          # plain Python callables; auto-wrapped + spill-handled
@@ -149,7 +149,7 @@ The quickstarts above and the guides below are each worked examples. Two runnabl
 | Sample | Shows |
 |---|---|
 | [`examples/copilotkit/`](examples/copilotkit/) | **Full end-to-end app:** a CopilotKit chat UI + a FastAPI AG-UI backend with an **MCP server** wired in — ask a data question and watch the agent call the MCP tool, spill the result to a handle, and run sandboxed Python to answer |
-| [`examples/agui_server.py`](examples/agui_server.py) | The minimal AG-UI backend: a FastAPI endpoint that streams a tether run as SSE |
+| [`examples/agui_server.py`](examples/agui_server.py) | The minimal AG-UI backend: a FastAPI endpoint that streams a sheath run as SSE |
 | [Use it as a MAF agent](#use-it-as-a-maf-agent) | Building and driving the agent with the ordinary MAF agent surface (`run` / streaming / threads / workflows) |
 | [Bring your own model client](#bring-your-own-model-client) | Injecting an Azure / Foundry / custom-auth chat client |
 | [Sessions: one-shot vs continuous](#sessions-one-shot-vs-continuous) | Persistent multi-turn conversations with a shared workspace |
@@ -166,12 +166,12 @@ The quickstarts above and the guides below are each worked examples. Two runnabl
 ```python
 import asyncio
 from agent_framework.openai import OpenAIChatClient
-from tether import Session, TetherConfig
+from sheath import Session, SheathConfig
 
 async def main():
-    # The two-step (open a workspace, then build the agent over it) is the only tether-specific
+    # The two-step (open a workspace, then build the agent over it) is the only sheath-specific
     # part — it binds the agent to one session root + sandbox. The build call itself is standard MAF.
-    async with Session.create(TetherConfig()) as session:
+    async with Session.create(SheathConfig()) as session:
         agent = await session.create_agent(
             OpenAIChatClient(model="gpt-5-mini", env_file_path=".env"),
             agent_instructions="Reconcile EU sales and flag anomalies.",  # your task prompt
@@ -179,7 +179,7 @@ async def main():
             bundles=("code", "files", "web"),  # which built-in tool families to include
         )
 
-        # `agent` is a MAF `Agent` — the usual interface, nothing tether-specific from here:
+        # `agent` is a MAF `Agent` — the usual interface, nothing sheath-specific from here:
         reply = await agent.run("Which regions look anomalous?")
         print(reply.text)
 
@@ -198,11 +198,11 @@ Because the returned object is a standard MAF `Agent`, it composes anywhere a MA
 
 ### Bring your own model client
 
-The convenience entry points (`solve`, `Tether(...)` with no `client`) use MAF's OpenAI client by default — following [MAF's own Python convention](https://github.com/microsoft/agent-framework/blob/main/python/README.md) (`OPENAI_API_KEY` present → OpenAI). The tether is **not** OpenAI-only: it needs only an object implementing MAF's chat-client protocol (`SupportsChatGetResponse`), and never authenticates one for you when you supply it. The same client is reused across one-shots and every continuous conversation. Two injection points:
+The convenience entry points (`solve`, `Sheath(...)` with no `client`) use MAF's OpenAI client by default — following [MAF's own Python convention](https://github.com/microsoft/agent-framework/blob/main/python/README.md) (`OPENAI_API_KEY` present → OpenAI). The sheath is **not** OpenAI-only: it needs only an object implementing MAF's chat-client protocol (`SupportsChatGetResponse`), and never authenticates one for you when you supply it. The same client is reused across one-shots and every continuous conversation. Two injection points:
 
 ```python
 # High-level facade — your client flows to solve / aopen / agui_stream
-h = Tether(TetherConfig(), client=my_client)
+h = Sheath(SheathConfig(), client=my_client)
 
 # Composable path — pass it straight to create_agent
 agent = await session.create_agent(my_client, agent_instructions="…", tools=[…])
@@ -213,7 +213,7 @@ MAF's `OpenAIChatClient` already does Azure routing. For Azure with a **refreshi
 ```python
 from azure.identity import DefaultAzureCredential, get_bearer_token_provider
 from agent_framework.openai import OpenAIChatClient
-from tether import Tether, TetherConfig
+from sheath import Sheath, SheathConfig
 
 token_provider = get_bearer_token_provider(      # fresh bearer token per call → handles refresh
     DefaultAzureCredential(), "https://cognitiveservices.azure.com/.default")
@@ -224,24 +224,24 @@ client = OpenAIChatClient(
     credential=token_provider,
     model="my-gpt-5-deployment",                 # Azure deployment name
 )
-h = Tether(TetherConfig(), client=client)      # config.model is ignored; the client carries it
+h = Sheath(SheathConfig(), client=client)      # config.model is ignored; the client carries it
 ```
 
-If you already hold a fully-built MAF chat client (your own custom-auth Azure / Foundry / OpenAI-compatible client), skip all of the above and just pass it: `Tether(TetherConfig(), client=that)`.
+If you already hold a fully-built MAF chat client (your own custom-auth Azure / Foundry / OpenAI-compatible client), skip all of the above and just pass it: `Sheath(SheathConfig(), client=that)`.
 
 ### Sessions: one-shot vs continuous
 
-The tether serves both one-shot and continuous (multi-turn) interactions from any frontend.
+The sheath serves both one-shot and continuous (multi-turn) interactions from any frontend.
 
 - **One-shot** (`solve`) is ephemeral — it runs and **cleans up its workspace** when done. Pass `keep=True` to retain the audit trail (`result.session_dir`).
 - **Continuous** keeps a persistent workspace (handles + sandbox files) and conversation history across turns, until you close it (or an optional idle TTL expires).
 
 ```python
 import asyncio
-from tether import Tether, TetherConfig
+from sheath import Sheath, SheathConfig
 
 async def main():
-    h = Tether(TetherConfig(idle_ttl_s=1800))     # idle conversations expire after 30 min (optional)
+    h = Sheath(SheathConfig(idle_ttl_s=1800))     # idle conversations expire after 30 min (optional)
     conv = await h.aopen("thread-42")                # open or resume by id (e.g. an AG-UI threadId)
     print((await conv.aask("load sales.csv and summarize")).final_text)
     print((await conv.aask("now filter to EU")).final_text)   # sees the prior turn's handles + history
@@ -252,10 +252,10 @@ async def main():
 asyncio.run(main())
 ```
 
-**Agent instructions.** Give the agent your domain system prompt with `agent_instructions` — on `Tether(...)` as the default for every conversation, or per conversation on `aopen(...)` (which wins when both are set); `solve`/`asolve` accept it too. MAF layers it *after* tether's operating manual: `<core + bundle instructions>`, a blank line, then `<agent_instructions>`. Leave tool mechanics to tether and put the data model, workflow, and conventions in yours. The per-conversation value applies when a conversation is created; re-opening a live id returns the existing agent.
+**Agent instructions.** Give the agent your domain system prompt with `agent_instructions` — on `Sheath(...)` as the default for every conversation, or per conversation on `aopen(...)` (which wins when both are set); `solve`/`asolve` accept it too. MAF layers it *after* sheath's operating manual: `<core + bundle instructions>`, a blank line, then `<agent_instructions>`. Leave tool mechanics to sheath and put the data model, workflow, and conventions in yours. The per-conversation value applies when a conversation is created; re-opening a live id returns the existing agent.
 
 ```python
-h = Tether(cfg, agent_instructions=SYSTEM_PROMPT)
+h = Sheath(cfg, agent_instructions=SYSTEM_PROMPT)
 conv = await h.aopen("thread-42", agent_instructions=OTHER_PROMPT)   # optional override
 ```
 
@@ -265,9 +265,9 @@ AG-UI hosts get this automatically — `agui_stream` maps each request's `thread
 
 ### Exchanging files with the user
 
-**Delivering files.** Pass `on_publish` (on `Tether(...)`, or per conversation on `aopen`) and
+**Delivering files.** Pass `on_publish` (on `Sheath(...)`, or per conversation on `aopen`) and
 select the `deliver` bundle. The model writes a file under `outputs/` and calls `publish_file`
-(or `publish()` inside `run_python`, or `publish_handle` for a handle). Tether validates every
+(or `publish()` inside `run_python`, or `publish_handle` for a handle). Sheath validates every
 request in the parent — inside the root, a regular file and not a symlink, not under
 `handles/` or `.scripts/` or a control file, at most `max_publish_bytes` — then calls your
 callback with a `PublishedFile(path, rel_path, name, size, sha256, content_type, description,
@@ -280,13 +280,13 @@ are processed after the script exits cleanly. Both the tools and `publish()` req
 `deliver` bundle **and** a callback; without either, they are not available to the model.
 
 ```python
-from tether import PublishedFile, Tether
+from sheath import PublishedFile, Sheath
 
 def host_publish(pf: PublishedFile) -> dict:
     file_id = storage.copy_in(pf.path, name=pf.name, run=CURRENT_RUN.get())
     return {"file_id": file_id, "label": pf.name}
 
-h = Tether(cfg, bundles=("code", "files", "deliver"), on_publish=host_publish)
+h = Sheath(cfg, bundles=("code", "files", "deliver"), on_publish=host_publish)
 ```
 
 **Receiving files.** Between turns, hand uploads to the conversation:
@@ -305,18 +305,18 @@ text files). `conv.inputs` lists them. Note: `read_document` on an input parses 
 
 ### MCP servers
 
-Pass a MAF `MCPTool` — stdio, Streamable-HTTP, or WebSocket — in the same `tools=[…]` list. The tether connects each server, **owns its lifecycle** (closing it when the run ends, even on error), and attaches the same spill handling to every tool the server exposes — so a large MCP return (a long message list, a big query result) lands as a clean typed handle instead of flooding context.
+Pass a MAF `MCPTool` — stdio, Streamable-HTTP, or WebSocket — in the same `tools=[…]` list. The sheath connects each server, **owns its lifecycle** (closing it when the run ends, even on error), and attaches the same spill handling to every tool the server exposes — so a large MCP return (a long message list, a big query result) lands as a clean typed handle instead of flooding context.
 
 ```python
 from agent_framework import MCPStdioTool
-from tether import Tether, TetherConfig
+from sheath import Sheath, SheathConfig
 
 # A stdio MCP server, launched however your other MCP clients launch it.
 # (If the server resolves its config/credentials relative to a directory, launch it
 #  from there, e.g. command="sh", args=["-c", "cd /path/to/server && exec uv run its-cmd"].)
 mcp = MCPStdioTool(name="msgraph", command="uv", args=["run", "msgraph-mcp"])
 
-h = Tether(TetherConfig(model="gpt-5-mini"))
+h = Sheath(SheathConfig(model="gpt-5-mini"))
 result = h.solve("List the subjects of my 5 most recent emails.", tools=[mcp])
 print(result.final_text)
 ```
@@ -339,14 +339,14 @@ MCP support needs the `mcp` SDK, which is a declared dependency, so `uv sync` al
 **Serving many conversations: `tool_factory`.** A single live `MCPTool` is fine for one run, but it is owned and closed by whichever session finishes first, and every conversation would share its connection. For a host serving many conversations (AG-UI, CopilotKit), wrap the construction so each conversation builds and connects its own server:
 
 ```python
-from tether import Tether, tool_factory
+from sheath import Sheath, tool_factory
 from agent_framework import MCPStdioTool
 
-h = Tether(tools=[tool_factory(lambda: MCPStdioTool(name="msgraph", command="uv",
+h = Sheath(tools=[tool_factory(lambda: MCPStdioTool(name="msgraph", command="uv",
                                                     args=["run", "msgraph-mcp"]))])
 ```
 
-`tool_factory` takes a zero-argument callable; it is called once per conversation. Only MCP-shaped objects are cleaned up on teardown: a session recognizes them by duck-typing on `connect`, `close`, and `.functions`, and closes the ones it connected. If your factory returns some other stateful object (a database client, say), the tether will not close it — manage its lifecycle yourself.
+`tool_factory` takes a zero-argument callable; it is called once per conversation. Only MCP-shaped objects are cleaned up on teardown: a session recognizes them by duck-typing on `connect`, `close`, and `.functions`, and closes the ones it connected. If your factory returns some other stateful object (a database client, say), the sheath will not close it — manage its lifecycle yourself.
 
 **On result size.** Spilling is lossless — a large page is preserved whole as a handle, so an MCP server's pagination cursor survives and the agent can fetch the next page. The two ends of the spill-over zone are configurable (`spill_threshold_bytes` … `max_spill_bytes`): a well-behaved server that paginates returns bounded pages that flow through cleanly, while an unbounded dump past `max_spill_bytes` raises `SpillLimitExceeded` rather than silently filling disk — nudging the source toward server-side pagination/filtering.
 
@@ -355,7 +355,7 @@ h = Tether(tools=[tool_factory(lambda: MCPStdioTool(name="msgraph", command="uv"
 Tools report progress while they run, and you receive it through an `on_status` callback — from the built-in tools, from your own tools (via `report_progress`), and from MCP servers (their logging and progress notifications are captured automatically).
 
 ```python
-from tether import Tether, report_progress
+from sheath import Sheath, report_progress
 
 def crunch(n: int) -> str:
     """Your tool can report progress."""
@@ -367,40 +367,40 @@ def show(event):
     bar = f" [{event.current}/{event.total}]" if event.current is not None else ""
     print(f"→ {event.tool}: {event.message}{bar}")
 
-Tether(tools=[crunch], on_status=show).solve("crunch 5 items")
+Sheath(tools=[crunch], on_status=show).solve("crunch 5 items")
 ```
 
 The CLI exposes the same feed with `-v`/`--verbose` (printed to stderr). MCP-server status needs no extra wiring — a server's `notifications/message` arrive tagged `mcp:<server>`, and its `notifications/progress` arrive tagged with the calling tool's name plus `current`/`total`.
 
 ### AG-UI and CopilotKit
 
-A tether run can drive an [AG-UI](https://docs.ag-ui.com/) client such as [CopilotKit](https://docs.copilotkit.ai/) — streamed answer text, live tool-call visibility, and the status feed above — all as AG-UI events. Install the optional extra:
+A sheath run can drive an [AG-UI](https://docs.ag-ui.com/) client such as [CopilotKit](https://docs.copilotkit.ai/) — streamed answer text, live tool-call visibility, and the status feed above — all as AG-UI events. Install the optional extra:
 
 ```bash
 uv sync --prerelease=allow --extra agui
 ```
 
-`Tether.agui_stream(input_data)` yields AG-UI events for one request; encode them as SSE from your endpoint:
+`Sheath.agui_stream(input_data)` yields AG-UI events for one request; encode them as SSE from your endpoint:
 
 ```python
 from ag_ui.encoder import EventEncoder
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
-from tether import Tether
+from sheath import Sheath
 
-app, tether = FastAPI(), Tether()
+app, sheath = FastAPI(), Sheath()
 
 @app.post("/agent")
 async def agent(request: Request):
     input_data = await request.json()                 # AG-UI RunAgentInput
     encoder = EventEncoder()
     async def sse():
-        async for event in tether.agui_stream(input_data):
+        async for event in sheath.agui_stream(input_data):
             yield encoder.encode(event)
     return StreamingResponse(sse(), media_type="text/event-stream")
 ```
 
-Point your AG-UI client at this endpoint. The tether reuses the official `agent-framework-ag-ui` converter, so **frontend/generative-UI tools** (defined in the request), **shared state** (`state_schema`/`predict_state_config`, forwarded as keyword args to `agui_stream`), **human-in-the-loop**, and **multi-turn history** all work — with the tether's own progress feed overlaid as `tether.status` `CUSTOM` events. A runnable version is in [`examples/agui_server.py`](examples/agui_server.py).
+Point your AG-UI client at this endpoint. The sheath reuses the official `agent-framework-ag-ui` converter, so **frontend/generative-UI tools** (defined in the request), **shared state** (`state_schema`/`predict_state_config`, forwarded as keyword args to `agui_stream`), **human-in-the-loop**, and **multi-turn history** all work — with the sheath's own progress feed overlaid as `sheath.status` `CUSTOM` events. A runnable version is in [`examples/agui_server.py`](examples/agui_server.py).
 
 Each request is one conversation turn: turns on the same `threadId` are serialized, and a turn counts as activity for `idle_ttl_s`. Close the event stream on client disconnect (Starlette's `StreamingResponse` does) so the conversation is released for the next turn; a stream a server never closes keeps the conversation busy, and therefore exempt from the idle TTL. While a stream is open, sync `Conversation.add_input` raises — use `aadd_input`, which waits for the turn. The `threadId` selects the workspace, so authenticate and authorize it in your endpoint before calling `agui_stream`.
 
@@ -421,7 +421,7 @@ The agent gets a small, fixed set of root-confined tools (listed below; the web 
 | `inspect_handle(id, rows=20, stats=False)` | Deeper on-demand look at a handle: up to 100 preview lines / head rows, read raw and bounded (JSON is not pretty-printed); `stats=True` adds per-column min/max/null_count for dataframes from the parquet footer (min/max are null when any non-empty row group lacks them); a first row group over 16 MiB yields no head rows (`head_omitted`) |
 | `web_search(query, max_results=5)` | Tavily web search (needs `TAVILY_API_KEY`) |
 | `web_extract(url)` | Tavily clean-content extraction (needs `TAVILY_API_KEY`) |
-| `read_document(source)` | A workspace path or URL → clean markdown handle (tables preserved) via Docling; needs the `docling` extra. A URL download over `FetchConfig.max_bytes` is refused, not truncated; a workspace path is copied privately and capped at `TetherConfig.max_input_bytes` |
+| `read_document(source)` | A workspace path or URL → clean markdown handle (tables preserved) via Docling; needs the `docling` extra. A URL download over `FetchConfig.max_bytes` is refused, not truncated; a workspace path is copied privately and capped at `SheathConfig.max_input_bytes` |
 | `publish_file(path, name=None, description=None)` | Deliver a workspace file to the host (`deliver` bundle; only with `on_publish`) |
 | `publish_handle(handle_id, format=None, name=None)` | Deliver a handle as csv/xlsx/parquet/json (`deliver` bundle; only with `on_publish`) |
 
@@ -431,7 +431,7 @@ Every session has one **root directory**; everything — handles, agent-written 
 
 - **Layer 1 — Tool path-jail (guaranteed).** All model-supplied paths route through one chokepoint, `safe_path(root, p)`, which resolves symlinks *before* checking and rejects any path outside the root (blocks `..`, absolute paths, symlink escapes). It's the most heavily tested code in the project.
 - **Layer 2 — Executed code.** `run_python` runs in the **container** tier by default: a hardened Podman/Docker container (network off, read-only root filesystem, dropped capabilities, non-root, memory/cpu/pid limits) — see [Sandbox tiers](#sandbox-tiers). If no usable container runtime is present, building the sandbox is a hard error (`SandboxRuntimeUnavailable`) that names the `local` opt-out; it never falls back silently. **The `local` tier is not a security boundary**: the code runs as the host user, with that user's file and network access, in a scrubbed-env subprocess with `resource` rlimits and a wall-clock timeout. Use it only when you have chosen that deliberately. A host that must not be able to opt out sets `SandboxConfig.require_isolation=True`, which refuses the local tier however it was selected — see [Sandbox tiers](#sandbox-tiers).
-- **Workspace trust zones.** The session root is bind-mounted into the sandbox, so the harness never trusts what it finds directly under it. Four directories are owned by the harness and mounted **read-only** into the container: `handles/` (handle files), `inputs/` (uploads), `.scripts/` (inline scripts) and `.tether/` (the manifest, scratch files and per-run exchange directories). Sandboxed code can neither write inside them nor replace them, and `write_file` refuses paths that resolve into them. Each run gets one writable exchange directory (`/tether-run`): `save()`, `emit()` and `publish()` write there, and the harness reads it back by fixed file name with no-follow, regular-file-only, size-capped opens, then **moves** saved payloads into `handles/` itself. Nothing sandboxed code wrote is ever followed: a `publish()` request's path is joined to the root lexically and then walked component by component with `lstat`, refusing any link, and the harness's own `outputs/`, `.tether/tmp/` and `.tether/runs/` are required to be real directories (a link planted at `outputs/` is replaced by a real directory, never written through). Before and after every run the harness checks that the four directories, `.tether/tmp/` and `.tether/runs/` are still real directories and raises `WorkspaceTamperedError` otherwise.
+- **Workspace trust zones.** The session root is bind-mounted into the sandbox, so the harness never trusts what it finds directly under it. Four directories are owned by the harness and mounted **read-only** into the container: `handles/` (handle files), `inputs/` (uploads), `.scripts/` (inline scripts) and `.sheath/` (the manifest, scratch files and per-run exchange directories). Sandboxed code can neither write inside them nor replace them, and `write_file` refuses paths that resolve into them. Each run gets one writable exchange directory (`/sheath-run`): `save()`, `emit()` and `publish()` write there, and the harness reads it back by fixed file name with no-follow, regular-file-only, size-capped opens, then **moves** saved payloads into `handles/` itself. Nothing sandboxed code wrote is ever followed: a `publish()` request's path is joined to the root lexically and then walked component by component with `lstat`, refusing any link, and the harness's own `outputs/`, `.sheath/tmp/` and `.sheath/runs/` are required to be real directories (a link planted at `outputs/` is replaced by a real directory, never written through). Before and after every run the harness checks that the four directories, `.sheath/tmp/` and `.sheath/runs/` are still real directories and raises `WorkspaceTamperedError` otherwise.
 - **Orphan quarantine.** If a container-tier run times out and the runtime cannot confirm the container was removed, it may still be writing in the root. The session is then quarantined: every later `run_python` call and every file tool (`read_file`, `write_file`, `list_files`, `search`, `publish_file`, `publish_handle`, `read_document` on a workspace path, `add_input`) first retries `<runtime> rm -f <that exact container>` and, until the runtime confirms it is gone, refuses with `SandboxQuarantinedError` (the publish and document tools return it as an `error`) without touching the root. Only the recorded container names are ever removed.
 - **Bounded search fallback.** Without ripgrep, `search` scans in a separate Python process that is killed after 30 s (like the ripgrep path), so a catastrophic model-supplied regex cannot freeze the host process.
 - **Layer 3 — Egress.** The model chooses the URLs the harness fetches, so egress is filtered. `fetch_url` and `read_document(url)` deny loopback, private, link-local, reserved, multicast and unspecified addresses by default, plus `100.64.0.0/10` (RFC 6598 carrier-grade NAT), which no standard `ipaddress` flag reports as private and so is denied explicitly. The harness follows redirects itself (`follow_redirects=False` is forced on every request), so **every hop is re-validated**, including its scheme against `FetchConfig.allowed_schemes`. Bodies are streamed: reading stops at the byte limit, a model-supplied `max_bytes` is clamped to `FetchConfig.max_bytes_ceiling`, and the whole fetch is bounded by `FetchConfig.total_timeout_s`. `read_document` downloads through the same guard and hands Docling a local path, never a URL, so Docling cannot follow its own redirects outside policy. To reach an internal data source, name it in `FetchConfig.allow_private_hosts` (hostnames or CIDRs).
@@ -439,45 +439,45 @@ Every session has one **root directory**; everything — handles, agent-written 
   - Known residual: the total deadline is enforced by a watchdog that shuts down the connections opened during the call; on expiry `guarded_fetch` raises `FetchDeadlineExceeded` (an `httpx.HTTPError`). It does **not** bound DNS resolution inside `validate_url`, and the TCP/TLS connect is bounded only by the client's per-phase timeout (`FetchConfig.timeout_s`).
   - Known residual: the host is resolved for validation and then resolved again by the HTTP client, so a DNS-rebinding race is not closed (IP pinning is on the [roadmap](docs/ROADMAP.md)). `web_search` / `web_extract` call a fixed Tavily endpoint and are not filtered; an MCP server you install makes its own network calls, which the harness cannot filter.
 - **Handle integrity.** Metadata the model sees for a handle (schema, row count, preview) is derived by the harness from the bytes on disk **when the handle is created**, never reported by the sandboxed code that wrote them — and it is re-derived, not believed, when a manifest is rehydrated onto a root that outlived its process. The handle **record** is immutable: reusing an existing id is refused and reported. In the container tier the handle **bytes** are immutable too, because `handles/` is a read-only mount. As defence in depth (and as the only tamper signal in the `local` tier), a content digest is recorded when the metadata is derived and checked on every read; a mismatch raises `HandleTamperedError`. The digest (sha256, version-tagged) covers the file's length, its first 64 KiB and its last 64 KiB, so it is not a whole-file check. Handle ids chosen by sandboxed code must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. The parent↔sandbox exchange is bounded (1 MiB emit payload, 8 MiB control file, 256 new handles per run; see the configuration table).
-- **Bounded results and reads.** Every built-in tool result has a ceiling: `run_python` keeps the head and tail of `stdout`/`stderr` (`SandboxConfig.max_output_bytes` each) and stores a large emitted result as a handle; `inspect_handle`, `read_file`, `list_files` and `search` cap what they return. The harness reads sandbox-written and fetched data with bounded memory: files are streamed, only regular files are opened (a FIFO cannot block it), a dataframe handle is never materialized in the host process (previews read one record batch, `inspect_handle(stats=True)` reads footer statistics, and `publish_handle` converts inside the sandbox), and HTTP bodies are streamed up to the byte limit under a total deadline. Document inputs are bounded too: a `read_document` URL download is capped at `FetchConfig.max_bytes` and refused, not truncated, when larger, and a workspace path is copied privately and capped at `TetherConfig.max_input_bytes`. A dataframe whose first row group exceeds 16 MiB gets no head rows or preview (`head_omitted` / "preview omitted"), because Arrow would decode the whole group.
+- **Bounded results and reads.** Every built-in tool result has a ceiling: `run_python` keeps the head and tail of `stdout`/`stderr` (`SandboxConfig.max_output_bytes` each) and stores a large emitted result as a handle; `inspect_handle`, `read_file`, `list_files` and `search` cap what they return. The harness reads sandbox-written and fetched data with bounded memory: files are streamed, only regular files are opened (a FIFO cannot block it), a dataframe handle is never materialized in the host process (previews read one record batch, `inspect_handle(stats=True)` reads footer statistics, and `publish_handle` converts inside the sandbox), and HTTP bodies are streamed up to the byte limit under a total deadline. Document inputs are bounded too: a `read_document` URL download is capped at `FetchConfig.max_bytes` and refused, not truncated, when larger, and a workspace path is copied privately and capped at `SheathConfig.max_input_bytes`. A dataframe whose first row group exceeds 16 MiB gets no head rows or preview (`head_omitted` / "preview omitted"), because Arrow would decode the whole group.
 - **Residual risks.** The harness still parses the parquet footer and first record batch of a file sandboxed code wrote, and an oversized data page is decoded whole. Container-tier disk use is unbounded (`max_file_size_mb` applies to the `local` tier only). DNS rebinding between validation and connect is not closed, and the fetch deadline does not cover DNS resolution (see Layer 3). The `local` tier provides none of the guarantees in this section.
 - **Tool isolation.** Wrap stateful tools such as MCP servers in `tool_factory` so each conversation gets its own instance (see [MCP servers](#mcp-servers)).
 
-> The **container tier** is the default and provides real isolation. Select `local` explicitly with `TetherConfig.sandbox.backend = "local"` (or `TETHER_SANDBOX_BACKEND=local`) to opt out; both sit behind the same `SandboxExecutor` interface.
+> The **container tier** is the default and provides real isolation. Select `local` explicitly with `SheathConfig.sandbox.backend = "local"` (or `SHEATH_SANDBOX_BACKEND=local`) to opt out; both sit behind the same `SandboxExecutor` interface.
 
 ### Sandbox tiers
 
-`run_python` executes model-authored code; two backends are chosen by `TetherConfig.sandbox.backend`. **`container` is the default**; `local` is an explicit opt-out.
+`run_python` executes model-authored code; two backends are chosen by `SheathConfig.sandbox.backend`. **`container` is the default**; `local` is an explicit opt-out.
 
-- **`container`** (default) — runs the code in a hardened OCI container (Podman preferred, Docker supported; auto-detected). Network **off by default**, read-only root filesystem, `--cap-drop ALL`, non-root, and memory/cpu/pid limits. The session root is bind-mounted to `/workspace` with `handles/`, `inputs/`, `.scripts/` and `.tether/` overlaid read-only, plus one writable per-run exchange directory at `/tether-run`; a script that writes into `handles/` directly gets a read-only error — use `save(id, obj)`. If no usable runtime is found (a binary on `PATH` is not enough — the check probes liveness with `<runtime> info`), building the sandbox raises `SandboxRuntimeUnavailable`, with a message naming the `local` opt-out.
-- **`local`** (explicit opt-out) — a scrubbed-env subprocess with `resource` rlimits, a wall-clock timeout, and the path-jail. When a run ends (normally or by timeout) the harness kills the child's whole process group, so background processes a script starts do not outlive the run. Fast, no dependencies, but **no isolation**: the code runs as the host user and can read or write anything that user can, and use the network. Selecting it emits `NoSandboxIsolationWarning`; filter it with `warnings.filterwarnings("ignore", category=tether.NoSandboxIsolationWarning)` once you have decided deliberately (CI, tests).
+- **`container`** (default) — runs the code in a hardened OCI container (Podman preferred, Docker supported; auto-detected). Network **off by default**, read-only root filesystem, `--cap-drop ALL`, non-root, and memory/cpu/pid limits. The session root is bind-mounted to `/workspace` with `handles/`, `inputs/`, `.scripts/` and `.sheath/` overlaid read-only, plus one writable per-run exchange directory at `/sheath-run`; a script that writes into `handles/` directly gets a read-only error — use `save(id, obj)`. If no usable runtime is found (a binary on `PATH` is not enough — the check probes liveness with `<runtime> info`), building the sandbox raises `SandboxRuntimeUnavailable`, with a message naming the `local` opt-out.
+- **`local`** (explicit opt-out) — a scrubbed-env subprocess with `resource` rlimits, a wall-clock timeout, and the path-jail. When a run ends (normally or by timeout) the harness kills the child's whole process group, so background processes a script starts do not outlive the run. Fast, no dependencies, but **no isolation**: the code runs as the host user and can read or write anything that user can, and use the network. Selecting it emits `NoSandboxIsolationWarning`; filter it with `warnings.filterwarnings("ignore", category=sheath.NoSandboxIsolationWarning)` once you have decided deliberately (CI, tests).
 
 ```python
-from tether import Tether, TetherConfig
-from tether.config import SandboxConfig
+from sheath import Sheath, SheathConfig
+from sheath.config import SandboxConfig
 
-cfg = TetherConfig(sandbox=SandboxConfig(
+cfg = SheathConfig(sandbox=SandboxConfig(
     backend="container",           # the default; "local" opts out of isolation
     network=False,                 # opt-in with True if sandbox code must reach the network
     pip_packages=("rich",),        # provisioned into a mounted layer (network only during provisioning)
 ))
-Tether(cfg).solve("…")
+Sheath(cfg).solve("…")
 ```
 
-**Requiring isolation.** The container tier is already the default, so `require_isolation=True` is the stricter assertion on top of it: it refuses the local tier *however it was selected* — an explicit `backend="local"`, or `TETHER_SANDBOX_BACKEND=local` in the environment — with `SandboxRuntimeUnavailable` at `Session.create`, not on first use. A missing runtime or image raises; tether never falls back to the local tier. Set it on any host where no deployment mistake may quietly turn isolation off.
+**Requiring isolation.** The container tier is already the default, so `require_isolation=True` is the stricter assertion on top of it: it refuses the local tier *however it was selected* — an explicit `backend="local"`, or `SHEATH_SANDBOX_BACKEND=local` in the environment — with `SandboxRuntimeUnavailable` at `Session.create`, not on first use. A missing runtime or image raises; sheath never falls back to the local tier. Set it on any host where no deployment mistake may quietly turn isolation off.
 
 **Image readiness.** Runtime liveness and image readiness are different questions. Selecting the container tier probes the runtime with `<runtime> info` and raises `SandboxRuntimeUnavailable` if it is absent or not responding; whether the *image* is built is checked separately. By default the image (Python + `preinstalled` libraries) and any `pip_packages` layer are **built on first use** and cached — which, with `container` as the default backend, is what an out-of-the-box run does. `build_on_demand` controls this; its default (`None`) means "build unless `require_isolation`", so a host that demands isolation is also required to pre-build rather than discover a build on the first request. With builds disabled, a missing image makes `run_python` fail immediately with `SandboxImageMissing`, naming the exact command to run. Builds that do run are bounded by `build_timeout_s` (`SandboxImageError` on expiry); it is one
 budget for the image build and the pip layer together. A timed-out pip-layer container is
 removed, but a timed-out image build may finish in the runtime's background. Pre-build exactly what a host will ask for, and gate startup on a non-mutating preflight:
 
 ```bash
-tether-build-sandbox --preinstalled pandas pyarrow numpy httpx --pip rich   # build image + layer
-tether-build-sandbox --pip rich --check                                    # report only; exit 1 on problems
+sheath-build-sandbox --preinstalled pandas pyarrow numpy httpx --pip rich   # build image + layer
+sheath-build-sandbox --pip rich --check                                    # report only; exit 1 on problems
 ```
 
 ```python
-from tether import sandbox_preflight
-from tether.config import SandboxConfig
+from sheath import sandbox_preflight
+from sheath.config import SandboxConfig
 
 cfg = SandboxConfig(backend="container", require_isolation=True)   # build_on_demand -> False
 report = sandbox_preflight(cfg)        # never builds; `image inspect` is time-bounded
@@ -489,7 +489,7 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 
 ### Configuration
 
-`TetherConfig` (see `tether/config.py`) is a plain dataclass:
+`SheathConfig` (see `sheath/config.py`) is a plain dataclass:
 
 | Field | Default | Notes |
 |---|---|---|
@@ -498,7 +498,7 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 | `max_spill_bytes` | `100 MiB` | Upper edge: a return larger than this is **rejected loudly** (`SpillLimitExceeded`), never silently stored |
 | `max_context_window_tokens` | `128_000` | Fed to MAF compaction |
 | `max_output_tokens` | `4096` | |
-| `root_dir` | `None` | `None` → a fresh one-shot dir `./.tether/runs/run-XXXXXXXX`; continuous conversations use `./.tether/sessions/<id>` (or `<root_dir>/<id>`) |
+| `root_dir` | `None` | `None` → a fresh one-shot dir `./.sheath/runs/run-XXXXXXXX`; continuous conversations use `./.sheath/sessions/<id>` (or `<root_dir>/<id>`) |
 | `idle_ttl_s` | `None` | Continuous-session idle TTL; `None` → never expire |
 | `max_publish_bytes` | `100 MiB` | Largest file `publish_file` / `publish()` will deliver |
 | `max_input_bytes` | `100 MiB` | Largest upload `add_input` will accept |
@@ -515,7 +515,7 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 | `search` | `SearchConfig()` | Tavily provider, key, `max_results` |
 | `documents` | `DocumentConfig()` | Docling ingestion: `ocr` (off by default) |
 
-**`TETHER_SANDBOX_BACKEND`.** An environment variable that overrides the default of `SandboxConfig.backend`. It selects the **tier** (`container` or `local`), *not* the container runtime — use `SandboxConfig.container_runtime` to choose podman or docker. Setting it to `local` opts out of isolation; that is intended for CI and test environments that have made the choice deliberately. An explicit `SandboxConfig(backend=...)` always wins over the variable. Any value other than exactly `local` or `container` is an error (`ValueError`), not a silent fallback.
+**`SHEATH_SANDBOX_BACKEND`.** An environment variable that overrides the default of `SandboxConfig.backend`. It selects the **tier** (`container` or `local`), *not* the container runtime — use `SandboxConfig.container_runtime` to choose podman or docker. Setting it to `local` opts out of isolation; that is intended for CI and test environments that have made the choice deliberately. An explicit `SandboxConfig(backend=...)` always wins over the variable. Any value other than exactly `local` or `container` is an error (`ValueError`), not a silent fallback.
 
 ## Development
 
@@ -526,15 +526,15 @@ uv run ruff check .
 
 CI (`.github/workflows/tests.yml`) runs lint and the suite on every push and pull request, and publishing requires it. The container-tier tests run there when a runtime is usable (ubuntu-latest has one) and build the sandbox image; they skip only when none is.
 
-Testing is a first-class principle: **tests are written before implementation for every unit** (TDD). The fast suite runs deterministically against a stub chat client (no API cost); live tests are gated behind `TETHER_LIVE=1`. `safe_path` and the spill logic are held to the highest bar.
+Testing is a first-class principle: **tests are written before implementation for every unit** (TDD). The fast suite runs deterministically against a stub chat client (no API cost); live tests are gated behind `SHEATH_LIVE=1`. `safe_path` and the spill logic are held to the highest bar.
 
 Design specs and phased implementation plans for each feature live under [`docs/superpowers/`](docs/superpowers/).
 
 ## Project layout
 
 ```
-tether/
-  config.py      TetherConfig / SandboxConfig / FetchConfig / SearchConfig
+sheath/
+  config.py      SheathConfig / SandboxConfig / FetchConfig / SearchConfig
   paths.py       safe_path() — the single security chokepoint
   workspace.py   trust zones: protected dirs, per-run exchange dir, bounded no-follow reads
   procio.py      child-process runner with bounded output capture
@@ -551,7 +551,7 @@ tether/
   egress.py      egress policy: internal-address denylist + redirect re-validation
   tools/         the agent's tools (files, search, fetch, code, inspect, web)
   runtime/       in-sandbox helpers (load/save/emit)
-  api.py         Tether / solve() / Result
+  api.py         Sheath / solve() / Result
   cli.py         thin streaming CLI
 docs/superpowers/  design specs + phased implementation plans
 examples/          runnable samples (minimal AG-UI server; full CopilotKit + MCP app)
@@ -561,7 +561,7 @@ tests/             mirror of the package (unit + integration + security tests)
 
 ## Roadmap
 
-**Implemented:** foundation (handles, sandbox, path-jail); the agent loop + tool surface; the `Tether`/`solve()` API + CLI; web research (Tavily search/extract, Markdown fetch); **document ingestion** (`read_document` via Docling — PDF/spreadsheet → Markdown with tables); **live status updates** (built-in, developer, and MCP tools → an `on_status` feed / `--verbose`); an **AG-UI / CopilotKit** integration (`Tether.agui_stream`); a **container sandbox tier** (hardened Podman/Docker isolation behind `SandboxExecutor`); and a **session lifecycle** model (ephemeral one-shot `solve`; persistent continuous `aopen`/`aask`/`aclose` with optional idle TTL).
+**Implemented:** foundation (handles, sandbox, path-jail); the agent loop + tool surface; the `Sheath`/`solve()` API + CLI; web research (Tavily search/extract, Markdown fetch); **document ingestion** (`read_document` via Docling — PDF/spreadsheet → Markdown with tables); **live status updates** (built-in, developer, and MCP tools → an `on_status` feed / `--verbose`); an **AG-UI / CopilotKit** integration (`Sheath.agui_stream`); a **container sandbox tier** (hardened Podman/Docker isolation behind `SandboxExecutor`); and a **session lifecycle** model (ephemeral one-shot `solve`; persistent continuous `aopen`/`aask`/`aclose` with optional idle TTL).
 
 The **security-hardening phase** (zero-trust handle metadata, container-by-default, egress guard, per-conversation tools) and the **workspace trust zones** work (read-only harness state in the sandbox, per-run exchange directory, bounded tool results and reads) are delivered; see [`docs/ROADMAP.md`](docs/ROADMAP.md) for residuals.
 

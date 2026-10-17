@@ -1,24 +1,39 @@
 # Changelog
 
-All changes are additive: existing call sites keep working with the defaults.
+Apart from the rename below, changes are additive: existing call sites keep working with
+the defaults.
 
 ## Unreleased
+
+### Renamed to `sheath` (breaking)
+- **Breaking:** the project is now `sheath`. The PyPI distribution is `sheath` (previously
+  `tether-harness`) and the import package is `sheath` (previously `tether`). Install with
+  `pip install sheath` and `from sheath import Sheath, SheathConfig, solve`.
+- **Breaking:** `Tether` / `TetherConfig` are now `Sheath` / `SheathConfig`; `Session.tether_instructions`
+  is now `Session.sheath_instructions`.
+- **Breaking:** environment variables use the `SHEATH_` prefix (`SHEATH_ROOT`,
+  `SHEATH_SANDBOX_BACKEND`, `SHEATH_LIVE`, ...); `TETHER_*` is no longer read.
+- **Breaking:** console scripts are `sheath`, `sheath-prefetch-docling` and
+  `sheath-build-sandbox`.
+- **Breaking:** the on-disk state directory is `.sheath/` and the in-container exchange mount is
+  `/sheath-run`. Existing `.tether/` directories are not migrated. Sandbox images are tagged
+  `sheath-sandbox:*`, so the first run builds (or re-tags) the image once.
 
 ### Workspace trust zones and bounded I/O
 - **Security fix:** sandboxed code could plant a symlink in the session root that the
   harness then read or wrote through, reaching host files outside the root from the
-  container tier. `handles/`, `inputs/`, `.scripts/` and the new `.tether/` are now mounted
+  container tier. `handles/`, `inputs/`, `.scripts/` and the new `.sheath/` are now mounted
   read-only into the container; sandbox-to-harness data travels only through a per-run
   exchange directory read with no-follow, size-capped opens; saved payloads are moved into
   `handles/` by the harness. A replaced protected directory raises `WorkspaceTamperedError`.
 - **Behavior change:** scripts can no longer write into `handles/`, `inputs/` or `.scripts/`
   directly (container tier); use `save(id, obj)`. `save()` ids must match
   `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. `write_file` refuses those directories.
-- **Behavior change:** the manifest moved to `.tether/manifest.json` (an existing
+- **Behavior change:** the manifest moved to `.sheath/manifest.json` (an existing
   `handles/_manifest.json` is migrated on open). `read_document` scratch files moved to
-  `.tether/tmp/`.
-- **Behavior change:** one-shot roots are `./.tether/runs/run-XXXXXXXX` (atomic allocation),
-  no longer `./.tether/sessions/<N>`.
+  `.sheath/tmp/`.
+- **Behavior change:** one-shot roots are `./.sheath/runs/run-XXXXXXXX` (atomic allocation),
+  no longer `./.sheath/sessions/<N>`.
 - `HandleStore` is thread-safe and writes atomically; parallel tool calls in one turn no
   longer fail on the manifest.
 - File tools hold the session lock, read only regular files, and are bounded; `read_file`
@@ -41,14 +56,14 @@ All changes are additive: existing call sites keep working with the defaults.
   connect is bounded only by the client's per-phase timeout (`FetchConfig.timeout_s`). New
   `FetchConfig.max_bytes_ceiling` (100 MB) clamps a model-supplied `max_bytes`.
 - `read_document` refuses (rather than truncates) a URL download larger than
-  `FetchConfig.max_bytes`, and caps a workspace path at `TetherConfig.max_input_bytes`
+  `FetchConfig.max_bytes`, and caps a workspace path at `SheathConfig.max_input_bytes`
   while copying it privately.
 - AG-UI turns take the conversation lock and count as activity, so `idle_ttl_s` no longer
   reaps an active thread (a stream a server never closes keeps the conversation exempt);
   conversation ids are validated as a single safe path segment (`aopen("")` is rejected).
   Sync `Conversation.add_input` raises while an AG-UI stream or `aask` turn is open; use
   `aadd_input`.
-- **Behavior change:** `Tether(...)` no longer calls `load_dotenv()` or mutates the config
+- **Behavior change:** `Sheath(...)` no longer calls `load_dotenv()` or mutates the config
   passed in. `TAVILY_API_KEY` is read from the environment, then from `./.env` in the
   current working directory; other `.env` values (such as `OPENAI_API_KEY`) are no longer
   exported into `os.environ` -- the built-in OpenAI client reads `.env` itself.
@@ -58,7 +73,7 @@ All changes are additive: existing call sites keep working with the defaults.
   (for example `outputs -> handles`), so the harness could overwrite handle files, the
   manifest or an upload. A link or file at `outputs/` is now replaced by a real directory
   before anything is written.
-- **Security fix:** `.tether/tmp/` and `.tether/runs/` are created with the workspace and
+- **Security fix:** `.sheath/tmp/` and `.sheath/runs/` are created with the workspace and
   must be real directories (`WorkspaceTamperedError` otherwise); scratch and run directories
   are never created through a link.
 - **Security fix:** a timed-out container that the runtime cannot confirm removed
@@ -85,7 +100,7 @@ All changes are additive: existing call sites keep working with the defaults.
 ### Isolation is on by default
 - **Behavior change:** `SandboxConfig.backend` now defaults to `"container"`, not `"local"`.
   `run_python` executes model-authored code, so the shipped default is a real boundary.
-  `TETHER_SANDBOX_BACKEND` overrides the default and selects the *tier* (`container` or
+  `SHEATH_SANDBOX_BACKEND` overrides the default and selects the *tier* (`container` or
   `local`), not the container runtime; an explicit `SandboxConfig(backend=...)` still wins.
   Any other value raises `ValueError` rather than falling back.
 - Selecting `local` emits `NoSandboxIsolationWarning`.
@@ -101,11 +116,11 @@ All changes are additive: existing call sites keep working with the defaults.
   back to the model.
 - A content digest is recorded when metadata is derived and checked on every read; a
   mismatch raises `HandleTamperedError`. The digest covers the file's length, its first 64 KiB and its last 64 KiB.
-- New `TetherConfig.max_emit_bytes` (1 MiB), `max_control_bytes` (8 MiB) and
+- New `SheathConfig.max_emit_bytes` (1 MiB), `max_control_bytes` (8 MiB) and
   `max_new_handles` (256) bound the parent↔sandbox control channel.
 
 ### Egress policy
-- New `tether/egress.py`. `fetch_url` and `read_document` deny loopback, private,
+- New `sheath/egress.py`. `fetch_url` and `read_document` deny loopback, private,
   link-local, reserved, multicast, unspecified and CGNAT (`100.64.0.0/10`) addresses by
   default, and re-validate every redirect hop (`follow_redirects=False` is forced).
 - Cloud metadata endpoints are denied unconditionally and cannot be allowlisted.
@@ -118,7 +133,7 @@ All changes are additive: existing call sites keep working with the defaults.
 ### Isolation can be made mandatory
 - New `SandboxConfig.require_isolation: bool = False`. With `container` as the default this
   is the stricter assertion on top of it: when true, a non-container backend is refused
-  *however it was selected* -- an explicit `backend="local"` or `TETHER_SANDBOX_BACKEND=local`
+  *however it was selected* -- an explicit `backend="local"` or `SHEATH_SANDBOX_BACKEND=local`
   -- raising `SandboxRuntimeUnavailable` at `Session.create`; a missing container runtime or
   image raises and never falls back to the local tier.
 - A missing container runtime now raises `SandboxRuntimeUnavailable` (a `RuntimeError`
@@ -131,13 +146,13 @@ All changes are additive: existing call sites keep working with the defaults.
   `SandboxImageMissing` immediately with the command that builds it.
 - New `SandboxConfig.build_timeout_s: float = 900.0` bounds image builds and pip-layer
   provisioning (`SandboxImageError` on expiry). `image inspect` is bounded to 10 s.
-- New `tether.sandbox_preflight(config) -> PreflightReport(ok, backend, runtime, image_tag,
+- New `sheath.sandbox_preflight(config) -> PreflightReport(ok, backend, runtime, image_tag,
   problems)`: a non-mutating readiness check that never builds.
-- `tether-build-sandbox` accepts `--preinstalled`, `--pip`, `--runtime`, `--timeout`, and
+- `sheath-build-sandbox` accepts `--preinstalled`, `--pip`, `--runtime`, `--timeout`, and
   `--check`.
 
 ### Agent instructions
-- `agent_instructions` on `Tether(...)` (default), `Tether.aopen` / `SessionManager.aopen`
+- `agent_instructions` on `Sheath(...)` (default), `Sheath.aopen` / `SessionManager.aopen`
   (per-conversation override), `asolve` / `solve`, and `Conversation.acreate`.
 
 ### Publishing files to the host
@@ -146,8 +161,8 @@ All changes are additive: existing call sites keep working with the defaults.
   host callback is configured.
 - New `publish(path, name=None, description=None)` helper inside `run_python`; requests are
   processed after a clean exit and reported in `ExecResult.published`.
-- New `Tether(on_publish=...)` / `aopen(on_publish=...)` receiving a `PublishedFile`.
-- New `TetherConfig.max_publish_bytes: int = 100 MB`.
+- New `Sheath(on_publish=...)` / `aopen(on_publish=...)` receiving a `PublishedFile`.
+- New `SheathConfig.max_publish_bytes: int = 100 MB`.
 - The callback receives a private snapshot of the validated bytes (outside the workspace),
   deleted when it returns.
 
@@ -181,5 +196,5 @@ All changes are additive: existing call sites keep working with the defaults.
 - New `Handle` fields `input_id`, `content_type`, `description` (omitted when unset).
   On rehydration only `input_id` is carried from the (sandbox-writable) manifest;
   `content_type` is re-derived from the filename and `description` is dropped.
-- New `TetherConfig.max_input_bytes: int = 100 MB`.
+- New `SheathConfig.max_input_bytes: int = 100 MB`.
 - The container tier mounts `inputs/` read-only.

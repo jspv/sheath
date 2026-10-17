@@ -1,7 +1,7 @@
 name: Publish to PyPI
 
 # Publishes to PyPI via Trusted Publishing (OIDC) — no API token stored anywhere.
-# Fires when you publish a GitHub Release. Tag/version come from pyproject (tether/__init__.py).
+# Fires when you publish a GitHub Release. Tag/version come from pyproject (sheath/__init__.py).
 on:
   release:
     types: [published]
@@ -40,7 +40,7 @@ jobs:
     # The environment name must match the Trusted Publisher you configure on PyPI.
     environment:
       name: pypi
-      url: https://pypi.org/project/tether-harness/
+      url: https://pypi.org/project/sheath/
     permissions:
       id-token: write   # required for OIDC; this is what replaces the API token
     steps:

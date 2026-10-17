@@ -11,15 +11,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from tether import Session, TetherConfig
-from tether.config import SandboxConfig
-from tether.handles import HandleStore
-from tether.publish import PublishError, validate_publication
-from tether.sandbox_container import ContainerSandbox
+from sheath import Session, SheathConfig
+from sheath.config import SandboxConfig
+from sheath.handles import HandleStore
+from sheath.publish import PublishError, validate_publication
+from sheath.sandbox_container import ContainerSandbox
 
 
 def _session(tmp_path, host=None):
-    return Session.create(TetherConfig(root_dir=tmp_path / "r"), on_publish=host)
+    return Session.create(SheathConfig(root_dir=tmp_path / "r"), on_publish=host)
 
 
 def _tool(sess, name):
@@ -82,10 +82,10 @@ def test_sandbox_runs_do_not_overlap(tmp_path):
 # --- fix 1: a timed-out container is removed, not orphaned ---------------------------------
 
 def test_timed_out_container_is_removed(tmp_path, monkeypatch):
-    import tether.container_runtime as cr
-    import tether.sandbox_container as sc
+    import sheath.container_runtime as cr
+    import sheath.sandbox_container as sc
 
-    from tether.procio import BoundedRun
+    from sheath.procio import BoundedRun
 
     monkeypatch.setattr(cr, "ensure_image", lambda *a, **k: None)
     calls = []
@@ -106,7 +106,7 @@ def test_timed_out_container_is_removed(tmp_path, monkeypatch):
     assert res.killed_by == "timeout"
     run_argv = next(a for a in calls if a[1] == "run")
     name = run_argv[run_argv.index("--name") + 1]
-    assert name.startswith("tether-")
+    assert name.startswith("sheath-")
     assert ["podman", "rm", "-f", name] in calls
 
 
@@ -138,15 +138,15 @@ def test_callback_receives_private_snapshot_removed_afterwards(tmp_path):
 def test_control_file_name_is_unpredictable(tmp_path):
     # The control files live in a per-run exchange directory named by a random token.
     sess = _session(tmp_path, lambda pf: {})
-    res = sess.sandbox.run_code("import os\nos.environ['TETHER_RUN_DIR']")
+    res = sess.sandbox.run_code("import os\nos.environ['SHEATH_RUN_DIR']")
     run_dir = Path(res.result)
     assert re.fullmatch(r"[0-9a-f]{16}", run_dir.name), res.result
-    assert run_dir.parent == sess.root / ".tether" / "runs"
+    assert run_dir.parent == sess.root / ".sheath" / "runs"
 
 
 def test_fifo_control_file_does_not_hang_parent(tmp_path):
     sess = _session(tmp_path, lambda pf: {})
-    code = ("import os\np = os.path.join(os.environ['TETHER_RUN_DIR'], 'publish.jsonl')\nos.mkfifo(p)\n")
+    code = ("import os\np = os.path.join(os.environ['SHEATH_RUN_DIR'], 'publish.jsonl')\nos.mkfifo(p)\n")
     out = {}
     t = threading.Thread(target=lambda: out.update(res=sess.sandbox.run_code(code)), daemon=True)
     t.start()
@@ -162,7 +162,7 @@ def test_symlinked_control_file_is_not_followed(tmp_path):
     (sess.root / "outputs/a.csv").write_text("x")
     forged = tmp_path / "forged.jsonl"
     forged.write_text('{"path": "outputs/a.csv"}\n')
-    code = (f"import os\np = os.path.join(os.environ['TETHER_RUN_DIR'], 'publish.jsonl')\n"
+    code = (f"import os\np = os.path.join(os.environ['SHEATH_RUN_DIR'], 'publish.jsonl')\n"
             f"os.symlink({str(forged)!r}, p)\n")
     res = sess.sandbox.run_code(code)
     assert calls == []
@@ -180,9 +180,9 @@ def test_unencodable_paths_raise_publish_error(tmp_path, bad):
 
 def test_nul_path_from_sandbox_is_a_record_not_a_crash(tmp_path):
     sess = _session(tmp_path, lambda pf: {})
-    code = ("import json, os\nwith open(os.path.join(os.environ['TETHER_RUN_DIR'], 'publish.jsonl'), 'a') as f:\n"
+    code = ("import json, os\nwith open(os.path.join(os.environ['SHEATH_RUN_DIR'], 'publish.jsonl'), 'a') as f:\n"
             "    f.write(json.dumps({'path': 'a\\u0000b'}) + '\\n')\n"
-            "from tether_sandbox import save\nsave('h7', {'k': 1})\n")
+            "from sheath_sandbox import save\nsave('h7', {'k': 1})\n")
     res = sess.sandbox.run_code(code)
     assert res.published and "error" in res.published[0]
     assert "h7" in res.new_handles

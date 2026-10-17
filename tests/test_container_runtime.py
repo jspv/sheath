@@ -1,7 +1,7 @@
 import pytest
 
-from tether.config import SandboxConfig
-from tether.container_runtime import (
+from sheath.config import SandboxConfig
+from sheath.container_runtime import (
     detect_runtime,
     ensure_image,
     ensure_layer,
@@ -32,7 +32,7 @@ def test_detect_raises_when_override_missing():
 def test_image_tag_is_stable_and_depends_on_preinstalled():
     a = image_tag(("pandas", "numpy"))
     assert a == image_tag(("numpy", "pandas"))        # order-independent
-    assert a.startswith("tether-sandbox:")
+    assert a.startswith("sheath-sandbox:")
     assert a != image_tag(("pandas",))                # different set -> different tag
 
 
@@ -58,8 +58,8 @@ def test_ensure_image_builds_when_absent():
             return _Proc(1)                            # not present -> triggers build
         return _Proc(0)
 
-    ensure_image("podman", "tether-sandbox:abc", SandboxConfig(), run=fake_run)
-    assert any(a[1] == "build" and "-t" in a and "tether-sandbox:abc" in a for a in calls)
+    ensure_image("podman", "sheath-sandbox:abc", SandboxConfig(), run=fake_run)
+    assert any(a[1] == "build" and "-t" in a and "sheath-sandbox:abc" in a for a in calls)
 
 
 def test_ensure_image_skips_build_when_present():
@@ -70,7 +70,7 @@ def test_ensure_image_skips_build_when_present():
         assert argv[1] != "build", "should not build when image exists"
         return _Proc()
 
-    ensure_image("podman", "tether-sandbox:abc", SandboxConfig(), run=fake_run)
+    ensure_image("podman", "sheath-sandbox:abc", SandboxConfig(), run=fake_run)
 
 
 def test_ensure_layer_provisions_once_then_serves_from_sentinel(tmp_path):
@@ -112,10 +112,10 @@ def test_ensure_layer_reprovisions_if_sentinel_missing(tmp_path):
 import subprocess  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 
-from tether.container_runtime import require_usable_runtime  # noqa: E402
-from tether.handles import HandleStore  # noqa: E402
-from tether.sandbox import SandboxRuntimeUnavailable  # noqa: E402
-from tether.session import _build_sandbox  # noqa: E402
+from sheath.container_runtime import require_usable_runtime  # noqa: E402
+from sheath.handles import HandleStore  # noqa: E402
+from sheath.sandbox import SandboxRuntimeUnavailable  # noqa: E402
+from sheath.session import _build_sandbox  # noqa: E402
 
 
 def test_missing_runtime_raises_and_names_the_opt_out(tmp_path, monkeypatch):
@@ -124,7 +124,7 @@ def test_missing_runtime_raises_and_names_the_opt_out(tmp_path, monkeypatch):
 
     # ContainerSandbox.__init__ does `from .container_runtime import detect_runtime` at call
     # time, so patching the module attribute is what takes effect.
-    monkeypatch.setattr("tether.container_runtime.detect_runtime", no_runtime)
+    monkeypatch.setattr("sheath.container_runtime.detect_runtime", no_runtime)
     store = HandleStore(tmp_path / "r")
 
     with pytest.raises(SandboxRuntimeUnavailable) as excinfo:
@@ -142,7 +142,7 @@ def test_local_backend_needs_no_runtime(tmp_path):
 
 
 def _present(monkeypatch, name="podman"):
-    monkeypatch.setattr("tether.container_runtime.detect_runtime",
+    monkeypatch.setattr("sheath.container_runtime.detect_runtime",
                         lambda override, which=None: name)
 
 
@@ -192,13 +192,13 @@ def test_probe_timeout_raises(monkeypatch):
 
 def test_build_sandbox_surfaces_dead_runtime_as_unavailable(tmp_path, monkeypatch):
     """Installed-but-not-started: detection passes, the probe fails, the user is told how out."""
-    monkeypatch.setattr("tether.container_runtime.detect_runtime",
+    monkeypatch.setattr("sheath.container_runtime.detect_runtime",
                         lambda override, which=None: "podman")
     # `run=subprocess.run` is bound at def time, so patching subprocess.run would be a no-op;
     # wrap the real probe with a fake runner instead.
     real = require_usable_runtime
     monkeypatch.setattr(
-        "tether.container_runtime.require_usable_runtime",
+        "sheath.container_runtime.require_usable_runtime",
         lambda override: real(override, run=lambda cmd, **kw: SimpleNamespace(
             returncode=125, stderr=b"Cannot connect to Podman")),
     )
@@ -223,7 +223,7 @@ def test_unknown_backend_fails_closed(tmp_path, bad):
 
 
 def test_valid_backends_still_build(tmp_path, monkeypatch):
-    monkeypatch.setattr("tether.container_runtime.detect_runtime",
+    monkeypatch.setattr("sheath.container_runtime.detect_runtime",
                         lambda override, which=None: "podman")
     store = HandleStore(tmp_path / "r")
     assert type(_build_sandbox(tmp_path / "r", store,
@@ -231,7 +231,7 @@ def test_valid_backends_still_build(tmp_path, monkeypatch):
 
 
 def test_local_tier_emits_no_isolation_warning(tmp_path):
-    from tether import NoSandboxIsolationWarning
+    from sheath import NoSandboxIsolationWarning
 
     store = HandleStore(tmp_path / "r")
     with pytest.warns(NoSandboxIsolationWarning, match="NO isolation"):
@@ -241,13 +241,13 @@ def test_local_tier_emits_no_isolation_warning(tmp_path):
 def test_constructor_runtimeerror_is_not_relabelled_as_a_missing_runtime(tmp_path, monkeypatch):
     """Only the probe's RuntimeErrors mean 'no usable runtime'. A future RuntimeError from
     ContainerSandbox.__init__ must not send the user off to install something they have."""
-    monkeypatch.setattr("tether.container_runtime.require_usable_runtime",
+    monkeypatch.setattr("sheath.container_runtime.require_usable_runtime",
                         lambda override: "podman")
 
     def boom(**kw):
         raise RuntimeError("bind mount setup failed")
 
-    monkeypatch.setattr("tether.sandbox_container.ContainerSandbox", boom)
+    monkeypatch.setattr("sheath.sandbox_container.ContainerSandbox", boom)
     store = HandleStore(tmp_path / "r")
 
     with pytest.raises(RuntimeError) as excinfo:
@@ -272,7 +272,7 @@ def test_a_successful_probe_is_cached_per_process(monkeypatch):
 
 
 def test_the_cache_is_keyed_on_the_override(monkeypatch):
-    monkeypatch.setattr("tether.container_runtime.detect_runtime",
+    monkeypatch.setattr("sheath.container_runtime.detect_runtime",
                         lambda override, which=None: override or "podman")
     calls = []
 
@@ -303,8 +303,8 @@ def test_a_failed_probe_is_not_cached(monkeypatch):
 def test_image_build_targets_the_host_python_version():
     import sys
     import types
-    from tether.config import SandboxConfig
-    from tether.container_runtime import ensure_image
+    from sheath.config import SandboxConfig
+    from sheath.container_runtime import ensure_image
 
     calls = []
 
@@ -313,7 +313,7 @@ def test_image_build_targets_the_host_python_version():
         missing = argv[1:3] == ["image", "inspect"]
         return types.SimpleNamespace(returncode=1 if missing else 0, stdout="", stderr="")
 
-    ensure_image("podman", "tether-sandbox:x",
+    ensure_image("podman", "sheath-sandbox:x",
                  SandboxConfig(backend="container", build_on_demand=True), run)
     build = calls[-1]
     assert build[:2] == ["podman", "build"]
@@ -322,7 +322,7 @@ def test_image_build_targets_the_host_python_version():
 
 
 def test_containerfile_takes_the_python_version_as_an_argument():
-    from tether.container_runtime import _CONTAINERFILE
+    from sheath.container_runtime import _CONTAINERFILE
     text = _CONTAINERFILE.read_text()
     assert "ARG PYTHON_VERSION=3.12" in text
     assert "FROM python:${PYTHON_VERSION}-slim" in text

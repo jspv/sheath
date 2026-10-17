@@ -1,6 +1,6 @@
 # Base sandbox image: Python + the preinstalled libraries.
-# The tether runtime/ helpers are NOT baked in -- they are mounted read-only at /runtime,
-# so the image never drifts from the installed tether version.
+# The sheath runtime/ helpers are NOT baked in -- they are mounted read-only at /runtime,
+# so the image never drifts from the installed sheath version.
 # PYTHON_VERSION is set by the builder to the host interpreter's major.minor, so the image
 # tag and the pip-layer cache key (both keyed on the host version) describe the interpreter
 # that actually runs sandboxed code.

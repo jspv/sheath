@@ -1,7 +1,7 @@
-# tether × CopilotKit (with an MCP server)
+# sheath × CopilotKit (with an MCP server)
 
 A full end-to-end example: a [CopilotKit](https://docs.copilotkit.ai/) chat UI in the
-browser, talking to the tether over [AG-UI](https://docs.ag-ui.com/), with an **MCP
+browser, talking to the sheath over [AG-UI](https://docs.ag-ui.com/), with an **MCP
 server** wired into the agent. Ask a data question in the chat and watch the agent call
 the MCP tool, spill the large result to a handle, and write sandboxed Python to compute
 the answer — with live progress streamed back to the UI.
@@ -16,22 +16,22 @@ Next.js runtime route               app/api/copilotkit/route.ts
   │  AG-UI RunAgentInput over HTTP/SSE   (HttpAgent → the Python backend)
   ▼
 FastAPI  POST /agent                backend/server.py
-  │  tether.agui_stream(input_data, tools=[sales_mcp])
+  │  sheath.agui_stream(input_data, tools=[sales_mcp])
   ▼
-tether agent  ──(stdio MCP)──▶     backend/mcp_server.py   (sales_rows tool)
+sheath agent  ──(stdio MCP)──▶     backend/mcp_server.py   (sales_rows tool)
   │
   └─ spills the big MCP result to a handle, runs sandboxed Python, streams events back
 ```
 
 The runtime route proxies on the server, so **no CORS** setup is needed on the Python
-side. CopilotKit generates and forwards a `threadId` per conversation; the tether maps
+side. CopilotKit generates and forwards a `threadId` per conversation; the sheath maps
 it to a persistent workspace, so handles and files persist across turns in a thread.
 
 ## Prerequisites
 
 - Python 3.12 + [`uv`](https://docs.astral.sh/uv/), with the `agui` extra installed
 - Node.js 18+ (for the Next.js frontend)
-- An `OPENAI_API_KEY` in your environment or `.env` (the tether's default client — see
+- An `OPENAI_API_KEY` in your environment or `.env` (the sheath's default client — see
   the repo README's *Bring your own model client* to use Azure/Foundry/etc.)
 
 ## 1. Run the backend
@@ -60,7 +60,7 @@ npm run dev
 ```
 
 Open <http://localhost:3000>. If your backend runs elsewhere, set
-`TETHER_AGENT_URL` for the frontend (e.g. `TETHER_AGENT_URL=http://host:8000/agent npm run dev`).
+`SHEATH_AGENT_URL` for the frontend (e.g. `SHEATH_AGENT_URL=http://host:8000/agent npm run dev`).
 
 ## 3. Try it
 
@@ -96,7 +96,7 @@ the server out from under the others — so per-request construction is the corr
 
 ```
 backend/
-  server.py       FastAPI AG-UI endpoint → tether.agui_stream (attaches the MCP per request)
+  server.py       FastAPI AG-UI endpoint → sheath.agui_stream (attaches the MCP per request)
   mcp_server.py   self-contained stdio MCP server: sales_rows(region) demo tool
 frontend/
   app/api/copilotkit/route.ts   CopilotKit runtime route → AG-UI HttpAgent
@@ -119,16 +119,16 @@ runs before CopilotKit mounts. If you remove that shim, use Chrome.
 that follows a tool call.** Cause: CopilotKit replays the conversation each turn but emits each
 backend tool *result* message **before** the assistant message that declared the calls, while
 the OpenAI API requires the assistant `tool_calls` message first, then its results — so a
-`function_call` looks like it has no output and the request 400s. The tether fixes this in
-core: `agui_stream` reorders the replayed messages (`tether.agui.repair_tool_message_order`)
+`function_call` looks like it has no output and the request 400s. The sheath fixes this in
+core: `agui_stream` reorders the replayed messages (`sheath.agui.repair_tool_message_order`)
 before running the agent, so **no action is needed** here. (If you build your own AG-UI backend
 without going through `agui_stream`, you must reorder the messages yourself.)
 
 **Server restarts mid-conversation.** `uvicorn --reload` watches the repo, and the agent's
 `run_python` writes sandbox scripts into the session dir. If that dir is under the repo (the
-tether default `./.tether/...`), the write hot-reloads the server **mid-conversation** —
+sheath default `./.sheath/...`), the write hot-reloads the server **mid-conversation** —
 aborting the in-flight response and wiping the in-memory session registry. This example keeps
-the session root in a temp dir (`server.py` sets `TetherConfig(root_dir=…)`), so sandbox
+the session root in a temp dir (`server.py` sets `SheathConfig(root_dir=…)`), so sandbox
 writes never trigger a reload. More generally, for continuous threads, avoid losing the live
 conversation mid-thread (don't hot-reload; leave `idle_ttl_s` unset or generous).
 

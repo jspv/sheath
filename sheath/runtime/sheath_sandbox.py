@@ -1,11 +1,11 @@
-"""Injected into the sandbox subprocess as the top-level module ``tether_sandbox``.
+"""Injected into the sandbox subprocess as the top-level module ``sheath_sandbox``.
 
-Communicates with the parent tether only via env vars and a per-run exchange directory:
-  TETHER_ROOT             session root directory (handles/ and inputs/ are read-only here)
-  TETHER_RUN_DIR          this run's exchange directory; the only place to hand data back
-  TETHER_PUBLISH_ENABLED  "1" when the host accepts publish() requests
+Communicates with the parent sheath only via env vars and a per-run exchange directory:
+  SHEATH_ROOT             session root directory (handles/ and inputs/ are read-only here)
+  SHEATH_RUN_DIR          this run's exchange directory; the only place to hand data back
+  SHEATH_PUBLISH_ENABLED  "1" when the host accepts publish() requests
 
-Files in TETHER_RUN_DIR:
+Files in SHEATH_RUN_DIR:
   registry.json      { handle_id: {kind, path} } for existing handles (read)
   new_handles.jsonl  one record per save() (appended)
   emit.json          the emit() payload (written)
@@ -21,14 +21,14 @@ import re
 from pathlib import Path
 from typing import Any
 
-_ROOT = Path(os.environ["TETHER_ROOT"])
-_RUN = Path(os.environ["TETHER_RUN_DIR"])
+_ROOT = Path(os.environ["SHEATH_ROOT"])
+_RUN = Path(os.environ["SHEATH_RUN_DIR"])
 _REGISTRY = json.loads((_RUN / "registry.json").read_text(encoding="utf-8"))
 _NEW = _RUN / "new_handles.jsonl"
 _EMIT = _RUN / "emit.json"
 _PUBLISH = _RUN / "publish.jsonl"
 _SAVED_THIS_RUN: set[str] = set()  # ids written by save() in this process
-# Mirrors tether.handles.HANDLE_ID_RE. Ergonomics only: the parent enforces it for real.
+# Mirrors sheath.handles.HANDLE_ID_RE. Ergonomics only: the parent enforces it for real.
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
@@ -96,7 +96,7 @@ def publish(path: str, name: str | None = None, description: str | None = None) 
     (the parent re-validates it; this side is not trusted). Raises if the host has not enabled
     publishing for this session.
     """
-    if os.environ.get("TETHER_PUBLISH_ENABLED") != "1":
+    if os.environ.get("SHEATH_PUBLISH_ENABLED") != "1":
         raise RuntimeError("publishing is not enabled for this session "
                            "(the host has not configured a publish callback)")
     p = os.path.abspath(os.fspath(path))

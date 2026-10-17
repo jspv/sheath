@@ -2,13 +2,13 @@ import asyncio
 
 from agent_framework import FunctionTool
 
-from tether import TetherConfig, Session
-from tether.mcp_status import (
+from sheath import SheathConfig, Session
+from sheath.mcp_status import (
     inject_progress_tokens,
     install_status_wrappers,
 )
-from tether.status import StatusBus
-from tether.testing import StubChatClient, text
+from sheath.status import StatusBus
+from sheath.testing import StubChatClient, text
 
 
 # --- fakes mimicking MAF's MCPTool surface + mcp notification objects --------
@@ -121,8 +121,8 @@ def test_inject_sets_token_in_meta_and_map():
     tool = _FakeTool()
     token_map = {}
     inject_progress_tokens(tool, "srv", token_map)
-    assert tool._tool_call_meta_by_name["slow"]["progressToken"] == "tether:srv:slow"
-    assert token_map == {"tether:srv:slow": "slow"}
+    assert tool._tool_call_meta_by_name["slow"]["progressToken"] == "sheath:srv:slow"
+    assert token_map == {"sheath:srv:slow": "slow"}
 
 
 def test_inject_preserves_existing_meta():
@@ -193,7 +193,7 @@ class _SeamMCPTool:
 
 
 def test_attach_mcp_installs_wrappers_and_injects_token(tmp_path):
-    cfg = TetherConfig(root_dir=tmp_path / "r")
+    cfg = SheathConfig(root_dir=tmp_path / "r")
     mcp = _SeamMCPTool()
 
     async def run():
@@ -205,7 +205,7 @@ def test_attach_mcp_installs_wrappers_and_injects_token(tmp_path):
                 tools=[mcp], bundles=("code",),
             )
             # token injected for the connected tool
-            assert mcp._tool_call_meta_by_name["slow"]["progressToken"] == "tether:fakemcp:slow"
+            assert mcp._tool_call_meta_by_name["slow"]["progressToken"] == "sheath:fakemcp:slow"
             # the wrapped logging handler now emits to the bus AND chains the original
             await mcp.logging_callback(type("P", (), {"data": "hi", "level": "info"})())
             return events, mcp

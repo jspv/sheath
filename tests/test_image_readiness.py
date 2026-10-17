@@ -6,9 +6,9 @@ import time
 
 import pytest
 
-from tether import PreflightReport, TetherConfig, sandbox_preflight
-from tether.config import SandboxConfig
-from tether.container_runtime import (
+from sheath import PreflightReport, SheathConfig, sandbox_preflight
+from sheath.config import SandboxConfig
+from sheath.container_runtime import (
     SandboxImageError,
     SandboxImageMissing,
     _build_sandbox_main,
@@ -59,7 +59,7 @@ def test_missing_image_with_builds_disabled_raises_fast_without_building():
     assert time.monotonic() - t0 < 1.0
     assert not any(a[1] == "build" for a, _ in calls)
     msg = str(ei.value)
-    assert tag in msg and "tether-build-sandbox" in msg and "--preinstalled pandas" in msg
+    assert tag in msg and "sheath-build-sandbox" in msg and "--preinstalled pandas" in msg
 
 
 def test_image_inspect_is_time_bounded():
@@ -113,9 +113,9 @@ def test_layer_provisioning_times_out(tmp_path):
 # --- run_python surfaces the error --------------------------------------------------------
 
 def test_run_python_with_missing_image_errors_quickly(tmp_path, monkeypatch):
-    import tether.container_runtime as cr
-    from tether.handles import HandleStore
-    from tether.sandbox_container import ContainerSandbox
+    import sheath.container_runtime as cr
+    from sheath.handles import HandleStore
+    from sheath.sandbox_container import ContainerSandbox
 
     calls = []
     # ensure_image binds subprocess.run as a default arg, so inject the fake through it.
@@ -149,8 +149,8 @@ def test_preflight_ok_when_runtime_and_image_present():
     assert rep.image_tag == image_tag(SandboxConfig().preinstalled)
 
 
-def test_preflight_accepts_tether_config():
-    rep = sandbox_preflight(TetherConfig(sandbox=SandboxConfig(backend="container")),
+def test_preflight_accepts_sheath_config():
+    rep = sandbox_preflight(SheathConfig(sandbox=SandboxConfig(backend="container")),
                             which=lambda c: f"/bin/{c}", run=_no_build([]))
     assert rep.ok
 
@@ -174,7 +174,7 @@ def test_preflight_reports_missing_image_and_never_builds():
     rep = sandbox_preflight(SandboxConfig(backend="container"),
                             which=lambda c: f"/bin/{c}", run=run)
     assert not rep.ok
-    assert any(rep.image_tag in p and "tether-build-sandbox" in p for p in rep.problems)
+    assert any(rep.image_tag in p and "sheath-build-sandbox" in p for p in rep.problems)
 
 
 def test_preflight_reports_hung_daemon():
@@ -200,10 +200,10 @@ def test_preflight_local_backend():
     assert not rep.ok and any("require_isolation" in p for p in rep.problems)
 
 
-# --- tether-build-sandbox CLI --------------------------------------------------------------
+# --- sheath-build-sandbox CLI --------------------------------------------------------------
 
 def test_build_cli_uses_host_inputs(monkeypatch, capsys):
-    import tether.container_runtime as cr
+    import sheath.container_runtime as cr
 
     seen = {}
     monkeypatch.setattr(cr, "detect_runtime", lambda override, **k: override or "podman")
@@ -220,7 +220,7 @@ def test_build_cli_uses_host_inputs(monkeypatch, capsys):
 
 
 def test_build_cli_check_mode_exits_nonzero_on_problems(monkeypatch, capsys):
-    import tether.container_runtime as cr
+    import sheath.container_runtime as cr
 
     monkeypatch.setattr(cr, "sandbox_preflight", lambda cfg, **k: PreflightReport(
         ok=False, backend="container", runtime=None, image_tag="t", problems=["nope"]))
@@ -231,7 +231,7 @@ def test_build_cli_check_mode_exits_nonzero_on_problems(monkeypatch, capsys):
 
 
 def test_layer_build_shares_one_deadline(tmp_path, monkeypatch):
-    import tether.container_runtime as cr
+    import sheath.container_runtime as cr
 
     clock = [0.0]
     monkeypatch.setattr(cr.time, "monotonic", lambda: clock[0])
@@ -254,7 +254,7 @@ def test_layer_build_shares_one_deadline(tmp_path, monkeypatch):
 
 
 def test_exhausted_deadline_raises_before_pip(tmp_path, monkeypatch):
-    import tether.container_runtime as cr
+    import sheath.container_runtime as cr
 
     clock = [0.0]
     monkeypatch.setattr(cr.time, "monotonic", lambda: clock[0])
@@ -287,5 +287,5 @@ def test_layer_timeout_removes_named_container(tmp_path):
         ensure_layer("podman", SandboxConfig(pip_packages=("six",)), base=tmp_path, run=run)
     pip_argv = next(a for a in calls if "pip" in a)
     name = pip_argv[pip_argv.index("--name") + 1]
-    assert name.startswith("tether-layer-")
+    assert name.startswith("sheath-layer-")
     assert ["podman", "rm", "-f", name] in calls

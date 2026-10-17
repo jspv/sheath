@@ -1,4 +1,4 @@
-"""Self-eval tether: run the data-integration tether on 10 diverse find-and-analyze
+"""Self-eval sheath: run the data-integration sheath on 10 diverse find-and-analyze
 tasks, record the tool-call trace + final answer + any error per task, and write a JSON
 result file each task completes so progress can be inspected live.
 
@@ -11,7 +11,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from tether import SandboxConfig, Tether, TetherConfig
+from sheath import SandboxConfig, Sheath, SheathConfig
 
 RESULTS = Path(__file__).resolve().parent / "results"
 RUNS = Path(__file__).resolve().parent / "runs"
@@ -87,9 +87,9 @@ TASKS = [
 def run_task(task: dict) -> dict:
     RUNS.mkdir(parents=True, exist_ok=True)
     # Evals measure model behavior and should not require a container runtime.
-    cfg = TetherConfig(root_dir=RUNS / task["id"], model=MODEL,
+    cfg = SheathConfig(root_dir=RUNS / task["id"], model=MODEL,
                        sandbox=SandboxConfig(backend="local"))
-    h = Tether(cfg)
+    h = Sheath(cfg)
     if task.get("seed"):
         task["seed"](h.session)
 
@@ -114,7 +114,7 @@ def run_task(task: dict) -> dict:
             "files": result.files,
         })
     except Exception as e:  # noqa: BLE001
-        record.update({"final_text": "", "error": f"TETHER CRASH: {type(e).__name__}: {e}",
+        record.update({"final_text": "", "error": f"SHEATH CRASH: {type(e).__name__}: {e}",
                        "n_tool_calls": len(trace), "trace": trace,
                        "traceback": traceback.format_exc()})
     return record
