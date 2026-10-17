@@ -297,6 +297,10 @@ class Session:
 
         maf_kwargs.setdefault("max_context_window_tokens", self.config.max_context_window_tokens)
         maf_kwargs.setdefault("max_output_tokens", self.config.max_output_tokens)
+        # The framework wires a tool-approval middleware by default that raises unless every
+        # run() is given an AgentSession. We have no approval flow, and the returned agent is
+        # public API, so keep it off: callers can run() it bare.
+        maf_kwargs.setdefault("disable_tool_auto_approval", True)
         return create_harness_agent(
             client,
             name=name,
@@ -305,7 +309,7 @@ class Session:
             tools=builtin + external,
             disable_todo=True,
             disable_mode=True,
-            disable_memory=True,
+            disable_file_memory=True,
             disable_web_search=True,
             **maf_kwargs,
         )

@@ -5,6 +5,19 @@ the defaults.
 
 ## Unreleased
 
+### Dependency upgrades (minimum versions raised)
+- **Breaking for installs:** requires `agent-framework-core>=1.22.0` and
+  `agent-framework-openai>=1.17.0` (previously `>=1.8.1`); the `agui` extra requires
+  `agent-framework-ag-ui>=1.6.0` (previously `>=1.0.0rc4`). The `ag-ui` package cannot be
+  upgraded without the core upgrade, so the three move together.
+- The framework renamed `create_harness_agent(disable_memory=...)` to `disable_file_memory`, and its
+  default is now *on* (a file-backed memory rooted at `{cwd}/agent-file-memory`); we pass
+  `disable_file_memory=True` so the agent gets no host-filesystem memory tool.
+- The framework now wires a tool-approval middleware by default that raises unless every
+  `run()` is given an `AgentSession`; we disable it (overridable through `maf_kwargs`), so
+  `Session.create_agent()` agents can still be run without a session.
+- `docling` locked at 2.140.0 (was 2.100.0), with `docling-parse` 7 and `docling-ibm-models` 4.
+
 ### Renamed to `sheath` (breaking)
 - **Breaking:** the project is now `sheath`. The PyPI distribution is `sheath` (previously
   `tether-harness`) and the import package is `sheath` (previously `tether`). Install with

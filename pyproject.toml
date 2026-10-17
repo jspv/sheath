@@ -30,8 +30,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "agent-framework-core>=1.8.1",
-    "agent-framework-openai>=1.8.1",
+    "agent-framework-core>=1.22.0",
+    "agent-framework-openai>=1.17.0",
     "mcp>=1.27",            # MAF's MCPStdioTool/MCPStreamableHTTPTool need the MCP SDK at runtime
     "pandas>=2.0",
     "pyarrow>=15.0",
@@ -42,7 +42,7 @@ dependencies = [
 
 [project.optional-dependencies]
 docling = ["docling>=2.0"]         # heavy + downloads models; opt-in. Enables read_document.
-agui = ["agent-framework-ag-ui>=1.0.0rc4"]
+agui = ["agent-framework-ag-ui>=1.6.0"]
 
 [project.urls]
 Homepage = "https://github.com/jspv/sheath"
