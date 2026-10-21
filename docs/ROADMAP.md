@@ -1,6 +1,6 @@
 # Roadmap
 
-Status of work beyond the shipped v0.2.0 surface. The README documents what exists;
+Status of work beyond the shipped v0.2.1 surface. The README documents what exists;
 this file tracks what doesn't yet. Per-item design specs and phased plans live in
 `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
@@ -46,6 +46,8 @@ container tier the default.
 Wire MAF's `Skill`/`SkillsProvider` and `MemoryStore`/`MemoryContextProvider` into the
 harness so the agent can accumulate reusable procedures and cross-session memory. Both are
 marked experimental upstream and emit `ExperimentalWarning`, so pin behavior carefully.
+Since v0.2.1 a host can already pass its own `skills_provider` through `agent_kwargs`; what
+remains is first-class wiring and memory.
 
 ### Workflow durability / HITL outer shell
 Wrap the agent loop in a MAF Workflow to get checkpointing, resume, and human-gated steps —
