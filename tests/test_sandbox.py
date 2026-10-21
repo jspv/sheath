@@ -576,3 +576,26 @@ def test_control_plane_limit_defaults_match_sheath_config(tmp_path):
     lim = ControlPlaneLimits()
     assert (lim.max_emit_bytes, lim.max_control_bytes, lim.max_new_handles) == (
         cfg.max_emit_bytes, cfg.max_control_bytes, cfg.max_new_handles)
+
+
+def test_helpers_are_in_scope_without_an_import(tmp_path):
+    # The code bundle tells the model load(id) and save(id, obj) work inside run_python.
+    sb, store = _sandbox(tmp_path)
+    store.put([1, 2, 3], source="seed", id="h1")
+    res = sb.run_code("d = load('h1'); save('h2', d[::-1]); emit(len(d))\n")
+    assert res.error is None
+    assert res.result == 3
+    assert store.get("h2") == [3, 2, 1]
+
+
+def test_publish_is_in_scope_only_when_enabled(tmp_path):
+    sb, _ = _sandbox(tmp_path)
+    res = sb.run_code("'publish' in globals()\n")
+    assert res.result is False
+
+
+def test_publish_is_in_scope_when_enabled(tmp_path):
+    sb, _ = _sandbox(tmp_path)
+    sb.publisher = lambda path, **kw: {"path": path}
+    res = sb.run_code("'publish' in globals()\n")
+    assert res.result is True

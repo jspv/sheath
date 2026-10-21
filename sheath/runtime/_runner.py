@@ -31,7 +31,11 @@ def main() -> None:
     tree = ast.parse(source, filename=script)
     last_expr = tree.body.pop() if tree.body and isinstance(tree.body[-1], ast.Expr) else None
 
-    namespace = {"__name__": "__main__", "__file__": script}
+    # The model is told load/save/emit (and publish, when the host accepts files) need no import.
+    namespace = {"__name__": "__main__", "__file__": script,
+                 "load": _hs.load, "save": _hs.save, "emit": _hs.emit}
+    if os.environ.get("SHEATH_PUBLISH_ENABLED") == "1":
+        namespace["publish"] = _hs.publish
     exec(compile(tree, script, "exec"), namespace)
 
     if last_expr is not None:
