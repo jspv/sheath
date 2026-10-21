@@ -259,5 +259,6 @@ def test_rg_error_text_never_contains_the_host_root(tmp_path):
     assert str(sess.root) not in str(ei.value) and str(tmp_path) not in str(ei.value)
     assert "locked.txt" in str(ei.value)
     (sess.root / "sub" / "ok.txt").write_text("needle\n")
-    assert [h["file"] for h in search(sess, "needle", path="sub")] == ["sub/locked.txt",
-                                                                       "sub/ok.txt"]
+    # rg walks files in parallel, so the order across files is not fixed.
+    assert sorted(h["file"] for h in search(sess, "needle", path="sub")) == ["sub/locked.txt",
+                                                                             "sub/ok.txt"]
