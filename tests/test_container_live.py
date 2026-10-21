@@ -282,3 +282,11 @@ def test_direct_write_into_handles_fails_clearly(croot):
     res = sb.run_code("open('handles/mine.txt', 'w').write('x')\n")
     assert res.exit_code != 0
     assert "Read-only file system" in res.error or "Permission denied" in res.error
+
+
+def test_helpers_are_in_scope_without_an_import(croot):
+    sb, store = _container(croot)
+    store.put([1, 2, 3], source="seed", id="h1")
+    res = sb.run_code("d = load('h1'); len(d)\n")
+    assert res.error is None, res.error
+    assert res.result == 3

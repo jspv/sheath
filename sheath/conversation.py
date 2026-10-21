@@ -50,17 +50,20 @@ class Conversation:
                       tools: list | None = None, bundles: tuple[str, ...] = ("code", "files", "web"),
                       reap_on_close: bool = True,
                       agent_instructions: str | None = None,
-                      on_publish: OnPublish | None = None) -> "Conversation":
+                      on_publish: OnPublish | None = None,
+                      agent_kwargs: dict[str, Any] | None = None) -> "Conversation":
         """Open the workspace, build the agent once, start a MAF conversation thread.
 
         ``agent_instructions`` (the host's domain system prompt) is appended after sheath's
         operating manual by MAF: ``<core + bundle instructions>\\n\\n<agent_instructions>``.
+        ``agent_kwargs`` are forwarded to ``Session.create_agent``.
         """
         session = Session.create(config, on_publish=on_publish, bundles=bundles)
         await session.__aenter__()
         try:
             agent = await session.create_agent(client, agent_instructions=agent_instructions,
-                                                tools=tools or [], bundles=bundles)
+                                                tools=tools or [], bundles=bundles,
+                                                **(agent_kwargs or {}))
             agent_session = agent.create_session(session_id=id)
         except BaseException:
             await session.__aexit__(None, None, None)

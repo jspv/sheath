@@ -72,7 +72,8 @@ class Sheath:
                  bundles: tuple[str, ...] = ("code", "files", "web"),
                  on_status: _StatusSink | None = None,
                  agent_instructions: str | None = None,
-                 on_publish: OnPublish | None = None) -> None:
+                 on_publish: OnPublish | None = None,
+                 agent_kwargs: dict[str, Any] | None = None) -> None:
         cfg = config or SheathConfig()
         if cfg.search.api_key is None:
             key = os.environ.get("TAVILY_API_KEY") or _dotenv_value("TAVILY_API_KEY")
@@ -84,6 +85,7 @@ class Sheath:
         self.config = cfg
         self._agent_instructions = agent_instructions
         self._on_publish = on_publish
+        self._agent_kwargs = dict(agent_kwargs or {})
         self._client = client
         self._tools = tools or []
         self._bundles = bundles
@@ -96,6 +98,15 @@ class Sheath:
         from agent_framework.openai import OpenAIChatClient
         return OpenAIChatClient(model=self.config.model, env_file_path=".env")
 
+    def _merged_agent_kwargs(self, override: dict[str, Any] | None) -> dict[str, Any]:
+        """Per-call ``agent_kwargs`` win key by key; ``default_options`` merge one level down."""
+        merged = {**self._agent_kwargs, **(override or {})}
+        options = {**(self._agent_kwargs.get("default_options") or {}),
+                   **((override or {}).get("default_options") or {})}
+        if options:
+            merged["default_options"] = options
+        return merged
+
     def _sessions(self):
         if self._manager is None:
             from .manager import SessionManager
@@ -105,19 +116,20 @@ class Sheath:
     async def aopen(self, session_id: str | None = None, *,
                     tools: list | None = None,
                     agent_instructions: str | None = None,
-                    on_publish: OnPublish | None = None) -> Conversation:
+                    on_publish: OnPublish | None = None,
+                    agent_kwargs: dict[str, Any] | None = None) -> Conversation:
         """Open (or resume) a persistent continuous Conversation by id.
 
         Lazy manager init is single-event-loop safe (the None-check/assign has no ``await``); it is
         not safe to first-touch ``aopen`` from multiple OS threads — drive continuous sessions from
         one loop, the v1 contract for both AG-UI and the async terminal loop.
 
-        ``agent_instructions`` and ``on_publish`` override the Sheath-level defaults for this
-        conversation.
+        ``agent_instructions``, ``on_publish`` and ``agent_kwargs`` override the Sheath-level
+        defaults for this conversation.
         """
         return await self._sessions().aopen(session_id, tools=tools,
                                             agent_instructions=agent_instructions,
-                                            on_publish=on_publish)
+                                            on_publish=on_publish, agent_kwargs=agent_kwargs)
 
     async def aclose_sessions(self) -> None:
         """Close every live continuous Conversation (host shutdown)."""
@@ -131,7 +143,8 @@ class Sheath:
 
     async def asolve(self, problem: str, tools: list | None = None, *,
                      on_status: _StatusSink | None = None, keep: bool = False,
-                     agent_instructions: str | None = None) -> Result:
+                     agent_instructions: str | None = None,
+                     agent_kwargs: dict[str, Any] | None = None) -> Result:
         """Run one ephemeral one-shot: open a Conversation, ask, reap the workspace (unless ``keep``).
 
         The one-shot uses ``config.root_dir`` verbatim. With ``root_dir=None`` each call gets its own
@@ -149,7 +162,8 @@ class Sheath:
             bundles=self._bundles, reap_on_close=not keep,
             agent_instructions=(agent_instructions if agent_instructions is not None
                                 else self._agent_instructions),
-            on_publish=self._on_publish)
+            on_publish=self._on_publish,
+            agent_kwargs=self._merged_agent_kwargs(agent_kwargs))
         if sink is not None:
             conv.session.subscribe(sink)
         try:
@@ -178,9 +192,11 @@ class Sheath:
 
     def solve(self, problem: str, tools: list | None = None, *,
               on_status: _StatusSink | None = None, keep: bool = False,
-              agent_instructions: str | None = None) -> Result:
+              agent_instructions: str | None = None,
+              agent_kwargs: dict[str, Any] | None = None) -> Result:
         return asyncio.run(self.asolve(problem, tools=tools, on_status=on_status, keep=keep,
-                                       agent_instructions=agent_instructions))
+                                       agent_instructions=agent_instructions,
+                                       agent_kwargs=agent_kwargs))
 
 
 def solve(problem: str, *, tools: list | None = None,

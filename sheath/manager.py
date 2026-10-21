@@ -74,7 +74,8 @@ class SessionManager:
     async def aopen(self, session_id: str | None = None, *, tools: list | None = None,
                     bundles: tuple[str, ...] | None = None,
                     agent_instructions: str | None = None,
-                    on_publish: Any | None = None) -> Conversation:
+                    on_publish: Any | None = None,
+                    agent_kwargs: dict[str, Any] | None = None) -> Conversation:
         """Reuse the live conversation for ``session_id`` (if any, not expired), else create one.
 
         Open-or-create is serialized behind a single manager lock so a concurrent ``aopen`` of the
@@ -84,8 +85,8 @@ class SessionManager:
         an expired conversation (whose teardown may wait for a running turn) happens outside
         the manager lock; only opens of that same id wait for it.
 
-        ``agent_instructions`` and ``on_publish`` override the Sheath defaults for a conversation
-        being *created*; re-opening a live id returns the existing conversation unchanged.
+        ``agent_instructions``, ``on_publish`` and ``agent_kwargs`` override the Sheath defaults for
+        a conversation being *created*; re-opening a live id returns the existing conversation unchanged.
         """
         while True:
             async with self._lock:
@@ -96,7 +97,8 @@ class SessionManager:
                     if existing is None:
                         return await self._create(session_id, tools=tools, bundles=bundles,
                                                   agent_instructions=agent_instructions,
-                                                  on_publish=on_publish)
+                                                  on_publish=on_publish,
+                                                  agent_kwargs=agent_kwargs)
                     if not self._expired(existing):
                         # Opening is activity: without this, a caller could be handed a
                         # conversation that a sweep reaps before its turn takes the lock.
@@ -113,7 +115,7 @@ class SessionManager:
             # Retry: the id is now free (or someone else recreated it first).
 
     async def _create(self, session_id: str | None, *, tools, bundles, agent_instructions,
-                      on_publish) -> Conversation:
+                      on_publish, agent_kwargs) -> Conversation:
         conv_id = session_id if session_id is not None else uuid.uuid4().hex
         config = dataclasses.replace(
             self._sheath.config, root_dir=str(_conv_root(self._sheath.config, conv_id)))
@@ -128,6 +130,7 @@ class SessionManager:
                                 else self._sheath._agent_instructions),
             on_publish=(on_publish if on_publish is not None
                         else self._sheath._on_publish),
+            agent_kwargs=self._sheath._merged_agent_kwargs(agent_kwargs),
         )
         self._store.put(conv_id, conv)
         return conv

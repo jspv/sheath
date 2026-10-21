@@ -4,6 +4,30 @@
 changed, and the minimum framework versions rose. Entries marked **Breaking** or
 **Behavior change** need action when upgrading from `tether-harness` 0.1.x.
 
+## 0.2.1 — 2026-10-21
+
+### `load` / `save` work inside `run_python` without an import
+- **Fix:** the code bundle tells the model that `load(id)` and `save(id, obj)` need no import,
+  but the script ran in a bare namespace, so `load('h1')` raised `NameError`. The runner now
+  provides `load`, `save` and `emit`, plus `publish` when the host accepts files, on both
+  sandbox tiers.
+
+### MCP progressive disclosure keeps the spill guarantee
+- **Fix:** with MAF's `use_progressive_disclosure=True`, a tool the model loaded mid-run with
+  `load_tool` never got the spill parser or a progress token, so its full result went straight
+  into the conversation. Every allowed tool is now wired when the server connects. If a future
+  agent-framework version removes the seam this relies on, connecting fails instead of letting
+  deferred tools skip the spill.
+
+### `agent_kwargs` on the facade paths
+- `Sheath(..., agent_kwargs={...})` sets framework agent options (for example
+  `skills_provider`, `max_output_tokens`) for every conversation; `aopen`, `asolve` and `solve`
+  take a per-call `agent_kwargs` that wins key by key, with `default_options` merged one level
+  down. `agui_stream` uses the `Sheath` default.
+- **Behavior change:** `Session.create_agent` (and so `agent_kwargs`) now refuses
+  `shell_executor`, `file_access_store` and `background_agents` with `TypeError`. Each would give
+  the model a shell, files or other agents outside the sandbox, `safe_path` and egress checks.
+
 ## 0.2.0 — 2026-10-16
 
 ### Conversation history stays local (`store=False`)
