@@ -30,6 +30,8 @@ from .status import StatusBus, StatusEvent, bind_bus
 _DELIVER = "deliver"
 _INPUTS = "inputs"
 _COPY_CHUNK = 1024 * 1024
+# create_harness_agent options that add a capability path around the sandbox, safe_path or egress.
+_UNSANDBOXED_KWARGS = frozenset({"shell_executor", "file_access_store", "background_agents"})
 
 
 @dataclass
@@ -287,6 +289,11 @@ class Session:
 
         from .spill import looks_like_mcp, spill_tool  # local: spill imports Session -> circular at module level
 
+        refused = sorted(_UNSANDBOXED_KWARGS & maf_kwargs.keys())
+        if refused:
+            raise TypeError(
+                f"{', '.join(refused)}: refused, would give the model shell, file or agent access "
+                "outside the sandbox, safe_path and egress checks")
         builtin = self.tools(*bundles)
         external: list = []
         for tool in tools or []:
