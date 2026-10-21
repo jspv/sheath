@@ -350,6 +350,8 @@ result = h.solve("…", tools=[mcp])
 
 MCP support needs the `mcp` SDK, which is a declared dependency, so `uv sync` already installs it.
 
+**Large servers: progressive disclosure.** A server with a hundred-odd tools can spend tens of thousands of tokens on schemas in every model call. MAF's progressive disclosure (`use_progressive_disclosure=True, always_load=[...]` on the `MCPTool`, marked experimental by MAF) shows the model only a core set plus `list_mcp_tools` / `load_tool` / `unload_tool`. Sheath wires every allowed tool when the server connects, so a tool the model loads mid-run spills to handles and reports progress just like one visible from the start. If a future MAF version removes the seam this relies on, connecting fails rather than letting deferred tools skip the spill.
+
 **Serving many conversations: `tool_factory`.** A single live `MCPTool` is fine for one run, but it is owned and closed by whichever session finishes first, and every conversation would share its connection. For a host serving many conversations (AG-UI, CopilotKit), wrap the construction so each conversation builds and connects its own server:
 
 ```python

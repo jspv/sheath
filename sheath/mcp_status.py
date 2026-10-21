@@ -69,16 +69,18 @@ def install_status_wrappers(bus: StatusBus, tool: Any, server: str) -> dict[Any,
     return token_map
 
 
-def inject_progress_tokens(tool: Any, server: str, token_map: dict[Any, str]) -> None:
+def inject_progress_tokens(tool: Any, server: str, token_map: dict[Any, str],
+                           functions: Any = None) -> None:
     """After connect: give each tool a stable progressToken so the server emits progress.
 
     Writes ``progressToken`` into MAF's per-tool ``_tool_call_meta_by_name`` (preserving any
     existing meta) and records token->name in ``token_map``. No-op if the seam is absent.
+    ``functions`` defaults to ``tool.functions``; pass the full set to cover deferred tools.
     """
     meta_by_name = getattr(tool, "_tool_call_meta_by_name", None)
     if meta_by_name is None:
         return
-    for fn in getattr(tool, "functions", []):
+    for fn in functions if functions is not None else getattr(tool, "functions", []):
         name = getattr(fn, "name", None)
         if not name:
             continue

@@ -340,9 +340,11 @@ class Session:
             raise RuntimeError(f"failed to connect MCP server {tool!r}: {e}") from e
         # Register before the parser loop so aclose() still closes this server if the loop raises.
         self._mcp_connected.append(tool)
-        inject_progress_tokens(tool, server, token_map)   # after connect: tools are now loaded
         functions = list(tool.functions)
-        for ft in functions:
+        # Wrap every function the model can reach, including ones it loads later with load_tool.
+        every = _every_mcp_function(tool, functions)
+        inject_progress_tokens(tool, server, token_map, every)   # after connect: tools are now loaded
+        for ft in every:
             ft.result_parser = make_spill_parser(self, ft.name)
         return functions
 
@@ -362,6 +364,24 @@ class Session:
     def cleanup(self) -> None:
         if self.root.exists():
             shutil.rmtree(self.root)
+
+
+def _every_mcp_function(tool: Any, visible: list) -> list:
+    """``visible`` plus, under MAF progressive disclosure, every allowed function loadable later.
+
+    ``load_tool`` adds the very objects ``_filtered_functions()`` holds, so wrapping those at
+    attach time covers them. Fails closed if that seam is gone: a deferred tool would otherwise
+    bypass the spill parser silently.
+    """
+    if not getattr(tool, "use_progressive_disclosure", False):
+        return visible
+    filtered = getattr(tool, "_filtered_functions", None)
+    if filtered is None:
+        raise RuntimeError(
+            f"MCP server {tool!r} uses progressive disclosure, but this agent-framework version has "
+            "no _filtered_functions(); deferred tools could not be given the spill parser")
+    seen = {id(ft) for ft in visible}
+    return visible + [ft for ft in filtered() if id(ft) not in seen]
 
 
 def _resolve_root(config: SheathConfig) -> tuple[Path, bool]:
