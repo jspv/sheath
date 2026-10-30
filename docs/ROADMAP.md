@@ -4,13 +4,24 @@ Status of work beyond the shipped v0.2.1 surface. The README documents what exis
 this file tracks what doesn't yet. Per-item design specs and phased plans live in
 `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
-Last reviewed: 2026-10-02.
+Last reviewed: 2026-10-30.
 
 ## In progress
 
 Nothing currently.
 
 ## Delivered
+
+### File-tool parity for find → read → edit
+`search` and `read_file` now share 1-based line numbers (`read_file` takes `start_line`), and
+`search` gained `context` and `output="files"|"count"`. New `edit_file` replaces exact text
+atomically instead of rewriting whole files; `list_files` takes a glob `pattern`; `read_file`
+can number its lines. A general shell tool was considered and rejected: it would bypass
+`safe_path` and the sandbox, and `run_python` already covers data processing inside the
+sandbox. Deferred until the agent shows a need: line-range edits (`start_line`/`end_line`
+verified against `old`), a file-type filter for `search` (use `glob`), and paging past
+`max_matches` (ripgrep's cross-file order is not fixed, so stable paging would need
+single-threaded `--sort path`).
 
 ### Workspace trust zones and bounded I/O
 Design in `docs/superpowers/specs/2026-10-02-workspace-trust-zones-design.md`. Closed a
@@ -58,6 +69,9 @@ single agent loop as a node inside it.
 
 Real but low-severity; each is a contained fix.
 
+- **Bare-CR line numbering differs between ripgrep and the rest** — `read_file`, `edit_file`
+  and the Python search fallback treat a lone `\r` as a line break; ripgrep does not. On an
+  old-Mac-style file a ripgrep hit's `line` therefore does not match `read_file`'s numbering.
 - **`max_file_size_mb` is silently ignored on the container tier** — now the default backend,
   so the config field does nothing by default. Documented as local-tier-only in the README;
   a container-side equivalent (or a warning when it is set) is still open.

@@ -54,3 +54,20 @@ def test_wrapped_tools_actually_work(tmp_path):
     hits = tools["search"]("world", path="a.txt")
     assert hits and hits[0]["line"] == 2
     assert tools["list_files"](".") and "a.txt" in tools["list_files"](".")
+
+
+def test_wrapped_file_tools_forward_every_parameter(tmp_path):
+    # The model calls the wrappers, not the impls: each new parameter must reach the impl.
+    tools = {t.__name__: t for t in build_tools(_session(tmp_path))}
+    tools["write_file"]("d/a.txt", "one\ntwo\nthree\n")
+    tools["write_file"]("b.csv", "x\n")
+    assert tools["read_file"]("d/a.txt", start_line=2, limit=1, line_numbers=True) == (
+        "     2\ttwo\n")
+    assert tools["list_files"](".", pattern="**/*.txt") == ["d/a.txt"]
+    [hit] = tools["search"]("two", path="d", context=1)
+    assert hit["before"] == ["one"] and hit["after"] == ["three"]
+    assert tools["search"]("t", output="count") == [{"file": "d/a.txt", "count": 2}]
+    assert tools["search"]("e", output="files", max_matches=5) == [{"file": "d/a.txt"}]
+    out = tools["edit_file"]("d/a.txt", "o", "0", replace_all=True)
+    assert out.startswith("replaced 2 occurrence(s)")
+    assert tools["read_file"]("d/a.txt") == "0ne\ntw0\nthree\n"
