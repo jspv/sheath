@@ -16,7 +16,7 @@ def test_tools_default_is_all_bundles(tmp_path):
     names = {t.__name__ for t in sess.tools()}
     assert names == {
         "inspect_handle", "run_python",
-        "read_file", "write_file", "list_files", "search",
+        "read_file", "write_file", "edit_file", "list_files", "search",
         "fetch_url", "web_search", "web_extract", "read_document",
     }
 

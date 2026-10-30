@@ -15,6 +15,21 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
   Context is read the same way for ripgrep and the Python fallback, so both give identical
   results; a neighbour that is itself a match still appears as context.
 
+### `edit_file`, glob filtering, search output modes, numbered reads
+- New `edit_file(path, old, new, replace_all=False)` tool in the `files` bundle: replaces exact
+  text, so changing part of a file no longer means resending all of it through `write_file`.
+  `old` must be unique unless `replace_all` is set; a miss or an ambiguous match is an error
+  that names the lines involved (or a near match differing only in case or whitespace) and
+  leaves the file untouched. The write is atomic and keeps the file's line endings and
+  permissions. It refuses the directories `write_file` refuses, binary and non-UTF-8 files,
+  and files over 10 MiB; its reply shows the edited lines, numbered and bounded.
+- `list_files` takes a glob `pattern` matched against paths relative to `path` (`*` within one
+  folder, `**` across folders, e.g. `**/*.csv`).
+- `search` takes `output`: `"hits"` (default, unchanged), `"files"` (each matching file once)
+  or `"count"` (matching lines per file). For the file outputs `max_matches` caps files, not
+  lines. Both backends give the same results.
+- `read_file` takes `line_numbers`, prefixing each line with its number and a tab.
+
 ## 0.2.1 — 2026-10-21
 
 ### `load` / `save` work inside `run_python` without an import

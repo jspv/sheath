@@ -31,6 +31,7 @@ _MAX_SEARCH_RESULT_CHARS = 60_000
 
 _SNIPPET_WIDTH = 240  # cap each hit's text so a single huge line can't flood context
 _MAX_CONTEXT = 10     # neighbouring lines per side a hit may carry
+_OUTPUTS = ("hits", "files", "count")
 
 
 def _snippet(line: str, col: int) -> str:
@@ -69,17 +70,29 @@ def _rg_bytes(obj: dict) -> bytes:
 
 
 def search(session: Session, pattern: str, path: str = ".", glob: str | None = None,
-           ignore_case: bool = False, max_matches: int = 100, context: int = 0) -> list[dict]:
+           ignore_case: bool = False, max_matches: int = 100, context: int = 0,
+           output: str = "hits") -> list[dict]:
     """Search for ``pattern`` (a regex) in files under ``path`` (a file or folder).
 
-    Returns up to ``max_matches`` (at most 1000) hits as ``{"file", "line", "col", "text"}``
-    with ``file`` relative to the session root and ``line`` 1-based. With ``context`` > 0
-    (at most 10), each hit also has ``before`` and ``after``: the bounded text of up to that
-    many neighbouring lines. Uses ripgrep if installed, else a Python scan. Links, special
-    files and files over 50 MiB are skipped.
+    ``output`` picks the shape, with ``file`` always relative to the session root:
+
+    - ``"hits"``: up to ``max_matches`` (at most 1000) matching lines as
+      ``{"file", "line", "col", "text"}``, ``line`` 1-based. With ``context`` > 0 (at most
+      10), each hit also has ``before`` and ``after``: the bounded text of up to that many
+      neighbouring lines.
+    - ``"files"``: up to ``max_matches`` files with a match, as ``{"file"}``.
+    - ``"count"``: up to ``max_matches`` files with a match, as ``{"file", "count"}``, where
+      ``count`` is the number of matching lines.
+
+    Uses ripgrep if installed, else a Python scan. Links, special files and files over
+    50 MiB are skipped.
     """
+    if output not in _OUTPUTS:
+        raise ValueError(f"output must be one of {', '.join(map(repr, _OUTPUTS))}")
     max_matches = max(1, min(int(max_matches), _MAX_MATCHES))
     context = max(0, min(int(context), _MAX_CONTEXT))
+    if context and output != "hits":
+        raise ValueError("context applies only to output='hits'")
     _check_glob(glob)
     with session.file_io():
         base = safe_path(session.root, path or ".")  # "" / None -> the root
@@ -88,9 +101,11 @@ def search(session: Session, pattern: str, path: str = ".", glob: str | None = N
             raise ValueError(f"not a regular file or directory: {path!r}")
         rg = shutil.which("rg")
         if rg:
-            hits = _search_rg(rg, session.root, base, pattern, glob, ignore_case, max_matches)
+            hits = _search_rg(rg, session.root, base, pattern, glob, ignore_case, max_matches,
+                              output)
         else:
-            hits = _search_python(session.root, base, pattern, ignore_case, max_matches, glob)
+            hits = _search_python(session.root, base, pattern, ignore_case, max_matches, glob,
+                                  output)
         if context:
             _add_context(session.root, hits, context)
         return _fit(hits)
@@ -132,11 +147,13 @@ def _add_context(root: Path, hits: list[dict], context: int) -> None:
 
 
 def _search_rg(rg: str, root: Path, base: Path, pattern: str, glob: str | None,
-               ignore_case: bool, max_matches: int) -> list[dict]:
+               ignore_case: bool, max_matches: int, output: str = "hits") -> list[dict]:
     # ripgrep does not follow symlinks and skips non-regular files when walking a directory.
     cmd = [rg, "--json", "--no-heading", "--max-filesize", str(_MAX_SEARCH_FILE_BYTES)]
     if ignore_case:
         cmd.append("-i")
+    if output == "files":
+        cmd += ["--max-count", "1"]   # one match proves the file; skip the rest of it
     if glob:
         cmd += ["-g", glob]
     # Run in the root with a root-relative base, so neither rg's error text nor its result
@@ -144,6 +161,7 @@ def _search_rg(rg: str, root: Path, base: Path, pattern: str, glob: str | None,
     rel_base = base.relative_to(root).as_posix() if base != root else "."
     cmd += ["--", pattern, rel_base]
     hits: list[dict] = []
+    counts: dict[str, int] = {}   # files/count outputs; rg emits each file's events together
     stopped_early = False
     # stderr goes to a file so a noisy rg can never fill a pipe and deadlock the read loop.
     with tempfile.TemporaryFile() as errf:
@@ -162,6 +180,13 @@ def _search_rg(rg: str, root: Path, base: Path, pattern: str, glob: str | None,
                 abs_path = Path(_rg_bytes(data["path"]).decode("utf-8", errors="replace"))
                 rel = (abs_path.relative_to(root).as_posix() if abs_path.is_absolute()
                        else abs_path.as_posix())
+                if output != "hits":
+                    if rel not in counts and len(counts) >= max_matches:
+                        stopped_early = True     # every earlier file is already complete
+                        proc.kill()
+                        break
+                    counts[rel] = counts.get(rel, 0) + 1
+                    continue
                 # One hit per matching line (first submatch), with a CHARACTER column, to
                 # match the Python fallback exactly. rg reports a byte offset, so convert it.
                 raw = _rg_bytes(data["lines"])
@@ -182,16 +207,21 @@ def _search_rg(rg: str, root: Path, base: Path, pattern: str, glob: str | None,
         if not stopped_early and proc.returncode == 2:
             errf.seek(0)
             message = errf.read(4096).decode("utf-8", errors="replace").strip()
-            if not hits:
+            if not hits and not counts:
                 raise ValueError(message or "ripgrep search failed")
         if not stopped_early and proc.returncode < 0:
             raise ValueError(f"search timed out after {_RG_TIMEOUT_S:.0f}s; narrow the path "
                              "or the pattern")
+    if output == "files":
+        return [{"file": f} for f in counts]
+    if output == "count":
+        return [{"file": f, "count": n} for f, n in counts.items()]
     return hits
 
 
 def _search_python(root: Path, base: Path, pattern: str, ignore_case: bool,
-                   max_matches: int, glob: str | None = None) -> list[dict]:
+                   max_matches: int, glob: str | None = None,
+                   output: str = "hits") -> list[dict]:
     """The fallback scan, run in a bounded child process (``_search_worker``).
 
     A model-supplied catastrophic regex against a model-written file backtracks inside one
@@ -200,7 +230,8 @@ def _search_python(root: Path, base: Path, pattern: str, ignore_case: bool,
     file (argv has a length limit; stdin is closed).
     """
     request = {"root": str(root), "base": str(base), "pattern": pattern,
-               "ignore_case": ignore_case, "max_matches": max_matches, "glob": glob}
+               "ignore_case": ignore_case, "max_matches": max_matches, "glob": glob,
+               "output": output}
     # Outside the root (the host's private temp dir, mode 0600): inside it, the scan would
     # find the request file -- which contains the pattern -- and report it as a hit.
     fd, req_path = tempfile.mkstemp(prefix="sheath-search-", suffix=".json")

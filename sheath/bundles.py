@@ -12,7 +12,7 @@ CORE_TOOL_NAMES: tuple[str, ...] = ("inspect_handle",)
 
 BUNDLE_TOOL_NAMES: dict[str, tuple[str, ...]] = {
     "code": ("run_python",),
-    "files": ("read_file", "write_file", "list_files", "search"),
+    "files": ("read_file", "write_file", "edit_file", "list_files", "search"),
     "web": ("fetch_url", "web_search", "web_extract", "read_document"),
     "deliver": ("publish_file", "publish_handle"),
 }
@@ -34,9 +34,11 @@ BUNDLE_INSTRUCTIONS: dict[str, str] = {
         "bare expression (e.g. `total`) OR print() it -- the result field captures it."
     ),
     "files": (
-        "Use read_file/write_file/list_files/search to work with files in the workspace. "
-        "read_file is paginated; search finds regex matches across files (including handle "
-        "backing files)."
+        "Use read_file/write_file/edit_file/list_files/search to work with files in the "
+        "workspace. search finds regex matches across files (including handle backing "
+        "files); its 1-based `line` can be passed to read_file as start_line, and context=N "
+        "shows the lines around each hit. Change part of a file with edit_file rather than "
+        "rewriting it with write_file."
     ),
     "web": (
         "Use web_search to find pages, fetch_url to retrieve a page as clean markdown, and "

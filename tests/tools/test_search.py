@@ -335,3 +335,62 @@ def test_search_hit_line_feeds_read_file_directly(tmp_path):
     write_file(sess, "n.txt", _numbered(100))
     [hit] = search(sess, "^line42$")
     assert read_file(sess, "n.txt", start_line=hit["line"], limit=2) == "line42\nline43\n"
+
+
+# --- output modes -----------------------------------------------------------------------
+
+def _by_file(hits):
+    return sorted(hits, key=lambda h: h["file"])
+
+
+def test_search_files_output_lists_each_matching_file_once(tmp_path):
+    sess = _session(tmp_path)
+    _seed(sess)
+    write_file(sess, "c.txt", "alpha\nalpha\n")
+    assert _by_file(search(sess, "alpha", output="files")) == [
+        {"file": "a.txt"}, {"file": "c.txt"}, {"file": "sub/b.txt"}]
+
+
+def test_search_count_output_counts_matching_lines(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "a.txt", "x x\nx\ny\n")
+    write_file(sess, "b.txt", "x\n")
+    assert _by_file(search(sess, "x", output="count")) == [
+        {"file": "a.txt", "count": 2}, {"file": "b.txt", "count": 1}]
+
+
+@pytest.mark.parametrize("output", ["files", "count"])
+def test_search_file_outputs_cap_files_not_lines(tmp_path, output):
+    sess = _session(tmp_path)
+    for i in range(5):
+        write_file(sess, f"f{i}.txt", "x\n" * 10)
+    hits = search(sess, "x", output=output, max_matches=3)
+    assert len(hits) == 3
+    if output == "count":
+        assert all(h["count"] == 10 for h in hits)
+
+
+@pytest.mark.parametrize("output", ["files", "count"])
+def test_search_file_outputs_agree_on_both_backends(tmp_path, monkeypatch, output):
+    sess = _session(tmp_path)
+    _seed(sess)
+    write_file(sess, "c.txt", "alpha\nalpha beta\n")
+    rg_hits = _by_file(search(sess, "alpha", output=output))
+    _force_fallback(monkeypatch)
+    assert _by_file(search(sess, "alpha", output=output)) == rg_hits
+
+
+def test_search_rejects_unknown_output_and_context_outside_hits(tmp_path):
+    sess = _session(tmp_path)
+    _seed(sess)
+    with pytest.raises(ValueError, match="output must be one of"):
+        search(sess, "alpha", output="lines")
+    with pytest.raises(ValueError, match="context applies only"):
+        search(sess, "alpha", output="files", context=2)
+
+
+def test_search_file_outputs_report_invalid_regex(tmp_path):
+    sess = _session(tmp_path)
+    _seed(sess)
+    with pytest.raises(ValueError):
+        search(sess, "(unclosed", output="count")

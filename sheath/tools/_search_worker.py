@@ -26,9 +26,12 @@ from sheath.tools.search import (_MAX_LINE_CHARS as MAX_LINE_CHARS,
 
 
 def scan(root: Path, base: Path, pattern: str, ignore_case: bool, max_matches: int,
-         glob: str | None = None) -> list[dict]:
+         glob: str | None = None, output: str = "hits") -> list[dict]:
     """The confined scan: never reads outside the root, skips links, special files and
-    files over 50 MiB, and bounds every line. Raises ValueError for an invalid pattern."""
+    files over 50 MiB, and bounds every line. Raises ValueError for an invalid pattern.
+
+    ``output`` is as for ``search``: hits are capped at ``max_matches`` lines, while
+    ``files`` and ``count`` cap the number of files instead."""
     flags = re.IGNORECASE if ignore_case else 0
     try:
         rx = re.compile(pattern, flags)
@@ -48,17 +51,28 @@ def scan(root: Path, base: Path, pattern: str, ignore_case: bool, max_matches: i
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 os.close(fd)
                 continue
+            rel = f.relative_to(root).as_posix()
+            found = 0
             with open(fd, encoding="utf-8", newline="") as fh:
                 for lineno, line in enumerate(
                         workspace.iter_bounded_lines(fh, MAX_LINE_CHARS), start=1):
                     m = rx.search(line)
-                    if m:
-                        hits.append({"file": f.relative_to(root).as_posix(), "line": lineno,
-                                     "col": m.start(), "text": snippet(line, m.start())})
+                    if not m:
+                        continue
+                    found += 1
+                    if output == "files":
+                        break
+                    if output == "hits":
+                        hits.append({"file": rel, "line": lineno, "col": m.start(),
+                                     "text": snippet(line, m.start())})
                         if len(hits) >= max_matches:
                             return hits
         except (UnicodeDecodeError, OSError):
             continue
+        if found and output != "hits":
+            hits.append({"file": rel} if output == "files" else {"file": rel, "count": found})
+            if len(hits) >= max_matches:
+                return hits
     return hits
 
 
@@ -66,7 +80,8 @@ def main(argv: list[str]) -> int:
     req = json.loads(Path(argv[1]).read_text(encoding="utf-8"))
     try:
         hits = scan(Path(req["root"]), Path(req["base"]), req["pattern"],
-                    bool(req["ignore_case"]), int(req["max_matches"]), req.get("glob"))
+                    bool(req["ignore_case"]), int(req["max_matches"]), req.get("glob"),
+                    req.get("output", "hits"))
     except ValueError as e:
         out = {"error": str(e)}
     else:

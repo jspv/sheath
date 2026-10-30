@@ -223,3 +223,177 @@ def test_write_file_with_unencodable_content_leaves_the_file_intact(tmp_path):
     with pytest.raises(UnicodeEncodeError):
         write_file(sess, "keep.txt", "bad \ud800 surrogate")
     assert (sess.root / "keep.txt").read_text() == "precious"
+
+
+# --- read_file line_numbers -------------------------------------------------------------
+
+def test_read_file_line_numbers_prefix_each_line(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "a.txt", "one\ntwo\nthree\n")
+    assert read_file(sess, "a.txt", start_line=2, line_numbers=True) == (
+        "     2\ttwo\n     3\tthree\n")
+
+
+# --- list_files pattern -----------------------------------------------------------------
+
+def _tree(sess):
+    for rel in ("a.csv", "b.txt", "data/c.csv", "data/deep/d.csv", "data/e.json"):
+        write_file(sess, rel, "x")
+
+
+def test_list_files_pattern_star_stays_in_one_folder(tmp_path):
+    sess = _session(tmp_path)
+    _tree(sess)
+    assert list_files(sess, ".", "*.csv") == ["a.csv"]
+
+
+def test_list_files_pattern_double_star_spans_folders(tmp_path):
+    sess = _session(tmp_path)
+    _tree(sess)
+    assert list_files(sess, ".", "**/*.csv") == ["a.csv", "data/c.csv", "data/deep/d.csv"]
+
+
+def test_list_files_pattern_is_relative_to_path(tmp_path):
+    sess = _session(tmp_path)
+    _tree(sess)
+    assert list_files(sess, "data", "*.json") == ["data/e.json"]
+    assert list_files(sess, "data", "deep/*") == ["data/deep/d.csv"]
+
+
+def test_list_files_pattern_on_a_single_file(tmp_path):
+    sess = _session(tmp_path)
+    _tree(sess)
+    assert list_files(sess, "b.txt", "*.txt") == ["b.txt"]
+    assert list_files(sess, "b.txt", "*.csv") == []
+
+
+@pytest.mark.parametrize("bad", ["/etc/*", "../*", "data/../../x"])
+def test_list_files_rejects_escaping_patterns(tmp_path, bad):
+    sess = _session(tmp_path)
+    with pytest.raises(ValueError, match="invalid pattern"):
+        list_files(sess, ".", bad)
+
+
+# --- edit_file --------------------------------------------------------------------------
+
+from sheath.tools.files import edit_file  # noqa: E402
+
+
+def test_edit_file_replaces_a_unique_match_and_shows_numbered_lines(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "a.py", "x = 1\ny = 2\nz = 3\n")
+    out = edit_file(sess, "a.py", "y = 2", "y = 20")
+    assert read_file(sess, "a.py") == "x = 1\ny = 20\nz = 3\n"
+    assert out.startswith("replaced 1 occurrence(s) in a.py")
+    assert "     2\ty = 20\n" in out
+
+
+def test_edit_file_refuses_an_ambiguous_match_and_names_the_lines(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "a.txt", "dup\nother\ndup\n")
+    with pytest.raises(ValueError, match=r"occurs 2 times.*lines 1, 3"):
+        edit_file(sess, "a.txt", "dup", "new")
+    assert read_file(sess, "a.txt") == "dup\nother\ndup\n"
+
+
+def test_edit_file_replace_all(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "a.txt", "dup\nother\ndup\n")
+    assert edit_file(sess, "a.txt", "dup", "new", replace_all=True).startswith(
+        "replaced 2 occurrence(s)")
+    assert read_file(sess, "a.txt") == "new\nother\nnew\n"
+
+
+def test_edit_file_can_delete_text(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "a.txt", "keep\ndrop\nkeep2\n")
+    edit_file(sess, "a.txt", "drop\n", "")
+    assert read_file(sess, "a.txt") == "keep\nkeep2\n"
+
+
+def test_edit_file_no_match_points_at_a_near_match(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "a.txt", "one\nHello World\n")
+    with pytest.raises(ValueError, match="case-insensitive match starts on line 2"):
+        edit_file(sess, "a.txt", "hello world", "x")
+    with pytest.raises(ValueError, match="differing only in whitespace starts on line 2"):
+        edit_file(sess, "a.txt", "Hello   World", "x")
+    with pytest.raises(ValueError, match="not found"):
+        edit_file(sess, "a.txt", "absent", "x")
+
+
+@pytest.mark.parametrize("old,new", [("", "x"), ("same", "same")])
+def test_edit_file_rejects_empty_or_identical_text(tmp_path, old, new):
+    sess = _session(tmp_path)
+    write_file(sess, "a.txt", "same\n")
+    with pytest.raises(ValueError):
+        edit_file(sess, "a.txt", old, new)
+
+
+def test_edit_file_keeps_crlf_line_endings_and_permissions(tmp_path):
+    sess = _session(tmp_path)
+    target = sess.root / "dos.txt"
+    target.write_bytes(b"a\r\nb\r\nc\r\n")
+    os.chmod(target, 0o640)
+    out = edit_file(sess, "dos.txt", "b", "B")
+    assert target.read_bytes() == b"a\r\nB\r\nc\r\n"
+    assert target.stat().st_mode & 0o777 == 0o640
+    assert "     2\tB\r\n" in out
+    assert [p.name for p in sess.root.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_edit_file_line_numbers_match_read_file_with_bare_cr(tmp_path):
+    sess = _session(tmp_path)
+    (sess.root / "mac.txt").write_bytes(b"one\rtwo\rtwo\r")
+    with pytest.raises(ValueError, match="lines 2, 3"):
+        edit_file(sess, "mac.txt", "two", "x")
+
+
+@pytest.mark.parametrize("rel", ["handles/x.txt", "inputs/x.txt", ".sheath/x.txt"])
+def test_edit_file_refuses_protected_directories(tmp_path, rel):
+    sess = _session(tmp_path)
+    target = sess.root / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("data\n")
+    with pytest.raises(ValueError, match="managed by sheath"):
+        edit_file(sess, rel, "data", "evil")
+    assert target.read_text() == "data\n"
+
+
+def test_edit_file_refuses_escaping_links_binary_and_non_utf8(tmp_path):
+    sess = _session(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("data\n")
+    os.symlink(outside, sess.root / "link.txt")
+    with pytest.raises(PathEscapesRootError):
+        edit_file(sess, "link.txt", "data", "x")
+    assert outside.read_text() == "data\n"
+    (sess.root / "bin.dat").write_bytes(b"data\0\0")
+    with pytest.raises(ValueError, match="binary"):
+        edit_file(sess, "bin.dat", "data", "x")
+    (sess.root / "latin.txt").write_bytes(b"caf\xe9 data\n")
+    with pytest.raises(ValueError, match="UTF-8"):
+        edit_file(sess, "latin.txt", "data", "x")
+
+
+def test_edit_file_refuses_files_over_the_size_cap(tmp_path, monkeypatch):
+    import sheath.tools.files as files
+    monkeypatch.setattr(files, "_MAX_EDIT_BYTES", 10)
+    sess = _session(tmp_path)
+    write_file(sess, "big.txt", "data " * 10)
+    with pytest.raises(ValueError, match="run_python"):
+        edit_file(sess, "big.txt", "data", "x")
+
+
+def test_edit_file_rejects_path_outside_root(tmp_path):
+    sess = _session(tmp_path)
+    with pytest.raises(PathEscapesRootError):
+        edit_file(sess, "../escape.txt", "a", "b")
+
+
+def test_edit_file_preview_is_bounded(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "a.txt", "start\n")
+    out = edit_file(sess, "a.txt", "start", "\n".join("y" * 200 for _ in range(500)))
+    assert len(out) <= 4200
+    assert "preview truncated" in out

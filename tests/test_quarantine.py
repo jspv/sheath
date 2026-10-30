@@ -93,6 +93,8 @@ def test_quarantine_refuses_parent_file_tools(quarantined):
     with pytest.raises(SandboxQuarantinedError):
         tools["read_file"]("notes.txt")
     with pytest.raises(SandboxQuarantinedError):
+        tools["edit_file"]("notes.txt", "hello", "bye")
+    with pytest.raises(SandboxQuarantinedError):
         tools["list_files"](".")
     with pytest.raises(SandboxQuarantinedError):
         tools["search"]("hello")

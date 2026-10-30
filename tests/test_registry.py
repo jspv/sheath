@@ -12,7 +12,7 @@ def test_build_tools_returns_expected_named_callables(tmp_path):
     tools = build_tools(_session(tmp_path))
     names = {t.__name__ for t in tools}
     assert names == {
-        "read_file", "write_file", "list_files", "search",
+        "read_file", "write_file", "edit_file", "list_files", "search",
         "fetch_url", "run_python", "inspect_handle",
         "web_search", "web_extract", "read_document",
         "publish_file", "publish_handle",   # filtered by Session.tools() without on_publish

@@ -28,8 +28,13 @@ def _tool(sess, name):
 
 @pytest.mark.parametrize("call", [
     lambda s, t, f: _tool(s, "read_file")("one_line.txt", 1, 10**9),
+    lambda s, t, f: _tool(s, "read_file")("one_line.txt", 1, 10**9, True),
+    lambda s, t, f: _tool(s, "edit_file")("one_line.txt", "x", "z" * 2, True),
     lambda s, t, f: _tool(s, "list_files")("."),
+    lambda s, t, f: _tool(s, "list_files")(".", "**/*.txt"),
     lambda s, t, f: _tool(s, "search")("needle", ".", None, False, 10**9, 10**9),
+    lambda s, t, f: _tool(s, "search")("needle", ".", None, False, 10**9, 0, "files"),
+    lambda s, t, f: _tool(s, "search")("needle", ".", None, False, 10**9, 0, "count"),
     lambda s, t, f: _tool(s, "run_python")("print('A' * 5_000_000)"),
     lambda s, t, f: _tool(s, "run_python")(
         "from sheath_sandbox import emit\nemit('Z' * 500_000)"),
