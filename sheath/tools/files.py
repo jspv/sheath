@@ -37,17 +37,20 @@ def _open_checked(target, flags: int, shown: str) -> int:
     return fd
 
 
-def read_file(session: Session, path: str, offset: int = 0, limit: int = _DEFAULT_LIMIT,
+def read_file(session: Session, path: str, start_line: int = 1, limit: int = _DEFAULT_LIMIT,
               max_chars: int = _MAX_READ_CHARS) -> str:
-    """Read up to ``limit`` lines starting at line ``offset`` from a file under the root.
+    """Read up to ``limit`` lines starting at 1-based line ``start_line`` from a file under
+    the root. Line numbers match ``search`` hits, so a hit's ``line`` can be passed straight in.
 
     The result is capped at ``max_chars`` characters, and the file is streamed line by line
     with a per-line bound, so neither a huge file nor one enormous line is ever held whole.
     Only regular files are read (a FIFO or device would block or never end); a binary file
     is refused with a pointer to ``run_python``.
     """
-    if offset < 0 or limit < 0:
-        raise ValueError("offset and limit must be non-negative")
+    if start_line < 1:
+        raise ValueError("start_line is 1-based and must be at least 1")
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
     with session.file_io():
         target = safe_path(session.root, path)
         fd = _open_checked(target, os.O_RDONLY, path)
@@ -64,10 +67,11 @@ def read_file(session: Session, path: str, offset: int = 0, limit: int = _DEFAUL
         size = 0
         truncated = False
         with f:
-            for lineno, line in enumerate(workspace.iter_bounded_lines(f, max_chars + 1)):
-                if lineno < offset:
+            for lineno, line in enumerate(workspace.iter_bounded_lines(f, max_chars + 1),
+                                          start=1):
+                if lineno < start_line:
                     continue
-                if lineno >= offset + limit:
+                if lineno >= start_line + limit:
                     break
                 pieces.append(line)
                 size += len(line)
@@ -77,7 +81,7 @@ def read_file(session: Session, path: str, offset: int = 0, limit: int = _DEFAUL
     text = "".join(pieces)
     if truncated:
         text = (text[:max_chars]
-                + f"\n... [truncated at {max_chars} chars; narrow the read with offset/limit "
+                + f"\n... [truncated at {max_chars} chars; narrow the read with start_line/limit "
                   "or use search to locate what you need]")
     return text
 

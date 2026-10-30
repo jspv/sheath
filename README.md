@@ -429,9 +429,9 @@ The agent gets a small, fixed set of root-confined tools (listed below; the web 
 | Tool | Purpose |
 |---|---|
 | `write_file(path, content)` | Write a file (root-jailed) |
-| `read_file(path, offset=0, limit=2000)` | Bounded, paginated text |
+| `read_file(path, start_line=1, limit=2000)` | Bounded, paginated text; `start_line` is 1-based, the same numbering as `search` hits |
 | `list_files(path=".")` | Directory listing |
-| `search(pattern, …)` | ripgrep over files/handles, with a Python-regex fallback (run in a bounded child process) |
+| `search(pattern, …, context=0)` | ripgrep over files/handles, with a Python-regex fallback (run in a bounded child process). Hits give a 1-based `line`; `context` (max 10) adds `before`/`after` neighbouring lines |
 | `run_python(code=None, path=None, args=[])` | Run a script in the sandbox → `{stdout, result, error, exit_code, new_handles}`. An emitted result whose JSON exceeds `spill_threshold_bytes` comes back as `{"spilled": true, "note": …, "handle": {…}}` and is stored as a handle |
 | `fetch_url(url)` | Fetch a URL → typed handle; HTML is cleaned to Markdown (trafilatura) |
 | `inspect_handle(id, rows=20, stats=False)` | Deeper on-demand look at a handle: up to 100 preview lines / head rows, read raw and bounded (JSON is not pretty-printed); `stats=True` adds per-column min/max/null_count for dataframes from the parquet footer (min/max are null when any non-empty row group lacks them); a first row group over 16 MiB yields no head rows (`head_omitted`) |

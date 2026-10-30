@@ -19,10 +19,10 @@ def test_write_then_read_roundtrip(tmp_path):
     assert read_file(sess, "notes/a.txt") == "hello\nworld\n"
 
 
-def test_read_is_bounded_by_limit_and_offset(tmp_path):
+def test_read_is_bounded_by_limit_and_start_line(tmp_path):
     sess = _session(tmp_path)
-    write_file(sess, "big.txt", "".join(f"line{i}\n" for i in range(100)))
-    out = read_file(sess, "big.txt", offset=10, limit=3)
+    write_file(sess, "big.txt", "".join(f"line{i}\n" for i in range(1, 101)))
+    out = read_file(sess, "big.txt", start_line=10, limit=3)
     assert out == "line10\nline11\nline12\n"
 
 
@@ -39,14 +39,14 @@ def test_read_file_caps_total_characters_on_long_lines(tmp_path):
 def test_read_past_eof_returns_empty(tmp_path):
     sess = _session(tmp_path)
     write_file(sess, "a.txt", "one\ntwo\n")
-    assert read_file(sess, "a.txt", offset=100) == ""
+    assert read_file(sess, "a.txt", start_line=100) == ""
 
 
-def test_read_rejects_negative_offset_or_limit(tmp_path):
+def test_read_rejects_start_line_below_one_or_negative_limit(tmp_path):
     sess = _session(tmp_path)
     write_file(sess, "a.txt", "one\ntwo\n")
-    with pytest.raises(ValueError):
-        read_file(sess, "a.txt", offset=-1)
+    with pytest.raises(ValueError, match="1-based"):
+        read_file(sess, "a.txt", start_line=0)
     with pytest.raises(ValueError):
         read_file(sess, "a.txt", limit=-1)
 
@@ -201,8 +201,8 @@ def test_write_file_to_a_directory_is_refused(tmp_path):
 def test_read_file_splits_bare_carriage_return_lines(tmp_path):
     sess = _session(tmp_path)
     (sess.root / "mac.txt").write_bytes(b"one\rtwo\rthree\r")
-    assert read_file(sess, "mac.txt", offset=1, limit=1) == "two\r"
-    assert read_file(sess, "mac.txt", offset=2, limit=5) == "three\r"
+    assert read_file(sess, "mac.txt", start_line=2, limit=1) == "two\r"
+    assert read_file(sess, "mac.txt", start_line=3, limit=5) == "three\r"
 
 
 @pytest.mark.parametrize("width", [65535, 131071])
@@ -211,9 +211,9 @@ def test_read_file_counts_crlf_lines_once_at_a_chunk_boundary(tmp_path, width):
     line = b"y" * width + b"\r\n"
     (sess.root / "dos.txt").write_bytes(line * 3 + b"tail\r\n")
     big = 10 * width
-    assert read_file(sess, "dos.txt", offset=1, limit=1, max_chars=big) == line.decode()
-    assert read_file(sess, "dos.txt", offset=3, limit=5, max_chars=big) == "tail\r\n"
-    assert read_file(sess, "dos.txt", offset=0, limit=100, max_chars=big) == (
+    assert read_file(sess, "dos.txt", start_line=2, limit=1, max_chars=big) == line.decode()
+    assert read_file(sess, "dos.txt", start_line=4, limit=5, max_chars=big) == "tail\r\n"
+    assert read_file(sess, "dos.txt", limit=100, max_chars=big) == (
         (line * 3 + b"tail\r\n").decode())
 
 

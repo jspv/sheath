@@ -15,6 +15,7 @@ import tempfile
 import threading
 from pathlib import Path
 
+from .. import workspace
 from ..paths import safe_path
 from ..procio import run_bounded
 from ..session import Session
@@ -29,6 +30,7 @@ _PY_OUTPUT_CAP = 16 * 1024 * 1024   # 1000 hits of bounded snippets fit with roo
 _MAX_SEARCH_RESULT_CHARS = 60_000
 
 _SNIPPET_WIDTH = 240  # cap each hit's text so a single huge line can't flood context
+_MAX_CONTEXT = 10     # neighbouring lines per side a hit may carry
 
 
 def _snippet(line: str, col: int) -> str:
@@ -67,14 +69,17 @@ def _rg_bytes(obj: dict) -> bytes:
 
 
 def search(session: Session, pattern: str, path: str = ".", glob: str | None = None,
-           ignore_case: bool = False, max_matches: int = 100) -> list[dict]:
+           ignore_case: bool = False, max_matches: int = 100, context: int = 0) -> list[dict]:
     """Search for ``pattern`` (a regex) in files under ``path`` (a file or folder).
 
     Returns up to ``max_matches`` (at most 1000) hits as ``{"file", "line", "col", "text"}``
-    with ``file`` relative to the session root. Uses ripgrep if installed, else a Python
-    scan. Links, special files and files over 50 MiB are skipped.
+    with ``file`` relative to the session root and ``line`` 1-based. With ``context`` > 0
+    (at most 10), each hit also has ``before`` and ``after``: the bounded text of up to that
+    many neighbouring lines. Uses ripgrep if installed, else a Python scan. Links, special
+    files and files over 50 MiB are skipped.
     """
     max_matches = max(1, min(int(max_matches), _MAX_MATCHES))
+    context = max(0, min(int(context), _MAX_CONTEXT))
     _check_glob(glob)
     with session.file_io():
         base = safe_path(session.root, path or ".")  # "" / None -> the root
@@ -83,10 +88,47 @@ def search(session: Session, pattern: str, path: str = ".", glob: str | None = N
             raise ValueError(f"not a regular file or directory: {path!r}")
         rg = shutil.which("rg")
         if rg:
-            return _fit(_search_rg(rg, session.root, base, pattern, glob, ignore_case,
-                                   max_matches))
-        return _fit(_search_python(session.root, base, pattern, ignore_case, max_matches,
-                                   glob))
+            hits = _search_rg(rg, session.root, base, pattern, glob, ignore_case, max_matches)
+        else:
+            hits = _search_python(session.root, base, pattern, ignore_case, max_matches, glob)
+        if context:
+            _add_context(session.root, hits, context)
+        return _fit(hits)
+
+
+def _add_context(root: Path, hits: list[dict], context: int) -> None:
+    """Attach ``before``/``after`` lines to each hit, in place.
+
+    Done here rather than per backend so rg and the Python scan give identical context. Each
+    file with hits is read once, line by line with a per-line bound, and only up to the last
+    line any of its hits needs. Called under ``file_io``, so the file cannot change between
+    the scan and this read; a file that can no longer be opened just gets no context.
+    """
+    by_file: dict[str, list[dict]] = {}
+    for hit in hits:
+        by_file.setdefault(hit["file"], []).append(hit)
+    for rel, file_hits in by_file.items():
+        wanted: dict[int, str] = {}
+        need = {n for h in file_hits for n in range(h["line"] - context, h["line"] + context + 1)}
+        last = max(need)
+        try:
+            fd = os.open(safe_path(root, rel), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except (OSError, ValueError):
+            continue
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            continue
+        with open(fd, encoding="utf-8", errors="replace", newline="") as fh:
+            for lineno, line in enumerate(workspace.iter_bounded_lines(fh, _MAX_LINE_CHARS),
+                                          start=1):
+                if lineno > last:
+                    break
+                if lineno in need:
+                    wanted[lineno] = _snippet(line, 0)
+        for hit in file_hits:
+            n = hit["line"]
+            hit["before"] = [wanted[i] for i in range(n - context, n) if i in wanted]
+            hit["after"] = [wanted[i] for i in range(n + 1, n + context + 1) if i in wanted]
 
 
 def _search_rg(rg: str, root: Path, base: Path, pattern: str, glob: str | None,

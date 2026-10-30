@@ -4,6 +4,17 @@
 changed, and the minimum framework versions rose. Entries marked **Breaking** or
 **Behavior change** need action when upgrading from `tether-harness` 0.1.x.
 
+## Unreleased
+
+### `search` and `read_file` share 1-based line numbers
+- **Breaking:** `read_file(path, offset=0, limit)` is now `read_file(path, start_line=1,
+  limit)`, and `start_line` is 1-based. `offset` was 0-based while `search` reports 1-based
+  lines, so passing a hit's `line` as `offset` started the read one line after the match.
+- `search` takes `context` (0–10). Each hit then also carries `before` and `after`, the
+  bounded text of up to that many neighbouring lines, so a match can be seen in one call.
+  Context is read the same way for ripgrep and the Python fallback, so both give identical
+  results; a neighbour that is itself a match still appears as context.
+
 ## 0.2.1 — 2026-10-21
 
 ### `load` / `save` work inside `run_python` without an import

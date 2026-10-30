@@ -262,3 +262,76 @@ def test_rg_error_text_never_contains_the_host_root(tmp_path):
     # rg walks files in parallel, so the order across files is not fixed.
     assert sorted(h["file"] for h in search(sess, "needle", path="sub")) == ["sub/locked.txt",
                                                                              "sub/ok.txt"]
+
+
+def _numbered(n):
+    return "".join(f"line{i}\n" for i in range(1, n + 1))
+
+
+def test_search_context_returns_neighbouring_lines(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "n.txt", _numbered(20))
+    [hit] = search(sess, "^line10$", context=2)
+    assert hit["line"] == 10
+    assert hit["before"] == ["line8", "line9"]
+    assert hit["after"] == ["line11", "line12"]
+
+
+def test_search_context_is_clipped_at_file_edges(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "n.txt", _numbered(3))
+    first, last = search(sess, "^line(1|3)$", context=5)
+    assert first["before"] == [] and first["after"] == ["line2", "line3"]
+    assert last["before"] == ["line1", "line2"] and last["after"] == []
+
+
+def test_search_context_includes_adjacent_matching_lines(tmp_path):
+    # A neighbour that is itself a match still appears as context (rg would otherwise
+    # report it only as a match, never as context).
+    sess = _session(tmp_path)
+    write_file(sess, "m.txt", "x1\nx2\nx3\n")
+    hits = search(sess, "x", context=1)
+    assert [h["before"] for h in hits] == [[], ["x1"], ["x2"]]
+    assert [h["after"] for h in hits] == [["x2"], ["x3"], []]
+
+
+def test_search_without_context_has_no_context_keys(tmp_path):
+    sess = _session(tmp_path)
+    _seed(sess)
+    assert all("before" not in h and "after" not in h for h in search(sess, "alpha"))
+
+
+def test_search_context_is_capped(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "n.txt", _numbered(50))
+    [hit] = search(sess, "^line25$", context=1000)
+    assert hit["before"][0] == "line15" and len(hit["after"]) == 10
+
+
+def test_search_context_clips_long_neighbouring_lines(tmp_path):
+    sess = _session(tmp_path)
+    write_file(sess, "w.txt", "z" * 100_000 + "\nneedle\n")
+    [hit] = search(sess, "needle", context=1)
+    assert len(hit["before"][0]) <= 300
+
+
+def test_search_context_is_identical_on_both_backends(tmp_path, monkeypatch):
+    sess = _session(tmp_path)
+    write_file(sess, "p.txt", _numbered(30))
+    write_file(sess, "sub/q.txt", "a\nline7 here\nb\n")
+    def key(h):  # rg's cross-file order is not fixed
+        return h["file"], h["line"]
+
+    rg_hits = sorted(search(sess, "line7", context=3), key=key)
+    _force_fallback(monkeypatch)
+    assert sorted(search(sess, "line7", context=3), key=key) == rg_hits
+
+
+def test_search_hit_line_feeds_read_file_directly(tmp_path):
+    # search and read_file share 1-based numbering: a hit's line starts the read at the hit.
+    from sheath.tools.files import read_file
+
+    sess = _session(tmp_path)
+    write_file(sess, "n.txt", _numbered(100))
+    [hit] = search(sess, "^line42$")
+    assert read_file(sess, "n.txt", start_line=hit["line"], limit=2) == "line42\nline43\n"

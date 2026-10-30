@@ -23,9 +23,10 @@ from .web import web_extract as _web_extract, web_search as _web_search
 def build_tools(session: Session) -> list:
     """Return the agent's tool callables, each bound to ``session``."""
 
-    def read_file(path: str, offset: int = 0, limit: int = 2000) -> str:
-        """Read up to `limit` lines starting at line `offset` from a file in the workspace."""
-        return _read_file(session, path, offset, limit)
+    def read_file(path: str, start_line: int = 1, limit: int = 2000) -> str:
+        """Read up to `limit` lines from a file in the workspace, starting at 1-based line
+        `start_line` (the same numbering as `line` in search hits)."""
+        return _read_file(session, path, start_line, limit)
 
     def write_file(path: str, content: str) -> str:
         """Write `content` to a file in the workspace (creates parent directories)."""
@@ -36,9 +37,12 @@ def build_tools(session: Session) -> list:
         return _list_files(session, path)
 
     def search(pattern: str, path: str = ".", glob: str | None = None,
-               ignore_case: bool = False, max_matches: int = 100) -> list[dict]:
-        """Search files under `path` for the regex `pattern`. Returns file/line/col/text hits."""
-        return _search(session, pattern, path, glob, ignore_case, max_matches)
+               ignore_case: bool = False, max_matches: int = 100,
+               context: int = 0) -> list[dict]:
+        """Search files under `path` for the regex `pattern`. Returns file/line/col/text hits
+        (`line` is 1-based). With `context` > 0 (max 10), each hit also carries `before` and
+        `after`: up to that many neighbouring lines, so a match can be read in one call."""
+        return _search(session, pattern, path, glob, ignore_case, max_matches, context)
 
     def fetch_url(url: str, max_bytes: int | None = None) -> dict:
         """Fetch `url` and store its body as a handle; returns the handle summary."""
