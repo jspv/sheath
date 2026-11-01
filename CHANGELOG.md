@@ -4,7 +4,9 @@
 changed, and the minimum framework versions rose. Entries marked **Breaking** or
 **Behavior change** need action when upgrading from `tether-harness` 0.1.x.
 
-## Unreleased
+0.3.0 breaks one call: `read_file` takes a 1-based `start_line` in place of the 0-based `offset`.
+
+## 0.3.0 — 2026-11-01
 
 ### `search` and `read_file` share 1-based line numbers
 - **Breaking:** `read_file(path, offset=0, limit)` is now `read_file(path, start_line=1,
