@@ -762,7 +762,8 @@ def _add_parent_loop(maf_kwargs: dict[str, Any]) -> None:
     Built here rather than through ``loop_should_continue``, which returns every pass joined
     together: ``return_final_only`` keeps only the final answer. A caller who passed
     ``loop_should_continue`` has taken over that decision, so nothing is added. The loop goes
-    first in ``middleware``, ahead of the caller's own.
+    first in ``middleware``, ahead of the caller's own, preceded only by ``_DropLoopNudges``,
+    which keeps the loop's nudges out of a streamed reply.
     """
     if "loop_should_continue" in maf_kwargs:
         return
@@ -776,7 +777,10 @@ def _add_parent_loop(maf_kwargs: dict[str, Any]) -> None:
     loop = AgentLoopMiddleware(background_tasks_running(),
                                next_message=background_tasks_running_message,
                                return_final_only=True, inject_progress=False, **loop_kw)
-    maf_kwargs["middleware"] = [loop, *(maf_kwargs.get("middleware") or [])]
+    from .subagents import _DropLoopNudges
+
+    # The nudge filter sits outside the loop, so it sees every pass's updates.
+    maf_kwargs["middleware"] = [_DropLoopNudges(), loop, *(maf_kwargs.get("middleware") or [])]
 
 
 def _apply_tool_loop_limits(client: Any, config: SheathConfig) -> None:

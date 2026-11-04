@@ -14,7 +14,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from agent_framework import AgentResponse, FunctionMiddleware, Message
+from agent_framework import (AgentMiddleware, AgentResponse, FunctionMiddleware, Message,
+                             ResponseStream)
 
 from sheath.bundles import selected_bundles
 from sheath.config import SheathConfig
@@ -139,6 +140,38 @@ class _ToolActivity(FunctionMiddleware):
             report_progress(f"failed: {type(e).__name__}", tool=name)
             raise
         report_progress("done", tool=name)
+
+
+class _DropLoopNudges(AgentMiddleware):
+    """Keep the parent loop's nudges out of a streamed reply.
+
+    Placed ahead of the loop middleware. On a streaming run the loop yields each nudge it sends
+    the model as a ``role="user"`` update; a frontend would fold it into the assistant's text.
+    This skips those updates and returns the inner stream's own final response. The model's
+    text, including a premature "done" before it waits, is real output and stays. Non-streaming
+    runs pass through.
+    """
+
+    async def process(self, context: Any, call_next: Callable[[], Any]) -> None:
+        await call_next()
+        if not context.stream:
+            return
+        inner = context.result
+
+        async def updates() -> Any:
+            try:
+                async for update in inner:
+                    if str(getattr(update, "role", "")) == "user":
+                        continue
+                    yield update
+            except BaseException:
+                await inner.close()        # abandoned or failed: release the inner run
+                raise
+
+        async def final(_updates: Any) -> Any:
+            return await inner.get_final_response()
+
+        context.result = ResponseStream(updates(), finalizer=final)
 
 
 class ConfinedSubagent:
