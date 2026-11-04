@@ -15,6 +15,7 @@ from .sandbox_container import ContainerSandbox
 from .session import Session
 from .conversation import Conversation
 from .manager import SessionManager
+from .subagents import SubagentSpec
 from .status import StatusBus, StatusEvent, report_progress
 from .tools.registry import build_tools
 
@@ -31,7 +32,7 @@ __all__ = [
     "NoSandboxIsolationWarning",
     "PreflightReport", "SandboxImageError", "SandboxImageMissing", "sandbox_preflight",
     "ContainerSandbox",
-    "Session",
+    "Session", "SubagentSpec",
     "Conversation", "SessionManager",
     "StatusBus", "StatusEvent", "report_progress",
     "build_tools",
