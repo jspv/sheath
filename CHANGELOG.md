@@ -22,6 +22,12 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
   exception type.
 - AG-UI streams sub-agent status live, including during waits, and keeps the loop's re-run
   nudges out of the chat.
+- **Behavior change:** removing a workspace root (`SheathConfig.cleanup`, or reaping a
+  conversation) is best effort and runs under the workspace lock: an entry that cannot be
+  removed (sandboxed code can `chmod 000` a directory) no longer stops the walk, and a root left
+  behind is logged as a warning. `Session.aclose` used to raise on the first error.
+- A `client_factory` that returns the parent's client, or one client for two sub-agents, raises
+  `ValueError`.
 
 ### `search` sees exactly what `list_files` lists
 - **Behavior change:** ripgrep ran with its defaults, so hidden paths and anything a `.gitignore`

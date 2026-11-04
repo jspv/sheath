@@ -458,7 +458,7 @@ sheath = Sheath(subagents={
     "researcher": SubagentSpec(
         description="reads sources and writes findings to the workspace",
         instructions="You are a careful researcher. Cite what you read.",
-        bundles=("files", "search", "fetch"),
+        bundles=("files", "web"),
         model="gpt-6.1-sol",
     ),
     "skimmer": SubagentSpec(
@@ -484,6 +484,10 @@ The parent starts and collects tasks through MAF's `background_agents_*` tools (
 | `max_round_trips` | Per-task tool-loop budget |
 
 **Clients.** Every sub-agent gets its own client: `SubagentSpec.client`, else `client_factory(spec.model or config.model)`. Pass `Sheath(client_factory=...)` to build them (Azure, Foundry, a different provider). Without a factory: if you injected no `client`, the built-in OpenAI client is built for the given model; if you did inject one and a spec has no client of its own, a `ValueError` asks for `client_factory` or `SubagentSpec(client=...)`. Sub-agents may use different models or providers from the parent. MAF's `start_task` takes only an agent name, so the parent picks a model by picking a named sub-agent: declare one per role and model and describe each well.
+
+**What a sub-agent inherits.** `agent_kwargs` (`middleware`, `context_providers`, `default_options`, `skills` and the rest) apply to the parent only. A sub-agent gets sheath's own guards (workspace confinement, spill, status) and the tools its spec names, nothing more, so a host's policy or audit middleware must be supplied per sub-agent, for now by wrapping the callables in its spec's `tools` or by giving it a `client` that carries the middleware.
+
+**MCP tools.** Every agent, the parent and each sub-agent, needs its own MCP tool instance: the same MCP object placed in both the parent's `tools` and a spec's `tools` is attached twice. Wrap the server in `tool_factory` (see [MCP servers](#mcp-servers)) so each agent builds its own.
 
 **Precedence.** `subagents=` is accepted by `Sheath(...)`, `aopen`, `asolve`, `solve` and the module-level `solve`. A per-call value that is not `None` replaces the `Sheath` default whole (as with `agent_instructions`); `{}` means no sub-agents.
 
