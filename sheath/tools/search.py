@@ -32,6 +32,7 @@ _MAX_SEARCH_RESULT_CHARS = 60_000
 _SNIPPET_WIDTH = 240  # cap each hit's text so a single huge line can't flood context
 _MAX_CONTEXT = 10     # neighbouring lines per side a hit may carry
 _OUTPUTS = ("hits", "files", "count")
+_STATE_DIR = ".sheath"  # the root's harness state: never searched, as list_files never lists it
 
 
 def _snippet(line: str, col: int) -> str:
@@ -84,8 +85,10 @@ def search(session: Session, pattern: str, path: str = ".", glob: str | None = N
     - ``"count"``: up to ``max_matches`` files with a match, as ``{"file", "count"}``, where
       ``count`` is the number of matching lines.
 
-    Uses ripgrep if installed, else a Python scan. Links, special files and files over
-    50 MiB are skipped.
+    Both backends see what ``list_files`` lists: every regular file under ``path``, hidden
+    and ignore-listed paths included (a ``.git/`` directory too), except the root's
+    ``.sheath/``. Uses ripgrep if installed, else a Python scan. Links, special files and
+    files over 50 MiB are skipped.
     """
     if output not in _OUTPUTS:
         raise ValueError(f"output must be one of {', '.join(map(repr, _OUTPUTS))}")
@@ -99,6 +102,9 @@ def search(session: Session, pattern: str, path: str = ".", glob: str | None = N
         mode = os.stat(base).st_mode
         if not (stat.S_ISDIR(mode) or stat.S_ISREG(mode)):
             raise ValueError(f"not a regular file or directory: {path!r}")
+        rel = base.relative_to(session.root).parts
+        if rel and rel[0] == _STATE_DIR:
+            return []   # ripgrep searches an explicit path even when a glob excludes it
         rg = shutil.which("rg")
         if rg:
             hits = _search_rg(rg, session.root, base, pattern, glob, ignore_case, max_matches,
@@ -149,13 +155,19 @@ def _add_context(root: Path, hits: list[dict], context: int) -> None:
 def _search_rg(rg: str, root: Path, base: Path, pattern: str, glob: str | None,
                ignore_case: bool, max_matches: int, output: str = "hits") -> list[dict]:
     # ripgrep does not follow symlinks and skips non-regular files when walking a directory.
-    cmd = [rg, "--json", "--no-heading", "--max-filesize", str(_MAX_SEARCH_FILE_BYTES)]
+    # --hidden and --no-ignore: see what list_files lists, not what a .gitignore in a checked-
+    # out project would hide.
+    cmd = [rg, "--json", "--no-heading", "--hidden", "--no-ignore",
+           "--max-filesize", str(_MAX_SEARCH_FILE_BYTES)]
     if ignore_case:
         cmd.append("-i")
     if output == "files":
         cmd += ["--max-count", "1"]   # one match proves the file; skip the rest of it
     if glob:
         cmd += ["-g", glob]
+    # After the caller's glob, so it wins over an include. The leading "/" anchors it to the
+    # directory rg runs in (the root), so a project's own nested .sheath/ is still searched.
+    cmd += ["-g", f"!/{_STATE_DIR}/"]
     # Run in the root with a root-relative base, so neither rg's error text nor its result
     # paths ever contain the absolute host path of the session root.
     rel_base = base.relative_to(root).as_posix() if base != root else "."

@@ -3,7 +3,7 @@ import importlib
 import pytest
 
 from sheath import SheathConfig, PathEscapesRootError, Session
-from sheath.tools.files import write_file
+from sheath.tools.files import list_files, write_file
 from sheath.tools.search import _search_python, search
 
 
@@ -394,3 +394,70 @@ def test_search_file_outputs_report_invalid_regex(tmp_path):
     _seed(sess)
     with pytest.raises(ValueError):
         search(sess, "(unclosed", output="count")
+
+
+# --- scope: search sees exactly what list_files lists (issue #4) --------------------------
+
+def _scoped_tree(sess):
+    """Hidden, ignored and plain files with a needle, plus one in harness state."""
+    root = sess.root
+    (root / ".hidden").mkdir()
+    (root / ".hidden" / "h.txt").write_text("needle\n")
+    (root / "build").mkdir()
+    (root / "build" / "b.txt").write_text("needle\n")
+    (root / ".gitignore").write_text("build/\n")
+    (root / ".ignore").write_text("build/\n")    # honored by ripgrep even outside a git repo
+    (root / "README.md").write_text("needle\n")
+    (root / ".sheath" / "tmp").mkdir(parents=True, exist_ok=True)
+    (root / ".sheath" / "tmp" / "s.txt").write_text("needle\n")
+
+
+_SCOPED = [".hidden/h.txt", "README.md", "build/b.txt"]
+
+
+def test_search_scope_matches_list_files_on_ripgrep(tmp_path):
+    sess = _session(tmp_path)
+    _scoped_tree(sess)
+    found = sorted(h["file"] for h in search(sess, "needle", output="files"))
+    assert found == _SCOPED
+    listed = {f for f in list_files(sess, ".") if "needle" in (sess.root / f).read_text()}
+    assert set(found) == listed
+
+
+def test_search_scope_matches_list_files_on_fallback(tmp_path, monkeypatch):
+    _force_fallback(monkeypatch)
+    sess = _session(tmp_path)
+    _scoped_tree(sess)
+    assert sorted(h["file"] for h in search(sess, "needle", output="files")) == _SCOPED
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("glob", ["*.txt", "**/*", "**/.sheath/**", ".sheath/**"])
+def test_search_include_glob_never_reaches_sheath_state(tmp_path, monkeypatch, fallback, glob):
+    if fallback:
+        _force_fallback(monkeypatch)
+    sess = _session(tmp_path)
+    _scoped_tree(sess)
+    hits = search(sess, "needle", glob=glob, output="files")
+    assert not any(h["file"].startswith(".sheath/") for h in hits)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_search_inside_sheath_state_finds_nothing(tmp_path, monkeypatch, fallback):
+    if fallback:
+        _force_fallback(monkeypatch)
+    sess = _session(tmp_path)
+    _scoped_tree(sess)
+    assert search(sess, "needle", path=".sheath") == []
+    assert search(sess, "needle", path=".sheath/tmp/s.txt") == []
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_search_scope_keeps_a_nested_dir_named_sheath(tmp_path, monkeypatch, fallback):
+    # Only the root's .sheath/ is harness state; a project's own .sheath/ is data.
+    if fallback:
+        _force_fallback(monkeypatch)
+    sess = _session(tmp_path)
+    (sess.root / "proj" / ".sheath").mkdir(parents=True)
+    (sess.root / "proj" / ".sheath" / "n.txt").write_text("needle\n")
+    assert [h["file"] for h in search(sess, "needle")] == ["proj/.sheath/n.txt"]

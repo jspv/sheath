@@ -6,6 +6,16 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 
 0.3.0 breaks one call: `read_file` takes a 1-based `start_line` in place of the 0-based `offset`.
 
+## Unreleased
+
+### `search` sees exactly what `list_files` lists
+- **Behavior change:** ripgrep ran with its defaults, so hidden paths and anything a `.gitignore`
+  or `.ignore` in the workspace named were invisible to `search` while `read_file` and
+  `list_files` showed them; the Python fallback, the other way round, searched `.sheath/`.
+  Both backends now search every regular file under the path, hidden and ignore-listed ones
+  included (a `.git/` directory too), and never the root's `.sheath/`, with or without an
+  include `glob` and when `path` points into it.
+
 ## 0.3.0 — 2026-11-01
 
 ### `search` and `read_file` share 1-based line numbers
