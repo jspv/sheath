@@ -39,6 +39,22 @@ _INPUTS = "inputs"
 _COPY_CHUNK = 1024 * 1024
 # create_harness_agent options that add a capability path around the sandbox, safe_path or egress.
 _UNSANDBOXED_KWARGS = frozenset({"shell_executor", "file_access_store", "background_agents"})
+# How long cancelling sub-agent tasks waits for them to finish before giving up (logged).
+_SUBAGENT_CANCEL_WAIT_S = 30.0
+
+_log = logging.getLogger(__name__)
+
+
+def _remove_root_locked(root: Path, lock: Any) -> None:
+    """Remove ``root`` while holding ``lock`` (the session's ``io_lock``).
+
+    Sync on purpose, and run with ``asyncio.to_thread``: a sync file tool still in flight on a
+    worker thread (its task already cancelled) holds the lock, and the directory must not go
+    until it has finished. Taking the lock on the event loop would stall the loop instead.
+    """
+    with lock:
+        if root.exists():
+            shutil.rmtree(root)
 
 
 @dataclass
@@ -132,16 +148,44 @@ class Session:
         """Register a status subscriber; returns a zero-arg unsubscribe handle."""
         return self.status_bus.subscribe(callback)
 
-    async def aclose(self) -> None:
-        """Close every connected MCP server, then honor the cleanup policy."""
-        for tool in self._mcp_connected:
+    async def cancel_subagents(self) -> None:
+        """Cancel every registered sub-agent task and wait for it, bounded by
+        ``_SUBAGENT_CANCEL_WAIT_S``. A task still pending after that is logged and left."""
+        me = asyncio.current_task()
+        tasks = [t for t in self._subagent_tasks if t is not me and not t.done()]
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        _, pending = await asyncio.wait(tasks, timeout=_SUBAGENT_CANCEL_WAIT_S)
+        if pending:
+            _log.warning("%d sub-agent task(s) still running %.0fs after cancellation: %s",
+                         len(pending), _SUBAGENT_CANCEL_WAIT_S,
+                         ", ".join(sorted(t.get_name() for t in pending)))
+
+    async def release_subagents(self, agent_session: Any) -> None:
+        """Release ``agent_session``'s runtime state in every provider this session built
+        (MAF cancels and drains that session's tasks). Failures are logged, not raised."""
+        for provider in self._subagent_providers:
             try:
-                await tool.close()
+                await provider.release_session(agent_session, timeout=_SUBAGENT_CANCEL_WAIT_S)
             except Exception:  # noqa: BLE001 - best-effort teardown
-                pass
-        self._mcp_connected.clear()
-        if self.config.cleanup and self.root.exists():
-            shutil.rmtree(self.root)
+                _log.warning("releasing sub-agent session state failed", exc_info=True)
+
+    async def aclose(self) -> None:
+        """Cancel sub-agent tasks, close every connected MCP server, then honor the cleanup
+        policy. In that order: no sub-agent outlives its MCP servers or its root."""
+        try:
+            await self.cancel_subagents()
+        finally:
+            for tool in self._mcp_connected:
+                try:
+                    await tool.close()
+                except Exception:  # noqa: BLE001 - best-effort teardown
+                    pass
+            self._mcp_connected.clear()
+            if self.config.cleanup:
+                await asyncio.to_thread(_remove_root_locked, self.root, self.io_lock)
 
     def _unavailable_bundles(self) -> tuple[str, ...]:
         """Bundles that are selected-but-inert: ``deliver`` needs a host publish callback."""

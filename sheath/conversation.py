@@ -11,13 +11,12 @@ from __future__ import annotations
 import asyncio
 from contextlib import aclosing
 import logging
-import shutil
 import time
 from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from .config import SheathConfig
 from .publish import OnPublish
-from .session import Session
+from .session import Session, _remove_root_locked
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -87,6 +86,9 @@ class Conversation:
                 final_text = response.text
             except Exception as e:  # noqa: BLE001 - surface, don't crash the conversation
                 error = f"{type(e).__name__}: {e}"
+            finally:
+                # Tasks belong to the turn: none keeps running once it ends.
+                await self.session.cancel_subagents()
             self.last_activity = time.monotonic()
             return Result(final_text=final_text, handles=dict(self.session.handles),
                           files=self.session.artifacts, session_dir=self.session.root, error=error)
@@ -116,7 +118,11 @@ class Conversation:
                     async for event in events:
                         yield event
             finally:
-                self.last_activity = time.monotonic()
+                try:
+                    # Tasks belong to the turn, also when the client disconnects mid-stream.
+                    await self.session.cancel_subagents()
+                finally:
+                    self.last_activity = time.monotonic()
 
     @property
     def inputs(self) -> dict[str, "Handle"]:
@@ -202,11 +208,20 @@ class Conversation:
             _log.warning("conversation %s: a turn was still running after %.0fs; closing "
                          "anyway", self.id, _CLOSE_WAIT_S)
         try:
-            await self.session.__aexit__(None, None, None)
+            try:
+                await self.session.release_subagents(self.agent_session)
+            finally:
+                await self.session.__aexit__(None, None, None)
         finally:
             try:
-                if self.reap_on_close and self.session.root.exists():
-                    shutil.rmtree(self.session.root, ignore_errors=True)
+                if self.reap_on_close:
+                    # In a worker thread, under io_lock: a sync file tool still in flight
+                    # finishes before the directory goes.
+                    await asyncio.to_thread(_remove_root_locked, self.session.root,
+                                            self.session.io_lock)
+            except OSError:
+                _log.warning("conversation %s: could not remove %s", self.id,
+                             self.session.root, exc_info=True)
             finally:
                 if acquired:
                     self._lock.release()
