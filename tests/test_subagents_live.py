@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 
 import pytest
 
@@ -13,11 +14,10 @@ pytestmark = pytest.mark.skipif(
 
 def test_live_delegates_word_count_to_subagent(tmp_path):
     """A real parent writes a file and has the `counter` sub-agent report its word count."""
-    tools_called: list[str] = []
+    events: list = []
 
     def spy(event):
-        if event.tool:
-            tools_called.append(event.tool)
+        events.append(event)
 
     h = Sheath(
         SheathConfig(root_dir=tmp_path / "r"),
@@ -38,5 +38,6 @@ def test_live_delegates_word_count_to_subagent(tmp_path):
             await conv.aclose()
 
     result = asyncio.run(run())
-    assert "9" in result.final_text
-    assert "background_agents_start_task" in tools_called
+    assert re.search(r"\b9\b", result.final_text)
+    # The sub-agent wrapper emits "started" tagged with the sub-agent's name when a task runs.
+    assert any(e.agent == "counter" and e.message == "started" for e in events)

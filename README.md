@@ -477,10 +477,10 @@ The parent starts and collects tasks through MAF's `background_agents_*` tools (
 |---|---|
 | `description` | Required. Shown to the parent model; it is how the parent chooses between sub-agents |
 | `instructions` | The sub-agent's domain prompt (like `agent_instructions`) |
-| `bundles` | Capability bundles; `None` uses the parent's selection. A sub-agent cannot have a bundle the parent lacks |
+| `bundles` | Capability bundles; `None` uses the parent's selection. A bundle outside the parent's selection raises `ValueError` |
 | `tools` | Extra callables, `ToolFactory`s or MCP tools for this sub-agent |
 | `model` | Model for a client sheath builds; `None` uses `config.model` |
-| `client` | A ready client of its own, used instead of `model` |
+| `client` | A ready client of its own, used instead of `model`; setting both raises `ValueError` |
 | `max_round_trips` | Per-task tool-loop budget |
 
 **Clients.** Every sub-agent gets its own client: `SubagentSpec.client`, else `client_factory(spec.model or config.model)`. Pass `Sheath(client_factory=...)` to build them (Azure, Foundry, a different provider). Without a factory: if you injected no `client`, the built-in OpenAI client is built for the given model; if you did inject one and a spec has no client of its own, a `ValueError` asks for `client_factory` or `SubagentSpec(client=...)`. Sub-agents may use different models or providers from the parent. MAF's `start_task` takes only an agent name, so the parent picks a model by picking a named sub-agent: declare one per role and model and describe each well.
