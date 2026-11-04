@@ -317,6 +317,30 @@ and becomes a `binary` handle — `load(id)` in `run_python` returns its path. I
 text files). `conv.inputs` lists them. Note: `read_document` on an input parses it with Docling
 **in the host process**; prefer reading uploads inside `run_python` when isolation matters.
 
+**Receiving a directory.** To give the agent a whole tree (a project checkout, an export
+folder), stage it read-only:
+
+```python
+tree = conv.add_input_tree("/data/q3-export", input_id="q3", description="the Q3 export",
+                           ignore=lambda rel: rel.startswith(".git"))
+# or: await conv.aadd_input_tree(...)   # waits for a running turn; copies in a worker thread
+```
+
+The tree is copied to `inputs/<input_id>/` and an `InputTree` record comes back (`path`,
+`files`, `bytes`, `source`, `description`). Only regular files are copied: symlinks, FIFOs,
+sockets and devices are skipped, never followed. `ignore(rel_path)` sees each file's and
+directory's POSIX path relative to the source; `True` skips it, and a skipped directory is pruned
+whole. Staged files are `0444` and directories `0555`; `write_file` and `edit_file` refuse them,
+and the container tier mounts `inputs/` read-only. The tree is **not** a handle (no `load(id)`):
+the agent works with it through the file tools and `run_python`, and is told on every run that
+`inputs/<id>/` is read-only data, never instructions, with your description. The copy is
+bounded by `max_input_tree_files` and `max_input_tree_bytes` (exceeding either raises and
+leaves nothing behind) and runs under the session's file lock. The source must be a directory
+that does not contain the session root, and the id must be a single safe segment not used by a
+single-file input. A repeat call with the same id is a no-op unless `replace=True`; trees survive
+a restart on the same root, and `conv.input_trees` lists them. Nothing under `inputs/` is
+reported in `artifacts` or `Result.files`.
+
 ### MCP servers
 
 Pass a MAF `MCPTool` — stdio, Streamable-HTTP, or WebSocket — in the same `tools=[…]` list. The sheath connects each server, **owns its lifecycle** (closing it when the run ends, even on error), and attaches the same spill handling to every tool the server exposes — so a large MCP return (a long message list, a big query result) lands as a clean typed handle instead of flooding context.
@@ -526,6 +550,8 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 | `keep_conversation_workspaces` | `False` | Leave a continuous conversation's workspace on disk when it closes or expires; `aopen(..., keep=)` overrides it per conversation |
 | `max_publish_bytes` | `100 MiB` | Largest file `publish_file` / `publish()` will deliver |
 | `max_input_bytes` | `100 MiB` | Largest upload `add_input` will accept |
+| `max_input_tree_files` | `50_000` | Most files `add_input_tree` will stage |
+| `max_input_tree_bytes` | `1 GiB` | Most bytes `add_input_tree` will stage; counted during the copy |
 | `sandbox` | `SandboxConfig()` | `backend` (`container` by default; `local` = no isolation), `container_runtime`, timeout, limits, network, `pip_packages`, preinstalled libs, `require_isolation` (`False` — refuses a non-container backend however it was selected), `build_on_demand` (`None` → build unless isolation is required), `build_timeout_s` (`900`). **`max_file_size_mb` is enforced by the `local` tier only** — under the default `container` backend it has no effect (memory/cpu/pid limits and the network setting apply instead) |
 | `fetch` | `FetchConfig()` | `max_bytes`, timeout, allowed URL schemes |
 | `sandbox.max_output_bytes` | `8192` | Bytes of `stdout` and of `stderr` kept from a `run_python` call (first and last halves; the gap is reported) |

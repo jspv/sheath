@@ -115,6 +115,8 @@ class SheathConfig:
     max_new_handles: int = 256                 # records adopted per run
     max_publish_bytes: int = 100 * 1024 * 1024  # largest file publish_file/publish() will deliver
     max_input_bytes: int = 100 * 1024 * 1024    # largest user upload add_input() will accept
+    max_input_tree_files: int = 50_000             # most files add_input_tree() will stage
+    max_input_tree_bytes: int = 1024 * 1024 * 1024  # most bytes add_input_tree() will stage
     root_dir: Path | None = None  # None -> a fresh one-shot dir ./.sheath/runs/run-XXXXXXXX
     cleanup: bool = False  # delete the root on async-context exit (throwaway runs)
     idle_ttl_s: float | None = None  # continuous-session idle TTL (None = never expire)

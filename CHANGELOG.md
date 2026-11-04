@@ -58,6 +58,17 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
   workspace can serve as the audit trail; re-opening the id resumes its files and handles.
   `agui_stream` follows the config. The one-shot path already had `keep=True`.
 
+### Stage a directory as read-only input
+- New `Session.add_input_tree(source, *, input_id, description=None, ignore=None,
+  replace=False)`, with `Conversation.add_input_tree` / `aadd_input_tree` and
+  `input_trees`, returning an exported `InputTree` record. The tree is copied to
+  `inputs/<input_id>/` (regular files only, links never followed), made read-only, refused by
+  `write_file` and `edit_file`, bounded by the new `max_input_tree_files` and
+  `max_input_tree_bytes`, and announced to the model on every run as read-only data.
+- **Behavior change:** `artifacts` and `Result.files` no longer list anything under `inputs/`.
+  Single-file uploads were listed as output before.
+- `add_input` refuses an id already used by an input tree.
+
 ## 0.3.0 — 2026-11-01
 
 ### `search` and `read_file` share 1-based line numbers

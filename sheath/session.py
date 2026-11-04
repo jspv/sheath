@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from . import bundles as _bundles
+from . import input_trees as _input_trees
 from .config import SheathConfig, SandboxConfig
 from .handles import Handle, HandleStore
 from .paths import safe_filename, validate_segment
@@ -86,14 +87,14 @@ class Session:
 
     @property
     def artifacts(self) -> list[str]:
-        """User-meaningful files under root, excluding handle storage and scratch."""
+        """User-meaningful files under root, excluding handle storage, inputs and scratch."""
         out: list[str] = []
         for p in sorted(self.root.rglob("*")):
             if p.is_symlink() or not p.is_file():
                 continue
             rel = p.relative_to(self.root)
             top = rel.parts[0]
-            if top in ("handles", ".scripts", ".sheath") or top.startswith("_"):
+            if top in ("handles", "inputs", ".scripts", ".sheath") or top.startswith("_"):
                 continue
             out.append(rel.as_posix())
         return out
@@ -205,6 +206,8 @@ class Session:
     def _add_input(self, source: Path | bytes, *, input_id: str, name: str,
                    content_type: str | None, description: str | None) -> Handle:
         validate_segment(input_id, what="input id")
+        if input_id in _input_trees.load(self.root):
+            raise ValueError(f"input id {input_id!r} is already used by an input tree")
         filename = safe_filename(name, fallback="upload.bin")
         size = _input_size(source)
         if size > self.config.max_input_bytes:
@@ -258,6 +261,61 @@ class Session:
         except OSError:
             return False
 
+    @property
+    def input_trees(self) -> dict[str, "_input_trees.InputTree"]:
+        """Directory trees staged with ``add_input_tree``, keyed by ``input_id``."""
+        return _input_trees.load(self.root)
+
+    def add_input_tree(self, source: Path | str, *, input_id: str,
+                       description: str | None = None,
+                       ignore: Callable[[str], bool] | None = None,
+                       replace: bool = False) -> "_input_trees.InputTree":
+        """Copy the directory ``source`` read-only to ``inputs/<input_id>/``.
+
+        Only regular files are copied; symlinks, FIFOs, sockets and devices are skipped and
+        never followed. ``ignore(rel_path)`` sees each directory's and file's POSIX path
+        relative to ``source``; ``True`` skips it, and a skipped directory is pruned whole.
+        Staged files are ``0444`` and directories ``0555``; ``write_file`` and ``edit_file``
+        refuse them, and the container tier mounts ``inputs/`` read-only. The tree is not a
+        handle: no ``load(id)``. It is excluded from ``artifacts``, and the agent is told
+        where it is and that it is data. Bounded by ``max_input_tree_files`` and
+        ``max_input_tree_bytes``; exceeding either raises ``ValueError`` and leaves nothing
+        behind. A repeat call with the same id returns the existing record without copying,
+        unless ``replace``. Holds the sandbox lock, so it raises ``SandboxQuarantinedError``
+        while the sandbox is quarantined. Not safe during a turn: use
+        ``Conversation.add_input_tree`` / ``aadd_input_tree``.
+        """
+        with self.file_io():
+            return self._add_input_tree(Path(source), input_id=input_id,
+                                        description=description, ignore=ignore,
+                                        replace=replace)
+
+    def _add_input_tree(self, source: Path, *, input_id: str, description: str | None,
+                        ignore: Callable[[str], bool] | None,
+                        replace: bool) -> "_input_trees.InputTree":
+        validate_segment(input_id, what="input id")
+        if not source.is_dir():
+            raise ValueError(f"input tree source must be a directory: {str(source)!r}")
+        source = source.resolve()
+        if self.root.resolve().is_relative_to(source):
+            raise ValueError(f"input tree source {str(source)!r} contains the session root")
+        if input_id in self.store.inputs():
+            raise ValueError(f"input id {input_id!r} is already used by a single-file input")
+        trees = _input_trees.load(self.root)
+        if input_id in trees and not replace:
+            return trees[input_id]
+        _ensure_real_dir(self.root / _INPUTS)
+        files, total = _input_trees.stage(
+            self.root, source, input_id=input_id, ignore=ignore,
+            max_files=self.config.max_input_tree_files,
+            max_bytes=self.config.max_input_tree_bytes)
+        tree = _input_trees.InputTree(input_id=input_id, path=f"{_INPUTS}/{input_id}",
+                                      files=files, bytes=total, source=str(source),
+                                      description=description)
+        trees[input_id] = tree
+        _input_trees.save(self.root, trees)
+        return tree
+
     def _input_dir(self, input_id: str) -> Path:
         """Create and return ``<root>/inputs/<input_id>`` as real, writable directories.
 
@@ -304,6 +362,9 @@ class Session:
                 external.append(spill_tool(self, tool))
 
         _apply_tool_loop_limits(client, self.config)
+        # Announce staged input trees on every run (a tree staged between turns included).
+        maf_kwargs["context_providers"] = [*(maf_kwargs.get("context_providers") or []),
+                                           _input_trees.context_provider(self)]
         maf_kwargs.setdefault("max_context_window_tokens", self.config.max_context_window_tokens)
         maf_kwargs.setdefault("max_output_tokens", self.config.max_output_tokens)
         _default_compaction(maf_kwargs, self.config.keep_last_tool_call_groups)
