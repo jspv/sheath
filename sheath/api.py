@@ -90,7 +90,7 @@ class Sheath:
         self._agent_instructions = agent_instructions
         self._on_publish = on_publish
         self._agent_kwargs = dict(agent_kwargs or {})
-        self._subagents = subagents
+        self._subagents = None if subagents is None else dict(subagents)
         self._client_factory = client_factory
         self._client = client
         self._tools = tools or []

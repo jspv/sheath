@@ -50,18 +50,19 @@ async def merge_status(events: AsyncIterator[Any], bus: StatusBus,
     def _sink(status_event: StatusEvent) -> None:
         loop.call_soon_threadsafe(queue.put_nowait, to_event(status_event))
 
-    unsubscribe = bus.subscribe(_sink)
-    # Every pull of the source (and its close) runs in one Context: the agent run sets context
-    # variables in one pull and resets them in a later one, which fails across Contexts.
-    context = contextvars.copy_context()
-    iterator = aiter(events)
-
-    async def _pull() -> Any:
-        return await anext(iterator)
-
     next_event: asyncio.Future[Any] | None = None
     next_status: asyncio.Future[Any] | None = None
+    unsubscribe = bus.subscribe(_sink)
     try:
+        # Every pull of the source (and its close) runs in one Context: the agent run sets
+        # context variables in one pull and resets them in a later one, which fails across
+        # Contexts. Inside the try, so a source that is not iterable still unsubscribes.
+        context = contextvars.copy_context()
+        iterator = aiter(events)
+
+        async def _pull() -> Any:
+            return await anext(iterator)
+
         try:
             next_event = loop.create_task(_pull(), context=context)
             while True:

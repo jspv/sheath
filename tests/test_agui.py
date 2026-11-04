@@ -90,6 +90,18 @@ def test_merge_status_unsubscribes_on_exit():
     assert bus._subscribers == []                    # sink removed in finally
 
 
+def test_merge_status_unsubscribes_when_source_is_not_iterable():
+    bus = StatusBus()
+
+    async def run():
+        async for _ in merge_status(object(), bus, to_event=_tag):
+            pass
+
+    with pytest.raises(TypeError):
+        asyncio.run(run())
+    assert bus._subscribers == []                    # removed even when aiter() raises
+
+
 def test_merge_status_emitted_during_final_event_is_not_lost():
     bus = StatusBus()
 

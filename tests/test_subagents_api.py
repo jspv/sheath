@@ -121,3 +121,19 @@ def test_subagentspec_exported():
     import sheath
 
     assert sheath.SubagentSpec is sheath.subagents.SubagentSpec
+
+
+def test_sheath_copies_the_subagents_mapping(tmp_path):
+    subs = _specs("a")
+
+    async def run():
+        t = Sheath(_cfg(tmp_path), client=StubChatClient([text("ok")]), bundles=("code",),
+                   subagents=subs)
+        subs.update(_specs("b"))   # a later change to the caller's dict must not leak in
+        conv = await t.aopen("s1")
+        try:
+            return conv.session.subagent_names
+        finally:
+            await t.aclose_sessions()
+
+    assert asyncio.run(run()) == ("a",)

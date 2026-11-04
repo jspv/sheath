@@ -103,11 +103,24 @@ def validate_subagents(
             )
     resolved: dict[str, Any] = {}
     for name, spec in specs.items():
-        resolved[name] = (
-            spec.client
-            if spec.client is not None
-            else client_factory(spec.model or config.model)  # type: ignore[misc]
-        )
+        if spec.client is not None:
+            resolved[name] = spec.client
+            continue
+        made = client_factory(spec.model or config.model)  # type: ignore[misc]
+        # A caching factory would hand one client to several agents; the last budget applied
+        # to it would then govern them all, the parent's included.
+        if made is parent_client:
+            raise ValueError(
+                f"sub-agent {name!r}: client_factory returned the parent's client; "
+                "it must return a new client for each sub-agent"
+            )
+        if any(made is c for c in seen_clients):
+            raise ValueError(
+                f"sub-agent {name!r}: client_factory returned a client already given to "
+                "another sub-agent; it must return a new client for each sub-agent"
+            )
+        seen_clients.append(made)
+        resolved[name] = made
     return resolved
 
 
@@ -210,6 +223,10 @@ class ConfinedSubagent:
         if task is not None:
             sess._subagent_tasks.add(task)
         try:
+            # Yield once right after registering, so Session.cancel_subagents (which yields
+            # before it looks) sees a task MAF started but that had not yet run, and cancels
+            # it before it can do any work.
+            await asyncio.sleep(0)
             if sess._subagent_slots is None:
                 # Created here, not with the session: it must belong to the running loop.
                 sess._subagent_slots = asyncio.Semaphore(sess.config.subagent_max_concurrent)

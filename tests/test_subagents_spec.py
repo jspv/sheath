@@ -136,3 +136,20 @@ def test_factory_not_called_when_validation_fails():
 
 def test_instructions_constant():
     assert "sub-agent" in SUBAGENT_INSTRUCTIONS
+
+
+def test_factory_returning_parent_client_rejected():
+    with pytest.raises(ValueError, match="client_factory.*parent"):
+        _validate({"a": _spec()}, client_factory=lambda model: PARENT)
+
+
+def test_factory_returning_one_client_for_two_specs_rejected():
+    cached = StubChatClient([])
+    with pytest.raises(ValueError, match="client_factory.*another sub-agent"):
+        _validate({"a": _spec(), "b": _spec()}, client_factory=lambda model: cached)
+
+
+def test_factory_client_equal_to_a_spec_client_rejected():
+    own = StubChatClient([])
+    with pytest.raises(ValueError, match="client_factory.*another sub-agent"):
+        _validate({"a": _spec(client=own), "b": _spec()}, client_factory=lambda model: own)

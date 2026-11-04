@@ -41,6 +41,8 @@ _COPY_CHUNK = 1024 * 1024
 _UNSANDBOXED_KWARGS = frozenset({"shell_executor", "file_access_store", "background_agents"})
 # How long cancelling sub-agent tasks waits for them to finish before giving up (logged).
 _SUBAGENT_CANCEL_WAIT_S = 30.0
+# How many times cancelling sub-agent tasks yields and looks again for newly registered ones.
+_SUBAGENT_CANCEL_ROUNDS = 3
 
 _log = logging.getLogger(__name__)
 
@@ -51,10 +53,23 @@ def _remove_root_locked(root: Path, lock: Any) -> None:
     Sync on purpose, and run with ``asyncio.to_thread``: a sync file tool still in flight on a
     worker thread (its task already cancelled) holds the lock, and the directory must not go
     until it has finished. Taking the lock on the event loop would stall the loop instead.
+
+    Best effort: an entry that cannot be removed (sandboxed code can ``chmod 000`` a directory
+    in the root) does not stop the walk; everything else still goes, and a root left behind is
+    logged as a warning rather than raised.
     """
+    failures: list[str] = []
+
+    def _record(func: Any, path: str, exc: BaseException) -> None:
+        failures.append(f"{path!r}: {type(exc).__name__}")  # repr: names are untrusted
+
     with lock:
-        if root.exists():
-            shutil.rmtree(root)
+        if not root.exists():
+            return
+        shutil.rmtree(root, onexc=_record)
+    if root.exists():
+        _log.warning("could not fully remove %s (%d entr%s left: %s)", root, len(failures),
+                     "y" if len(failures) == 1 else "ies", "; ".join(failures[:5]))
 
 
 @dataclass
@@ -150,13 +165,26 @@ class Session:
 
     async def cancel_subagents(self) -> None:
         """Cancel every registered sub-agent task and wait for it, bounded by
-        ``_SUBAGENT_CANCEL_WAIT_S``. A task still pending after that is logged and left."""
+        ``_SUBAGENT_CANCEL_WAIT_S``. A task still pending after that is logged and left.
+
+        A task MAF's ``start_task`` created but that has not yet taken a step is not registered
+        yet (``ConfinedSubagent.run`` registers on its first step, then yields). So after
+        cancelling what is registered, this yields once, letting such tasks register, and looks
+        again until a look finds nothing new (bounded by ``_SUBAGENT_CANCEL_ROUNDS``). The
+        registered tasks are cancelled before the yield, so none of them gets a step to work."""
         me = asyncio.current_task()
-        tasks = [t for t in self._subagent_tasks if t is not me and not t.done()]
+        tasks: list[asyncio.Task] = []
+        for look in range(_SUBAGENT_CANCEL_ROUNDS):
+            new = [t for t in self._subagent_tasks
+                   if t is not me and not t.done() and t not in tasks]
+            for task in new:
+                task.cancel()
+            tasks.extend(new)
+            if look and not new:
+                break   # a look after a yield found nothing new
+            await asyncio.sleep(0)
         if not tasks:
             return
-        for task in tasks:
-            task.cancel()
         _, pending = await asyncio.wait(tasks, timeout=_SUBAGENT_CANCEL_WAIT_S)
         if pending:
             _log.warning("%d sub-agent task(s) still running %.0fs after cancellation: %s",
@@ -174,7 +202,10 @@ class Session:
 
     async def aclose(self) -> None:
         """Cancel sub-agent tasks, close every connected MCP server, then honor the cleanup
-        policy. In that order: no sub-agent outlives its MCP servers or its root."""
+        policy. In that order: no sub-agent outlives its MCP servers or its root.
+
+        Removing the root is best effort, as for ``Conversation.aclose``: an entry that cannot
+        be removed is skipped, and a root left behind is logged as a warning, not raised."""
         try:
             await self.cancel_subagents()
         finally:

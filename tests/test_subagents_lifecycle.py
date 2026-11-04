@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import threading
 import time
 from contextlib import aclosing
 
+import pytest
 from agent_framework import BackgroundAgentsProvider
 
 from sheath import Conversation, SheathConfig, Session
@@ -251,3 +254,103 @@ def test_subagents_running_counts_queued_task(tmp_path):
 
     asyncio.run(main())
     assert seen["running"] == 2
+
+
+def _lock_out(root):
+    """Ten chmod-000 directories (each holding a file) among ten deletable siblings.
+
+    rmtree's walk order follows the directory listing, which is hash ordered on common file
+    systems; with the two interleaved, a walk that stops at its first error leaves siblings.
+    """
+    locked, siblings = [], []
+    for i in range(10):
+        for kind, into in (("locked", locked), ("sibling", siblings)):
+            d = root / f"{kind}{i}"
+            d.mkdir()
+            (d / "f").write_text("x")
+            into.append(d)
+    for d in locked:
+        d.chmod(0)
+    return locked, siblings
+
+
+def _unlock(dirs):
+    for d in dirs or ():
+        if d.exists():
+            d.chmod(0o755)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_conversation_reap_continues_past_unremovable_entry(tmp_path, caplog):
+    holder: dict = {}
+
+    async def main():
+        conv = await Conversation.acreate(
+            id="c1", config=SheathConfig(root_dir=tmp_path / "r"),
+            client=StubChatClient([text("ok")]), bundles=("files",))
+        holder["locked"], holder["siblings"] = _lock_out(conv.session.root)
+        await conv.aclose()          # must not raise
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="sheath"):
+            asyncio.run(main())
+        assert not [p for p in holder["siblings"] if p.exists()]
+        assert all(d.exists() for d in holder["locked"])
+        assert any("could not" in r.getMessage() for r in caplog.records)
+    finally:
+        _unlock(holder.get("locked"))
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_session_cleanup_continues_past_unremovable_entry(tmp_path, caplog):
+    holder: dict = {}
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r", cleanup=True)) as sess:
+            holder["locked"], holder["siblings"] = _lock_out(sess.root)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="sheath"):
+            asyncio.run(main())   # a partial reap is logged, not raised
+        assert not [p for p in holder["siblings"] if p.exists()]
+        assert all(d.exists() for d in holder["locked"])
+        assert any("could not" in r.getMessage() for r in caplog.records)
+    finally:
+        _unlock(holder.get("locked"))
+
+
+def test_session_close_cancels_task_not_yet_started(tmp_path):
+    """A task MAF's start tool created but that has not taken a step yet is cancelled too."""
+    from agent_framework import SessionContext
+
+    ran: dict = {}
+
+    async def touch() -> str:
+        """Record that the sub-agent ran."""
+        ran["tool"] = True
+        return "ran"
+
+    subs = {"a": spec([tool_call("touch"), text("never")], tools=[touch])}
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            agent = await sess.create_agent(StubChatClient([text("bye")]), bundles=("files",),
+                                            subagents=subs)
+            provider = sess._subagent_providers[0]
+            agent_session = agent.create_session()
+            ctx = SessionContext(input_messages=[])
+            await provider.before_run(agent=agent, session=agent_session, context=ctx,
+                                      state={})
+            start_tool = next(t for t in ctx.tools
+                              if t.name == "background_agents_start_task")
+            # Sync: creates the task; nothing below suspends before the close starts.
+            start_tool.func(agent_name="a", input="go", description="a")
+            registered = sess.subagents_running
+        await asyncio.sleep(0.2)   # a task that escaped cancellation would run its tool here
+        return registered
+
+    registered = asyncio.run(main())
+    assert registered == 0          # not yet registered when the close began
+    assert "tool" not in ran
