@@ -23,7 +23,10 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from .api import Result
+    from collections.abc import Callable
+
     from .handles import Handle
+    from .input_trees import InputTree
 
 
 _log = logging.getLogger(__name__)
@@ -145,6 +148,40 @@ class Conversation:
             return await asyncio.to_thread(
                 self.session.add_input, source, input_id=input_id, name=name,
                 content_type=content_type, description=description)
+
+    @property
+    def input_trees(self) -> dict[str, "InputTree"]:
+        """Directory trees staged in this conversation's workspace, by ``input_id``."""
+        return self.session.input_trees
+
+    def add_input_tree(self, source: "Path | str", *, input_id: str,
+                       description: str | None = None,
+                       ignore: "Callable[[str], bool] | None" = None,
+                       replace: bool = False) -> "InputTree":
+        """Stage a directory read-only between turns (see ``Session.add_input_tree``).
+
+        Raises ``RuntimeError`` while a turn is running; use ``aadd_input_tree`` to wait.
+        """
+        if self._closed:
+            raise RuntimeError(_CLOSED)
+        if self._lock.locked():
+            raise RuntimeError("cannot add an input tree while a turn is running; "
+                               "use aadd_input_tree()")
+        return self.session.add_input_tree(source, input_id=input_id, description=description,
+                                           ignore=ignore, replace=replace)
+
+    async def aadd_input_tree(self, source: "Path | str", *, input_id: str,
+                              description: str | None = None,
+                              ignore: "Callable[[str], bool] | None" = None,
+                              replace: bool = False) -> "InputTree":
+        """Stage a directory read-only, waiting for any running turn to finish first. The copy
+        runs in a worker thread so a large tree does not stall the event loop."""
+        async with self._lock:
+            if self._closed:
+                raise RuntimeError(_CLOSED)
+            return await asyncio.to_thread(
+                self.session.add_input_tree, source, input_id=input_id,
+                description=description, ignore=ignore, replace=replace)
 
     async def aclose(self) -> None:
         """Tear down the workspace (MCP + bus), then reap the root unless retained. Idempotent.

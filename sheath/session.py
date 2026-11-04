@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import mimetypes
 import os
 import shutil
@@ -17,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from . import bundles as _bundles
+from . import input_trees as _input_trees
 from .config import SheathConfig, SandboxConfig
 from .handles import Handle, HandleStore
 from .paths import safe_filename, validate_segment
@@ -85,14 +87,14 @@ class Session:
 
     @property
     def artifacts(self) -> list[str]:
-        """User-meaningful files under root, excluding handle storage and scratch."""
+        """User-meaningful files under root, excluding handle storage, inputs and scratch."""
         out: list[str] = []
         for p in sorted(self.root.rglob("*")):
             if p.is_symlink() or not p.is_file():
                 continue
             rel = p.relative_to(self.root)
             top = rel.parts[0]
-            if top in ("handles", ".scripts", ".sheath") or top.startswith("_"):
+            if top in ("handles", "inputs", ".scripts", ".sheath") or top.startswith("_"):
                 continue
             out.append(rel.as_posix())
         return out
@@ -204,6 +206,8 @@ class Session:
     def _add_input(self, source: Path | bytes, *, input_id: str, name: str,
                    content_type: str | None, description: str | None) -> Handle:
         validate_segment(input_id, what="input id")
+        if input_id in _input_trees.load(self.root):
+            raise ValueError(f"input id {input_id!r} is already used by an input tree")
         filename = safe_filename(name, fallback="upload.bin")
         size = _input_size(source)
         if size > self.config.max_input_bytes:
@@ -257,6 +261,61 @@ class Session:
         except OSError:
             return False
 
+    @property
+    def input_trees(self) -> dict[str, "_input_trees.InputTree"]:
+        """Directory trees staged with ``add_input_tree``, keyed by ``input_id``."""
+        return _input_trees.load(self.root)
+
+    def add_input_tree(self, source: Path | str, *, input_id: str,
+                       description: str | None = None,
+                       ignore: Callable[[str], bool] | None = None,
+                       replace: bool = False) -> "_input_trees.InputTree":
+        """Copy the directory ``source`` read-only to ``inputs/<input_id>/``.
+
+        Only regular files are copied; symlinks, FIFOs, sockets and devices are skipped and
+        never followed. ``ignore(rel_path)`` sees each directory's and file's POSIX path
+        relative to ``source``; ``True`` skips it, and a skipped directory is pruned whole.
+        Staged files are ``0444`` and directories ``0555``; ``write_file`` and ``edit_file``
+        refuse them, and the container tier mounts ``inputs/`` read-only. The tree is not a
+        handle: no ``load(id)``. It is excluded from ``artifacts``, and the agent is told
+        where it is and that it is data. Bounded by ``max_input_tree_files`` and
+        ``max_input_tree_bytes``; exceeding either raises ``ValueError`` and leaves nothing
+        behind. A repeat call with the same id returns the existing record without copying,
+        unless ``replace``. Holds the sandbox lock, so it raises ``SandboxQuarantinedError``
+        while the sandbox is quarantined. Not safe during a turn: use
+        ``Conversation.add_input_tree`` / ``aadd_input_tree``.
+        """
+        with self.file_io():
+            return self._add_input_tree(Path(source), input_id=input_id,
+                                        description=description, ignore=ignore,
+                                        replace=replace)
+
+    def _add_input_tree(self, source: Path, *, input_id: str, description: str | None,
+                        ignore: Callable[[str], bool] | None,
+                        replace: bool) -> "_input_trees.InputTree":
+        validate_segment(input_id, what="input id")
+        if not source.is_dir():
+            raise ValueError(f"input tree source must be a directory: {str(source)!r}")
+        source = source.resolve()
+        if self.root.resolve().is_relative_to(source):
+            raise ValueError(f"input tree source {str(source)!r} contains the session root")
+        if input_id in self.store.inputs():
+            raise ValueError(f"input id {input_id!r} is already used by a single-file input")
+        trees = _input_trees.load(self.root)
+        if input_id in trees and not replace:
+            return trees[input_id]
+        _ensure_real_dir(self.root / _INPUTS)
+        files, total = _input_trees.stage(
+            self.root, source, input_id=input_id, ignore=ignore,
+            max_files=self.config.max_input_tree_files,
+            max_bytes=self.config.max_input_tree_bytes)
+        tree = _input_trees.InputTree(input_id=input_id, path=f"{_INPUTS}/{input_id}",
+                                      files=files, bytes=total, source=str(source),
+                                      description=description)
+        trees[input_id] = tree
+        _input_trees.save(self.root, trees)
+        return tree
+
     def _input_dir(self, input_id: str) -> Path:
         """Create and return ``<root>/inputs/<input_id>`` as real, writable directories.
 
@@ -302,8 +361,13 @@ class Session:
             else:
                 external.append(spill_tool(self, tool))
 
+        _apply_tool_loop_limits(client, self.config)
+        # Announce staged input trees on every run (a tree staged between turns included).
+        maf_kwargs["context_providers"] = [*(maf_kwargs.get("context_providers") or []),
+                                           _input_trees.context_provider(self)]
         maf_kwargs.setdefault("max_context_window_tokens", self.config.max_context_window_tokens)
         maf_kwargs.setdefault("max_output_tokens", self.config.max_output_tokens)
+        _default_compaction(maf_kwargs, self.config.keep_last_tool_call_groups)
         # The framework wires a tool-approval middleware by default that raises unless every
         # run() is given an AgentSession. We have no approval flow, and the returned agent is
         # public API, so keep it off: callers can run() it bare.
@@ -311,8 +375,13 @@ class Session:
         # The built-in OpenAI client stores conversations at OpenAI by default. This agent sends
         # fetched web content, documents and workspace data, so keep history local unless the
         # caller opts in with default_options={"store": True}. Merge, don't replace: the caller's
-        # other chat options must survive.
-        maf_kwargs["default_options"] = {"store": False, **(maf_kwargs.get("default_options") or {})}
+        # other chat options must survive. Connectors without the option are not sent it (some
+        # reject unknown options), and {"store": None} drops it for any client: the framework
+        # leaves None options out of the request.
+        options = dict(maf_kwargs.get("default_options") or {})
+        if "store" not in options and not _lacks_store_option(client):
+            options["store"] = False
+        maf_kwargs["default_options"] = options
         return create_harness_agent(
             client,
             name=name,
@@ -332,6 +401,7 @@ class Session:
         from .spill import make_spill_parser
 
         server = getattr(tool, "name", None) or repr(tool)
+        _drop_mcp_host_payload(tool)
         # Install before connect so the wrappers reach the underlying MCP ClientSession.
         token_map = install_status_wrappers(self.status_bus, tool, server)
         try:
@@ -364,6 +434,44 @@ class Session:
     def cleanup(self) -> None:
         if self.root.exists():
             shutil.rmtree(self.root)
+
+
+# MAF keeps a raw copy of every MCP result in the result content's additional_properties, up
+# to max_host_payload_size_bytes (1 MiB by default). The model never sees it, but compaction's
+# token estimate counts it, so a result spilled to a short handle summary still weighed as
+# much as the raw page. 1 byte is the smallest limit MAF accepts: every copy is then omitted.
+_MCP_DEFAULT_HOST_PAYLOAD_BYTES = 1024 * 1024
+_MCP_MIN_HOST_PAYLOAD_BYTES = 1
+
+
+def _drop_mcp_host_payload(tool: Any) -> None:
+    """Keep no raw MCP result copies, unless the caller chose a limit of their own."""
+    if getattr(tool, "max_host_payload_size_bytes", None) != _MCP_DEFAULT_HOST_PAYLOAD_BYTES:
+        return   # absent (not a MAF MCP tool), unlimited (None) or set by the caller
+    tool.max_host_payload_size_bytes = _MCP_MIN_HOST_PAYLOAD_BYTES
+    _quiet_mcp_omission_warnings()
+
+
+class _MinLimitOmissionToDebug(logging.Filter):
+    """Downgrade MAF's per-call 'Omitting MCP ...' warning when it reports sheath's own limit.
+
+    At a 1-byte limit every result is omitted, so the warning would fire on every MCP call.
+    A limit a caller chose still warns as usual.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (record.levelno == logging.WARNING
+                and str(record.msg).startswith("Omitting MCP")
+                and record.args == (_MCP_MIN_HOST_PAYLOAD_BYTES,)):
+            record.levelno, record.levelname = logging.DEBUG, "DEBUG"
+            return logging.getLogger(record.name).isEnabledFor(logging.DEBUG)
+        return True
+
+
+def _quiet_mcp_omission_warnings() -> None:
+    mcp_logger = logging.getLogger("agent_framework._mcp")
+    if not any(isinstance(f, _MinLimitOmissionToDebug) for f in mcp_logger.filters):
+        mcp_logger.addFilter(_MinLimitOmissionToDebug())
 
 
 def _every_mcp_function(tool: Any, visible: list) -> list:
@@ -488,6 +596,69 @@ def _check_isolation(sandbox_config: SandboxConfig) -> None:
             'local tier is not a security boundary. Set backend="container" (podman or docker), '
             "or drop require_isolation for development/trusted use only."
         )
+
+
+# Connector packages whose chat clients have no `store` option. The Anthropic connector forwards
+# every non-None option to its SDK, which rejects `store`.
+_NO_STORE_CONNECTORS = ("agent_framework_anthropic",)
+
+
+def _lacks_store_option(client: Any) -> bool:
+    """Whether ``client``'s class, or any base class, comes from a connector without `store`."""
+    return any((cls.__module__ or "").split(".")[0] in _NO_STORE_CONNECTORS
+               for cls in type(client).__mro__)
+
+
+def _default_compaction(maf_kwargs: dict[str, Any], keep_last_tool_call_groups: int) -> None:
+    """Fill in the compaction strategies the caller did not pass, in place.
+
+    Mirrors the framework's own default (one context-window strategy shared by the per-call
+    and post-turn phases) except that truncation never drops the first user message: in a
+    one-shot task that message is the task, and a long run would go on without it.
+    """
+    if maf_kwargs.get("disable_compaction"):
+        return
+    if (maf_kwargs.get("before_compaction_strategy") is not None
+            and maf_kwargs.get("after_compaction_strategy") is not None):
+        return
+    window, output = maf_kwargs.get("max_context_window_tokens"), maf_kwargs.get("max_output_tokens")
+    if window is None or output is None:
+        return  # no budget: the framework builds no token strategy either
+    from agent_framework import ContextWindowCompactionStrategy
+
+    strategy = ContextWindowCompactionStrategy(
+        max_context_window_tokens=window, max_output_tokens=output,
+        tokenizer=maf_kwargs.get("tokenizer"),
+        keep_last_tool_call_groups=keep_last_tool_call_groups,
+        preserve_first_user_group=True,
+    )
+    for phase in ("before_compaction_strategy", "after_compaction_strategy"):
+        if maf_kwargs.get(phase) is None:
+            maf_kwargs[phase] = strategy
+
+
+def _apply_tool_loop_limits(client: Any, config: SheathConfig) -> None:
+    """Set the configured tool-loop limits on ``client``, where MAF reads them.
+
+    MAF has no per-agent or per-request form of these limits, only the client's
+    ``function_invocation_configuration``. A limit left at None is not touched, so a host's
+    own setting on the client survives.
+    """
+    limits = {"max_iterations": ("tool_loop_max_iterations", 1),
+              "max_consecutive_errors_per_request": ("tool_loop_max_consecutive_errors", 0)}
+    chosen = {key: getattr(config, field) for key, (field, _) in limits.items()
+              if getattr(config, field) is not None}
+    for key, value in chosen.items():
+        field, least = limits[key]
+        if value < least:
+            raise ValueError(f"SheathConfig.{field} must be at least {least}, got {value}")
+    if not chosen:
+        return
+    settings = getattr(client, "function_invocation_configuration", None)
+    if not isinstance(settings, dict):
+        raise ValueError(f"{type(client).__name__} has no function_invocation_configuration, "
+                         "so the SheathConfig tool-loop limits cannot be applied to it")
+    settings.update(chosen)
 
 
 def _build_sandbox(root: Path, store: HandleStore, sandbox_config: SandboxConfig,

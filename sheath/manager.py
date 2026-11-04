@@ -75,7 +75,8 @@ class SessionManager:
                     bundles: tuple[str, ...] | None = None,
                     agent_instructions: str | None = None,
                     on_publish: Any | None = None,
-                    agent_kwargs: dict[str, Any] | None = None) -> Conversation:
+                    agent_kwargs: dict[str, Any] | None = None,
+                    keep: bool | None = None) -> Conversation:
         """Reuse the live conversation for ``session_id`` (if any, not expired), else create one.
 
         Open-or-create is serialized behind a single manager lock so a concurrent ``aopen`` of the
@@ -85,8 +86,10 @@ class SessionManager:
         an expired conversation (whose teardown may wait for a running turn) happens outside
         the manager lock; only opens of that same id wait for it.
 
-        ``agent_instructions``, ``on_publish`` and ``agent_kwargs`` override the Sheath defaults for
-        a conversation being *created*; re-opening a live id returns the existing conversation unchanged.
+        ``agent_instructions``, ``on_publish``, ``agent_kwargs`` and ``keep`` override the Sheath
+        defaults for a conversation being *created*; re-opening a live id returns the existing
+        conversation unchanged. ``keep`` (default: ``SheathConfig.keep_conversation_workspaces``)
+        leaves the workspace on disk when the conversation is closed or expires.
         """
         while True:
             async with self._lock:
@@ -98,7 +101,7 @@ class SessionManager:
                         return await self._create(session_id, tools=tools, bundles=bundles,
                                                   agent_instructions=agent_instructions,
                                                   on_publish=on_publish,
-                                                  agent_kwargs=agent_kwargs)
+                                                  agent_kwargs=agent_kwargs, keep=keep)
                     if not self._expired(existing):
                         # Opening is activity: without this, a caller could be handed a
                         # conversation that a sweep reaps before its turn takes the lock.
@@ -115,7 +118,7 @@ class SessionManager:
             # Retry: the id is now free (or someone else recreated it first).
 
     async def _create(self, session_id: str | None, *, tools, bundles, agent_instructions,
-                      on_publish, agent_kwargs) -> Conversation:
+                      on_publish, agent_kwargs, keep: bool | None = None) -> Conversation:
         conv_id = session_id if session_id is not None else uuid.uuid4().hex
         config = dataclasses.replace(
             self._sheath.config, root_dir=str(_conv_root(self._sheath.config, conv_id)))
@@ -125,7 +128,8 @@ class SessionManager:
             id=conv_id, config=config, client=self._sheath._make_client(),
             tools=expand_tools(self._sheath._tools) + expand_tools(tools),
             bundles=bundles if bundles is not None else self._sheath._bundles,
-            reap_on_close=True,
+            reap_on_close=not (keep if keep is not None
+                               else self._sheath.config.keep_conversation_workspaces),
             agent_instructions=(agent_instructions if agent_instructions is not None
                                 else self._sheath._agent_instructions),
             on_publish=(on_publish if on_publish is not None

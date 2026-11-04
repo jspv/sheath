@@ -53,12 +53,19 @@ gVisor / Firecracker behind the existing `SandboxExecutor` interface, as a third
 value alongside `local` and `container`. Sequenced after the hardening work, which has now made the
 container tier the default.
 
-### MAF skills + memory providers (v1.1)
-Wire MAF's `Skill`/`SkillsProvider` and `MemoryStore`/`MemoryContextProvider` into the
-harness so the agent can accumulate reusable procedures and cross-session memory. Both are
-marked experimental upstream and emit `ExperimentalWarning`, so pin behavior carefully.
-Since v0.2.1 a host can already pass its own `skills_provider` through `agent_kwargs`; what
-remains is first-class wiring and memory.
+### MAF skills (v1.1)
+Wire MAF's `Skill`/`SkillsProvider` into the harness so the agent can accumulate reusable
+procedures. Checked 2026-11-04 against agent-framework-core 1.22.0 and 1.24.0: the core skills
+API (`Skill`, `SkillsProvider`, `FileSkillsSource`, `InlineSkill`, `ClassSkill`) is no longer
+experimental; only MCP-served skills (`MCPSkill`, `MCPSkillsSource`) are. Since v0.2.1 a host can
+already pass its own `skills_provider` through `agent_kwargs`; what remains is first-class
+wiring, with skill scripts running in the sandbox and skills only from host-trusted sources.
+Deferred by the owner until the issues filed 2026-11-04 (jspv/sheath#2 to #8) are merged.
+
+### MAF memory providers
+Wire `MemoryStore`/`MemoryContextProvider` for cross-session memory. Still experimental
+upstream in 1.24.0 (part of the `HARNESS` feature set, with file access, todo and background
+agents), so it waits for the API to stabilize.
 
 ### Workflow durability / HITL outer shell
 Wrap the agent loop in a MAF Workflow to get checkpointing, resume, and human-gated steps —

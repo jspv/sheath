@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from sheath import SheathConfig, Session
 from sheath.testing import StubChatClient, text, tool_call
 
@@ -93,3 +95,42 @@ def test_caller_default_options_are_merged_and_may_override_store(tmp_path):
 
     overridden = asyncio.run(agent_options(default_options={"store": True}))
     assert overridden.get("store") is True
+
+
+# --- store goes only to connectors that have the option (issue #3) ------------------------
+
+# A connector whose module is the Anthropic package, as `type(client).__mro__` sees it.
+_AnthropicStub = type("AnthropicChatClient", (_RecordingClient,),
+                      {"__module__": "agent_framework_anthropic._chat_client"})
+
+
+class _AnthropicSubclass(_AnthropicStub):
+    """A host's own subclass, defined outside the connector package."""
+
+
+def _first_options(client, cfg, **maf_kwargs):
+    async def run():
+        async with Session.create(cfg) as sess:
+            agent = await sess.create_agent(client, agent_instructions="x", tools=[],
+                                            bundles=("files",), **maf_kwargs)
+            await agent.run("go")
+    asyncio.run(run())
+    return client.options_seen[0]
+
+
+@pytest.mark.parametrize("cls", [_AnthropicStub, _AnthropicSubclass])
+def test_anthropic_connectors_are_not_sent_store(tmp_path, cls):
+    opts = _first_options(cls([text("hi")]), SheathConfig(root_dir=tmp_path / "r"))
+    assert "store" not in opts
+
+
+def test_an_explicit_store_still_reaches_an_anthropic_connector(tmp_path):
+    opts = _first_options(_AnthropicStub([text("hi")]), SheathConfig(root_dir=tmp_path / "r"),
+                          default_options={"store": True})
+    assert opts.get("store") is True
+
+
+def test_store_none_removes_the_key_for_any_client(tmp_path):
+    opts = _first_options(_RecordingClient([text("hi")]), SheathConfig(root_dir=tmp_path / "r"),
+                          default_options={"store": None, "temperature": 0.1})
+    assert "store" not in opts and opts.get("temperature") == 0.1

@@ -58,7 +58,7 @@ The central design move is keeping large data out of context. When a tool, MCP s
   "preview": "date,units,revenue\n2025-01-01,12,840.0\n... (5 of 480000 rows)" }
 ```
 
-~200 tokens stand in for 18 MB. To actually work with the data, the agent is given a **computer**: it writes `.py` scripts and runs them in a sandbox that speaks the same handle store (`load(id)` / `save(id, obj)`). Only the small value it deliberately prints/returns flows back into context; derived data becomes new handles. The loop follows a **search → read → analyze** triad: `search` to locate, `read_file` to load the right slice, `run_python` to analyze.
+~200 tokens stand in for 18 MB. To actually work with the data, the agent is given a **computer**: it writes `.py` scripts and runs them in a sandbox that speaks the same handle store (`load(id)` / `save(id, obj)`). Only the small value it deliberately prints/returns flows back into context; derived data becomes new handles. The loop follows a **search → read → analyze** triad: `search` to locate, `read_file` to load the right slice, `run_python` to analyze. A turn's loop ends when the model answers, or after 40 model round-trips or 3 tool errors in a row (MAF's limits). Raise them with `SheathConfig.tool_loop_max_iterations` and `tool_loop_max_consecutive_errors`; MAF reads them only from the chat client, so sheath sets them there, and every agent sharing that client gets them.
 
 ## Getting started
 
@@ -208,11 +208,11 @@ asyncio.run(main())
 
 Because the returned object is a standard MAF `Agent`, it composes anywhere a MAF agent is expected — as a workflow node, a sub-agent, or behind the AG-UI wrapper (`agui_stream` does exactly this with `conv.agent`). Construction goes through MAF's own `create_harness_agent(client, …)` factory, so apart from the workspace two-step and the spill-wrapping of your tools, you are building and running an ordinary MAF agent.
 
-**Defaults `create_agent` sets.** Sheath turns off the framework's built-in todo, mode, file-memory and web-search providers (the agent's tools come from the bundles you select, not from MAF), and the framework's tool-approval middleware (it would raise unless every `run()` is given an `AgentSession`; sheath has no approval flow, so the returned agent can be `run()` bare). It also sends `store=False` with every request — see [Model-provider storage](#security-and-confinement). You can override `default_options` (your other options are kept; `{"store": True}` opts back in), `disable_tool_auto_approval`, and the token budgets `max_context_window_tokens` / `max_output_tokens` by passing them to `create_agent`; the four provider switches (todo, mode, file memory, web search) are fixed, and passing one raises `TypeError`. `shell_executor`, `file_access_store` and `background_agents` are refused with `TypeError` too: each would give the model a shell, files or other agents outside the sandbox, `safe_path` and egress checks. Other framework options (for example `skills_provider`) pass through. On the one-shot and conversation paths, pass the same options as `agent_kwargs`: on `Sheath(...)` as the default, or per conversation on `aopen(...)` / per call on `solve`/`asolve`, which win key by key (`default_options` merge one level down). `agui_stream` uses the `Sheath` default.
+**Defaults `create_agent` sets.** Sheath turns off the framework's built-in todo, mode, file-memory and web-search providers (the agent's tools come from the bundles you select, not from MAF), and the framework's tool-approval middleware (it would raise unless every `run()` is given an `AgentSession`; sheath has no approval flow, so the returned agent can be `run()` bare). It also sends `store=False` with every request — see [Model-provider storage](#security-and-confinement). You can override `default_options` (your other options are kept; `{"store": True}` opts back in), `disable_tool_auto_approval`, and the token budgets `max_context_window_tokens` / `max_output_tokens` by passing them to `create_agent`. Unless you pass your own `before_compaction_strategy` / `after_compaction_strategy` (or `disable_compaction=True`), sheath builds MAF's context-window compaction with `preserve_first_user_group=True`, so truncation never drops the original request, and `keep_last_tool_call_groups` from `SheathConfig`; the four provider switches (todo, mode, file memory, web search) are fixed, and passing one raises `TypeError`. `shell_executor`, `file_access_store` and `background_agents` are refused with `TypeError` too: each would give the model a shell, files or other agents outside the sandbox, `safe_path` and egress checks. Other framework options (for example `skills_provider`) pass through. On the one-shot and conversation paths, pass the same options as `agent_kwargs`: on `Sheath(...)` as the default, or per conversation on `aopen(...)` / per call on `solve`/`asolve`, which win key by key (`default_options` merge one level down). `agui_stream` uses the `Sheath` default.
 
 ### Bring your own model client
 
-The convenience entry points (`solve`, `Sheath(...)` with no `client`) use MAF's OpenAI client by default — following [MAF's own Python convention](https://github.com/microsoft/agent-framework/blob/main/python/README.md) (`OPENAI_API_KEY` present → OpenAI). The sheath is **not** OpenAI-only: it needs only an object implementing MAF's chat-client protocol (`SupportsChatGetResponse`), and never authenticates one for you when you supply it. The same client is reused across one-shots and every continuous conversation. Whatever client you supply, `create_agent` applies the defaults in [Use it as a MAF agent](#use-it-as-a-maf-agent), including `store=False`, a standard MAF chat option. Two injection points:
+The convenience entry points (`solve`, `Sheath(...)` with no `client`) use MAF's OpenAI client by default — following [MAF's own Python convention](https://github.com/microsoft/agent-framework/blob/main/python/README.md) (`OPENAI_API_KEY` present → OpenAI). The sheath is **not** OpenAI-only: it needs only an object implementing MAF's chat-client protocol (`SupportsChatGetResponse`), and never authenticates one for you when you supply it. The same client is reused across one-shots and every continuous conversation. Whatever client you supply, `create_agent` applies the defaults in [Use it as a MAF agent](#use-it-as-a-maf-agent), including `store=False` for connectors that have that option (see [Model-provider storage](#security-and-confinement)). Two injection points:
 
 ```python
 # High-level facade — your client flows to solve / aopen / agui_stream
@@ -248,7 +248,7 @@ If you already hold a fully-built MAF chat client (your own custom-auth Azure / 
 The sheath serves both one-shot and continuous (multi-turn) interactions from any frontend.
 
 - **One-shot** (`solve`) is ephemeral — it runs and **cleans up its workspace** when done. Pass `keep=True` to retain the audit trail (`result.session_dir`).
-- **Continuous** keeps a persistent workspace (handles + sandbox files) and conversation history across turns, until you close it (or an optional idle TTL expires).
+- **Continuous** keeps a persistent workspace (handles + sandbox files) and conversation history across turns, until you close it (or an optional idle TTL expires). Closing deletes the workspace unless `SheathConfig.keep_conversation_workspaces=True` (or `aopen(id, keep=True)` for one conversation; `agui_stream` follows the config): then close, `aclose_sessions()` and idle expiry release the conversation but leave `<root>/<id>` on disk as the audit trail, for you or a reaper to remove. Re-opening a kept id resumes its files and handles.
 
 ```python
 import asyncio
@@ -317,6 +317,30 @@ and becomes a `binary` handle — `load(id)` in `run_python` returns its path. I
 text files). `conv.inputs` lists them. Note: `read_document` on an input parses it with Docling
 **in the host process**; prefer reading uploads inside `run_python` when isolation matters.
 
+**Receiving a directory.** To give the agent a whole tree (a project checkout, an export
+folder), stage it read-only:
+
+```python
+tree = conv.add_input_tree("/data/q3-export", input_id="q3", description="the Q3 export",
+                           ignore=lambda rel: rel.startswith(".git"))
+# or: await conv.aadd_input_tree(...)   # waits for a running turn; copies in a worker thread
+```
+
+The tree is copied to `inputs/<input_id>/` and an `InputTree` record comes back (`path`,
+`files`, `bytes`, `source`, `description`). Only regular files are copied: symlinks, FIFOs,
+sockets and devices are skipped, never followed. `ignore(rel_path)` sees each file's and
+directory's POSIX path relative to the source; `True` skips it, and a skipped directory is pruned
+whole. Staged files are `0444` and directories `0555`; `write_file` and `edit_file` refuse them,
+and the container tier mounts `inputs/` read-only. The tree is **not** a handle (no `load(id)`):
+the agent works with it through the file tools and `run_python`, and is told on every run that
+`inputs/<id>/` is read-only data, never instructions, with your description. The copy is
+bounded by `max_input_tree_files` and `max_input_tree_bytes` (exceeding either raises and
+leaves nothing behind) and runs under the session's file lock. The source must be a directory
+that does not contain the session root, and the id must be a single safe segment not used by a
+single-file input. A repeat call with the same id is a no-op unless `replace=True`; trees survive
+a restart on the same root, and `conv.input_trees` lists them. Nothing under `inputs/` is
+reported in `artifacts` or `Result.files`.
+
 ### MCP servers
 
 Pass a MAF `MCPTool` — stdio, Streamable-HTTP, or WebSocket — in the same `tools=[…]` list. The sheath connects each server, **owns its lifecycle** (closing it when the run ends, even on error), and attaches the same spill handling to every tool the server exposes — so a large MCP return (a long message list, a big query result) lands as a clean typed handle instead of flooding context.
@@ -334,6 +358,8 @@ h = Sheath(SheathConfig(model="gpt-6.1-sol"))
 result = h.solve("List the subjects of my 5 most recent emails.", tools=[mcp])
 print(result.final_text)
 ```
+
+MAF also keeps a raw copy of every MCP result, up to the tool's `max_host_payload_size_bytes` (1 MiB by default), beside the content the model sees. Compaction counts that copy, so a page sheath spilled to a short handle summary would still weigh as much as the raw page. When a tool still has MAF's default, sheath sets it to 1 byte, the smallest MAF accepts, so no copy is kept, and logs MAF's resulting per-call "Omitting MCP ..." notice at debug level. Set your own `max_host_payload_size_bytes` on the tool to keep copies; sheath leaves it alone.
 
 A remote server works the same way:
 
@@ -432,7 +458,7 @@ The agent gets a small, fixed set of root-confined tools (listed below; the web 
 | `edit_file(path, old, new, replace_all=False)` | Replace exact text in a file; `old` must be unique unless `replace_all`. Atomic, keeps line endings and permissions, refuses the same directories as `write_file`; files up to 10 MiB |
 | `read_file(path, start_line=1, limit=2000, line_numbers=False)` | Bounded, paginated text; `start_line` is 1-based, the same numbering as `search` hits; `line_numbers` prefixes each line with its number |
 | `list_files(path=".", pattern=None)` | Recursive file listing, optionally filtered by a glob (`**/*.csv`) |
-| `search(pattern, …, context=0, output="hits")` | ripgrep over files/handles, with a Python-regex fallback (run in a bounded child process). Hits give a 1-based `line`; `context` (max 10) adds `before`/`after` neighbouring lines; `output="files"` or `"count"` returns matching files or per-file matching-line counts instead |
+| `search(pattern, …, context=0, output="hits")` | ripgrep over files/handles, with a Python-regex fallback (run in a bounded child process). Searches exactly what `list_files` lists: hidden and `.gitignore`d paths included (a `.git/` directory too), the root's `.sheath/` never. Hits give a 1-based `line`; `context` (max 10) adds `before`/`after` neighbouring lines; `output="files"` or `"count"` returns matching files or per-file matching-line counts instead |
 | `run_python(code=None, path=None, args=[])` | Run a script in the sandbox → `{stdout, result, error, exit_code, new_handles}`. An emitted result whose JSON exceeds `spill_threshold_bytes` comes back as `{"spilled": true, "note": …, "handle": {…}}` and is stored as a handle |
 | `fetch_url(url)` | Fetch a URL → typed handle; HTML is cleaned to Markdown (trafilatura) |
 | `inspect_handle(id, rows=20, stats=False)` | Deeper on-demand look at a handle: up to 100 preview lines / head rows, read raw and bounded (JSON is not pretty-printed); `stats=True` adds per-column min/max/null_count for dataframes from the parquet footer (min/max are null when any non-empty row group lacks them); a first row group over 16 MiB yields no head rows (`head_omitted`) |
@@ -458,7 +484,7 @@ Every session has one **root directory**; everything — handles, agent-written 
 - **Handle integrity.** Metadata the model sees for a handle (schema, row count, preview) is derived by the harness from the bytes on disk **when the handle is created**, never reported by the sandboxed code that wrote them — and it is re-derived, not believed, when a manifest is rehydrated onto a root that outlived its process. The handle **record** is immutable: reusing an existing id is refused and reported. In the container tier the handle **bytes** are immutable too, because `handles/` is a read-only mount. As defence in depth (and as the only tamper signal in the `local` tier), a content digest is recorded when the metadata is derived and checked on every read; a mismatch raises `HandleTamperedError`. The digest (sha256, version-tagged) covers the file's length, its first 64 KiB and its last 64 KiB, so it is not a whole-file check. Handle ids chosen by sandboxed code must match `[A-Za-z0-9][A-Za-z0-9_.-]{0,63}`. The parent↔sandbox exchange is bounded (1 MiB emit payload, 8 MiB control file, 256 new handles per run; see the configuration table).
 - **Bounded results and reads.** Every built-in tool result has a ceiling: `run_python` keeps the head and tail of `stdout`/`stderr` (`SandboxConfig.max_output_bytes` each) and stores a large emitted result as a handle; `inspect_handle`, `read_file`, `edit_file`, `list_files` and `search` cap what they return. The harness reads sandbox-written and fetched data with bounded memory: files are streamed, only regular files are opened (a FIFO cannot block it), a dataframe handle is never materialized in the host process (previews read one record batch, `inspect_handle(stats=True)` reads footer statistics, and `publish_handle` converts inside the sandbox), and HTTP bodies are streamed up to the byte limit under a total deadline. Document inputs are bounded too: a `read_document` URL download is capped at `FetchConfig.max_bytes` and refused, not truncated, when larger, and a workspace path is copied privately and capped at `SheathConfig.max_input_bytes`. A dataframe whose first row group exceeds 16 MiB gets no head rows or preview (`head_omitted` / "preview omitted"), because Arrow would decode the whole group.
 - **Residual risks.** The harness still parses the parquet footer and first record batch of a file sandboxed code wrote, and an oversized data page is decoded whole. Container-tier disk use is unbounded (`max_file_size_mb` applies to the `local` tier only). DNS rebinding between validation and connect is not closed, and the fetch deadline does not cover DNS resolution (see Layer 3). The `local` tier provides none of the guarantees in this section.
-- **Model-provider storage.** The built-in OpenAI client stores conversations at OpenAI by default. Because this agent sends fetched web pages, documents and workspace data to the model, `create_agent` sends `store=False`, so conversation history is kept in-process and OpenAI is asked not to retain it for later retrieval. That is a request to the provider, not a guarantee of zero retention: the provider's own logging and your account's data controls still apply, and the content is still sent to the model. Opt back in per agent with `default_options={"store": True}`.
+- **Model-provider storage.** The built-in OpenAI client stores conversations at OpenAI by default. Because this agent sends fetched web pages, documents and workspace data to the model, `create_agent` sends `store=False`, so conversation history is kept in-process and OpenAI is asked not to retain it for later retrieval. That is a request to the provider, not a guarantee of zero retention: the provider's own logging and your account's data controls still apply, and the content is still sent to the model. Opt back in per agent with `default_options={"store": True}`. Connectors without the option are not sent it: clients from `agent_framework_anthropic` (including your subclasses of them) are exempt automatically, because that connector forwards every option to its SDK, which rejects `store`. For any other connector that lacks it, pass `default_options={"store": None}`, which removes the key; it survives the merge across `Sheath(...)`, `aopen(...)` and `solve`/`asolve`.
 - **Tool isolation.** Wrap stateful tools such as MCP servers in `tool_factory` so each conversation gets its own instance (see [MCP servers](#mcp-servers)).
 
 > The **container tier** is the default and provides real isolation. Select `local` explicitly with `SheathConfig.sandbox.backend = "local"` (or `SHEATH_SANDBOX_BACKEND=local`) to opt out; both sit behind the same `SandboxExecutor` interface.
@@ -514,12 +540,18 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 | `model` | `"gpt-6.1-sol"` | Used only by the built-in OpenAI client; ignored when you inject a `client` |
 | `spill_threshold_bytes` | `8192` | Lower edge of the spill-over zone: a tool return over this becomes a handle |
 | `max_spill_bytes` | `100 MiB` | Upper edge: a return larger than this is **rejected loudly** (`SpillLimitExceeded`), never silently stored |
-| `max_context_window_tokens` | `128_000` | Fed to MAF compaction |
+| `max_context_window_tokens` | `128_000` | Fed to MAF compaction; the input budget is this minus `max_output_tokens` |
 | `max_output_tokens` | `4096` | |
+| `keep_last_tool_call_groups` | `4` | Compaction: past 50% of the input budget, tool-call groups older than the newest N are collapsed to summaries; past 80%, the oldest groups are dropped, never the first user message (the task) |
+| `tool_loop_max_iterations` | `None` | Model round-trips per turn before the loop stops; `None` keeps the client's setting (MAF default 40). Applied to the chat client |
+| `tool_loop_max_consecutive_errors` | `None` | Tool errors in a row before the loop stops; `None` keeps the client's setting (MAF default 3). Applied to the chat client |
 | `root_dir` | `None` | `None` → a fresh one-shot dir `./.sheath/runs/run-XXXXXXXX`; continuous conversations use `./.sheath/sessions/<id>` (or `<root_dir>/<id>`) |
 | `idle_ttl_s` | `None` | Continuous-session idle TTL; `None` → never expire |
+| `keep_conversation_workspaces` | `False` | Leave a continuous conversation's workspace on disk when it closes or expires; `aopen(..., keep=)` overrides it per conversation |
 | `max_publish_bytes` | `100 MiB` | Largest file `publish_file` / `publish()` will deliver |
 | `max_input_bytes` | `100 MiB` | Largest upload `add_input` will accept |
+| `max_input_tree_files` | `50_000` | Most files `add_input_tree` will stage |
+| `max_input_tree_bytes` | `1 GiB` | Most bytes `add_input_tree` will stage; counted during the copy |
 | `sandbox` | `SandboxConfig()` | `backend` (`container` by default; `local` = no isolation), `container_runtime`, timeout, limits, network, `pip_packages`, preinstalled libs, `require_isolation` (`False` — refuses a non-container backend however it was selected), `build_on_demand` (`None` → build unless isolation is required), `build_timeout_s` (`900`). **`max_file_size_mb` is enforced by the `local` tier only** — under the default `container` backend it has no effect (memory/cpu/pid limits and the network setting apply instead) |
 | `fetch` | `FetchConfig()` | `max_bytes`, timeout, allowed URL schemes |
 | `sandbox.max_output_bytes` | `8192` | Bytes of `stdout` and of `stderr` kept from a `run_python` call (first and last halves; the gap is reported) |

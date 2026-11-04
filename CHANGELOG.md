@@ -6,6 +6,69 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 
 0.3.0 breaks one call: `read_file` takes a 1-based `start_line` in place of the 0-based `offset`.
 
+## Unreleased
+
+### `search` sees exactly what `list_files` lists
+- **Behavior change:** ripgrep ran with its defaults, so hidden paths and anything a `.gitignore`
+  or `.ignore` in the workspace named were invisible to `search` while `read_file` and
+  `list_files` showed them; the Python fallback, the other way round, searched `.sheath/`.
+  Both backends now search every regular file under the path, hidden and ignore-listed ones
+  included (a `.git/` directory too), and never the root's `.sheath/`, with or without an
+  include `glob` and when `path` points into it.
+
+### `store=False` goes only to connectors that have the option
+- **Fix:** `create_agent` sent `store=False` to every chat client. The Anthropic connector
+  forwards every non-`None` option to its SDK, which rejects `store`, so an agent on an
+  Anthropic client failed on its first request. Clients from `agent_framework_anthropic`
+  (or subclasses of them) are no longer sent `store` unless you set it.
+- `default_options={"store": None}` removes the key for any client, at any level
+  (`Sheath(...)`, `aopen(...)`, `solve`/`asolve`), for connectors sheath does not know.
+
+### Compaction never drops the original request
+- **Fix:** MAF's default context-window compaction removes the oldest non-system messages once
+  a conversation passes 80% of the input budget. In a one-shot task that is the task itself,
+  so a long run carried on without knowing what it was asked. `create_agent` now builds the
+  strategy with `preserve_first_user_group=True` unless you pass your own.
+- New `SheathConfig.keep_last_tool_call_groups` (default 4, MAF's default): how many recent
+  tool-call groups stay verbatim when older ones are collapsed to summaries.
+- The core instructions tell the model that older tool results may be collapsed, and to keep
+  important intermediate findings in a handle or a workspace file.
+
+### Hidden raw MCP results no longer count toward compaction
+- **Fix:** MAF keeps a raw copy of every MCP result (up to 1 MiB by default) in the result's
+  `additional_properties`. The model never sees it, but compaction's token estimate counts it,
+  so a result spilled to a short handle summary still weighed tens of thousands of tokens and
+  compaction fired every few calls. When an MCP tool has MAF's default limit, sheath now sets
+  `max_host_payload_size_bytes` to 1 byte, so no copy is kept, and downgrades MAF's resulting
+  per-call warning to debug. A limit you set on the tool is left alone and warns as before.
+
+### Tool-loop limits are sheath settings
+- New `SheathConfig.tool_loop_max_iterations` and `tool_loop_max_consecutive_errors`. MAF
+  ends a turn after 40 model round-trips and after 3 tool errors in a row; long tool-driven
+  tasks need more. MAF reads both only from the chat client's
+  `function_invocation_configuration`, so `create_agent` sets them there: every agent sharing
+  the client gets them. `None` (the default) leaves the client's own setting, so a host that
+  already set them on its client is unaffected. A limit on a client without a tool loop, or
+  out of range, raises `ValueError`.
+
+### Keep a conversation's workspace after it closes
+- New `SheathConfig.keep_conversation_workspaces` (default `False`) and `aopen(..., keep=)`
+  to override it per conversation. With it set, closing a conversation,
+  `aclose_sessions()` and idle expiry release it but leave `<root>/<id>` on disk, so the
+  workspace can serve as the audit trail; re-opening the id resumes its files and handles.
+  `agui_stream` follows the config. The one-shot path already had `keep=True`.
+
+### Stage a directory as read-only input
+- New `Session.add_input_tree(source, *, input_id, description=None, ignore=None,
+  replace=False)`, with `Conversation.add_input_tree` / `aadd_input_tree` and
+  `input_trees`, returning an exported `InputTree` record. The tree is copied to
+  `inputs/<input_id>/` (regular files only, links never followed), made read-only, refused by
+  `write_file` and `edit_file`, bounded by the new `max_input_tree_files` and
+  `max_input_tree_bytes`, and announced to the model on every run as read-only data.
+- **Behavior change:** `artifacts` and `Result.files` no longer list anything under `inputs/`.
+  Single-file uploads were listed as output before.
+- `add_input` refuses an id already used by an input tree.
+
 ## 0.3.0 — 2026-11-01
 
 ### `search` and `read_file` share 1-based line numbers

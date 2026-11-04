@@ -117,7 +117,8 @@ class Sheath:
                     tools: list | None = None,
                     agent_instructions: str | None = None,
                     on_publish: OnPublish | None = None,
-                    agent_kwargs: dict[str, Any] | None = None) -> Conversation:
+                    agent_kwargs: dict[str, Any] | None = None,
+                    keep: bool | None = None) -> Conversation:
         """Open (or resume) a persistent continuous Conversation by id.
 
         Lazy manager init is single-event-loop safe (the None-check/assign has no ``await``); it is
@@ -125,11 +126,14 @@ class Sheath:
         one loop, the v1 contract for both AG-UI and the async terminal loop.
 
         ``agent_instructions``, ``on_publish`` and ``agent_kwargs`` override the Sheath-level
-        defaults for this conversation.
+        defaults for this conversation. ``keep`` overrides
+        ``SheathConfig.keep_conversation_workspaces``: when true, closing the conversation (or its
+        idle expiry) releases it but leaves its workspace directory on disk.
         """
         return await self._sessions().aopen(session_id, tools=tools,
                                             agent_instructions=agent_instructions,
-                                            on_publish=on_publish, agent_kwargs=agent_kwargs)
+                                            on_publish=on_publish, agent_kwargs=agent_kwargs,
+                                            keep=keep)
 
     async def aclose_sessions(self) -> None:
         """Close every live continuous Conversation (host shutdown)."""

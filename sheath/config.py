@@ -97,6 +97,17 @@ class SheathConfig:
     max_spill_bytes: int = 100 * 1024 * 1024   # upper edge: a return over this is rejected, not stored
     max_context_window_tokens: int = 128_000
     max_output_tokens: int = 4096
+    # Compaction (the framework's context-window strategy). The input budget is the window
+    # minus max_output_tokens; past 50% of it, tool-call groups older than the newest
+    # keep_last_tool_call_groups are collapsed to summaries; past 80%, the oldest groups are
+    # dropped, but never the first user message (the task itself).
+    keep_last_tool_call_groups: int = 4
+    # Tool loop: MAF ends a turn after this many model round-trips, or after this many tool
+    # errors in a row. MAF reads both from the chat client, so they are applied to it (every
+    # agent sharing the client sees them). None leaves the client's own setting, which on a
+    # fresh client is MAF's default: 40 round-trips and 3 consecutive errors.
+    tool_loop_max_iterations: int | None = None
+    tool_loop_max_consecutive_errors: int | None = None
     # Control-plane bounds (parent <-> sandbox channel). These live here rather than on
     # SandboxConfig because they bound the orchestration channel, not a backend's behavior.
     max_emit_bytes: int = 1024 * 1024          # emit payload cap, checked before parsing
@@ -104,9 +115,14 @@ class SheathConfig:
     max_new_handles: int = 256                 # records adopted per run
     max_publish_bytes: int = 100 * 1024 * 1024  # largest file publish_file/publish() will deliver
     max_input_bytes: int = 100 * 1024 * 1024    # largest user upload add_input() will accept
+    max_input_tree_files: int = 50_000             # most files add_input_tree() will stage
+    max_input_tree_bytes: int = 1024 * 1024 * 1024  # most bytes add_input_tree() will stage
     root_dir: Path | None = None  # None -> a fresh one-shot dir ./.sheath/runs/run-XXXXXXXX
     cleanup: bool = False  # delete the root on async-context exit (throwaway runs)
     idle_ttl_s: float | None = None  # continuous-session idle TTL (None = never expire)
+    # Leave a continuous conversation's workspace (<root>/<id>) on disk when it is closed or
+    # expires, e.g. when the workspace is the audit trail. aopen(keep=...) overrides it.
+    keep_conversation_workspaces: bool = False
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     fetch: FetchConfig = field(default_factory=FetchConfig)
     search: SearchConfig = field(default_factory=SearchConfig)

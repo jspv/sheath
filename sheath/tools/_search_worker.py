@@ -22,6 +22,7 @@ from pathlib import Path
 from sheath import workspace
 from sheath.tools.search import (_MAX_LINE_CHARS as MAX_LINE_CHARS,
                                  _MAX_SEARCH_FILE_BYTES as MAX_SEARCH_FILE_BYTES,
+                                 _STATE_DIR as STATE_DIR,
                                  _snippet as snippet)
 
 
@@ -44,6 +45,8 @@ def scan(root: Path, base: Path, pattern: str, ignore_case: bool, max_matches: i
         try:
             if not f.resolve().is_relative_to(real_root):
                 continue                   # never read outside the root (links, odd globs)
+            if f.relative_to(root).parts[0] == STATE_DIR:
+                continue                   # harness state, as in list_files
             st = os.lstat(f)               # lstat: a link is skipped, never followed
             if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_SEARCH_FILE_BYTES:
                 continue

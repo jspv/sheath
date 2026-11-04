@@ -3,6 +3,7 @@
 from .api import Sheath, Result, ToolFactory, solve, tool_factory
 from .config import FetchConfig, SheathConfig, SandboxConfig
 from .handles import Handle, HandleStore
+from .input_trees import InputTree
 from .paths import PathEscapesRootError, safe_path
 from .publish import OnPublish, PublishedFile, PublishError
 from .container_runtime import (PreflightReport, SandboxImageError, SandboxImageMissing,
@@ -22,7 +23,7 @@ __version__ = "0.3.0"
 __all__ = [
     "Sheath", "Result", "solve", "ToolFactory", "tool_factory",
     "FetchConfig", "SheathConfig", "SandboxConfig",
-    "Handle", "HandleStore",
+    "Handle", "HandleStore", "InputTree",
     "PathEscapesRootError", "safe_path",
     "OnPublish", "PublishedFile", "PublishError",
     "ExecResult", "LocalSubprocessSandbox", "SandboxExecutor", "SandboxQuarantinedError",
