@@ -34,6 +34,14 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 - The core instructions tell the model that older tool results may be collapsed, and to keep
   important intermediate findings in a handle or a workspace file.
 
+### Hidden raw MCP results no longer count toward compaction
+- **Fix:** MAF keeps a raw copy of every MCP result (up to 1 MiB by default) in the result's
+  `additional_properties`. The model never sees it, but compaction's token estimate counts it,
+  so a result spilled to a short handle summary still weighed tens of thousands of tokens and
+  compaction fired every few calls. When an MCP tool has MAF's default limit, sheath now sets
+  `max_host_payload_size_bytes` to 1 byte, so no copy is kept, and downgrades MAF's resulting
+  per-call warning to debug. A limit you set on the tool is left alone and warns as before.
+
 ## 0.3.0 — 2026-11-01
 
 ### `search` and `read_file` share 1-based line numbers

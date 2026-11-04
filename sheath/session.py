@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import mimetypes
 import os
 import shutil
@@ -338,6 +339,7 @@ class Session:
         from .spill import make_spill_parser
 
         server = getattr(tool, "name", None) or repr(tool)
+        _drop_mcp_host_payload(tool)
         # Install before connect so the wrappers reach the underlying MCP ClientSession.
         token_map = install_status_wrappers(self.status_bus, tool, server)
         try:
@@ -370,6 +372,44 @@ class Session:
     def cleanup(self) -> None:
         if self.root.exists():
             shutil.rmtree(self.root)
+
+
+# MAF keeps a raw copy of every MCP result in the result content's additional_properties, up
+# to max_host_payload_size_bytes (1 MiB by default). The model never sees it, but compaction's
+# token estimate counts it, so a result spilled to a short handle summary still weighed as
+# much as the raw page. 1 byte is the smallest limit MAF accepts: every copy is then omitted.
+_MCP_DEFAULT_HOST_PAYLOAD_BYTES = 1024 * 1024
+_MCP_MIN_HOST_PAYLOAD_BYTES = 1
+
+
+def _drop_mcp_host_payload(tool: Any) -> None:
+    """Keep no raw MCP result copies, unless the caller chose a limit of their own."""
+    if getattr(tool, "max_host_payload_size_bytes", None) != _MCP_DEFAULT_HOST_PAYLOAD_BYTES:
+        return   # absent (not a MAF MCP tool), unlimited (None) or set by the caller
+    tool.max_host_payload_size_bytes = _MCP_MIN_HOST_PAYLOAD_BYTES
+    _quiet_mcp_omission_warnings()
+
+
+class _MinLimitOmissionToDebug(logging.Filter):
+    """Downgrade MAF's per-call 'Omitting MCP ...' warning when it reports sheath's own limit.
+
+    At a 1-byte limit every result is omitted, so the warning would fire on every MCP call.
+    A limit a caller chose still warns as usual.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (record.levelno == logging.WARNING
+                and str(record.msg).startswith("Omitting MCP")
+                and record.args == (_MCP_MIN_HOST_PAYLOAD_BYTES,)):
+            record.levelno, record.levelname = logging.DEBUG, "DEBUG"
+            return logging.getLogger(record.name).isEnabledFor(logging.DEBUG)
+        return True
+
+
+def _quiet_mcp_omission_warnings() -> None:
+    mcp_logger = logging.getLogger("agent_framework._mcp")
+    if not any(isinstance(f, _MinLimitOmissionToDebug) for f in mcp_logger.filters):
+        mcp_logger.addFilter(_MinLimitOmissionToDebug())
 
 
 def _every_mcp_function(tool: Any, visible: list) -> list:

@@ -335,6 +335,8 @@ result = h.solve("List the subjects of my 5 most recent emails.", tools=[mcp])
 print(result.final_text)
 ```
 
+MAF also keeps a raw copy of every MCP result, up to the tool's `max_host_payload_size_bytes` (1 MiB by default), beside the content the model sees. Compaction counts that copy, so a page sheath spilled to a short handle summary would still weigh as much as the raw page. When a tool still has MAF's default, sheath sets it to 1 byte, the smallest MAF accepts, so no copy is kept, and logs MAF's resulting per-call "Omitting MCP ..." notice at debug level. Set your own `max_host_payload_size_bytes` on the tool to keep copies; sheath leaves it alone.
+
 A remote server works the same way:
 
 ```python
