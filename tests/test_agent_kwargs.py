@@ -113,3 +113,28 @@ def test_unsandboxed_capabilities_are_refused_on_the_facade(tmp_path):
                agent_kwargs={"shell_executor": object()})
     with pytest.raises(TypeError, match="shell_executor.*sandbox"):
         asyncio.run(h.asolve("go"))
+
+
+def test_store_none_survives_the_merge_across_levels(tmp_path):
+    # Sheath(...) opts out of store; aopen adds another option. The None must carry through
+    # the merge, so the key is removed rather than defaulted back to False.
+    client = _RecordingClient([text("hi")])
+    h = Sheath(SheathConfig(root_dir=str(tmp_path)), client=client,
+               agent_kwargs={"default_options": {"store": None}})
+
+    async def run():
+        conv = await h.aopen("t1", agent_kwargs={"default_options": {"top_p": 0.5}})
+        await conv.aask("go")
+        await h.aclose_sessions()
+
+    asyncio.run(run())
+    opts = client.options_seen[0]
+    assert "store" not in opts and opts.get("top_p") == 0.5
+
+
+def test_asolve_store_none_overrides_a_sheath_level_store(tmp_path):
+    client = _RecordingClient([text("hi")])
+    h = Sheath(SheathConfig(root_dir=str(tmp_path / "r")), client=client,
+               agent_kwargs={"default_options": {"store": True}})
+    asyncio.run(h.asolve("go", agent_kwargs={"default_options": {"store": None}}))
+    assert "store" not in client.options_seen[0]

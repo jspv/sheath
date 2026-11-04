@@ -311,8 +311,13 @@ class Session:
         # The built-in OpenAI client stores conversations at OpenAI by default. This agent sends
         # fetched web content, documents and workspace data, so keep history local unless the
         # caller opts in with default_options={"store": True}. Merge, don't replace: the caller's
-        # other chat options must survive.
-        maf_kwargs["default_options"] = {"store": False, **(maf_kwargs.get("default_options") or {})}
+        # other chat options must survive. Connectors without the option are not sent it (some
+        # reject unknown options), and {"store": None} drops it for any client: the framework
+        # leaves None options out of the request.
+        options = dict(maf_kwargs.get("default_options") or {})
+        if "store" not in options and not _lacks_store_option(client):
+            options["store"] = False
+        maf_kwargs["default_options"] = options
         return create_harness_agent(
             client,
             name=name,
@@ -488,6 +493,17 @@ def _check_isolation(sandbox_config: SandboxConfig) -> None:
             'local tier is not a security boundary. Set backend="container" (podman or docker), '
             "or drop require_isolation for development/trusted use only."
         )
+
+
+# Connector packages whose chat clients have no `store` option. The Anthropic connector forwards
+# every non-None option to its SDK, which rejects `store`.
+_NO_STORE_CONNECTORS = ("agent_framework_anthropic",)
+
+
+def _lacks_store_option(client: Any) -> bool:
+    """Whether ``client``'s class, or any base class, comes from a connector without `store`."""
+    return any((cls.__module__ or "").split(".")[0] in _NO_STORE_CONNECTORS
+               for cls in type(client).__mro__)
 
 
 def _build_sandbox(root: Path, store: HandleStore, sandbox_config: SandboxConfig,

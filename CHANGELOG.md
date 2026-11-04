@@ -16,6 +16,14 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
   included (a `.git/` directory too), and never the root's `.sheath/`, with or without an
   include `glob` and when `path` points into it.
 
+### `store=False` goes only to connectors that have the option
+- **Fix:** `create_agent` sent `store=False` to every chat client. The Anthropic connector
+  forwards every non-`None` option to its SDK, which rejects `store`, so an agent on an
+  Anthropic client failed on its first request. Clients from `agent_framework_anthropic`
+  (or subclasses of them) are no longer sent `store` unless you set it.
+- `default_options={"store": None}` removes the key for any client, at any level
+  (`Sheath(...)`, `aopen(...)`, `solve`/`asolve`), for connectors sheath does not know.
+
 ## 0.3.0 — 2026-11-01
 
 ### `search` and `read_file` share 1-based line numbers
