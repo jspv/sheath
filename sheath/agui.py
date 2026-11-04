@@ -26,7 +26,7 @@ def status_to_agui(event: StatusEvent) -> Any:
     return CustomEvent(
         name="sheath.status",
         value={"tool": event.tool, "message": event.message,
-               "current": event.current, "total": event.total},
+               "current": event.current, "total": event.total, "agent": event.agent},
     )
 
 

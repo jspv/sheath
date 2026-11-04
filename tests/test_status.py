@@ -1,7 +1,15 @@
 import asyncio
 import threading
 
-from sheath.status import StatusBus, StatusEvent, bind_bus, current_bus, report_progress
+from sheath.status import (
+    StatusBus,
+    StatusEvent,
+    bind_agent,
+    bind_bus,
+    current_agent,
+    current_bus,
+    report_progress,
+)
 
 
 def test_subscriber_receives_emitted_event():
@@ -91,3 +99,29 @@ def test_bind_bus_enter_and_exit_in_different_tasks_does_not_raise():
         holder["cm"].__exit__(None, None, None)   # __exit__ in the parent task must not raise
 
     asyncio.run(run())                  # completes without ValueError
+
+
+def test_emit_fills_agent_from_bound_context():
+    bus, got = StatusBus(), []
+    bus.subscribe(got.append)
+    with bind_bus(bus), bind_agent("alpha"):
+        report_progress("hi", tool="t")
+    report_progress("outside", tool="t")          # unbound: no-op
+    assert [(e.tool, e.agent) for e in got] == [("t", "alpha")]
+
+
+def test_explicit_agent_wins_and_default_is_none():
+    bus, got = StatusBus(), []
+    bus.subscribe(got.append)
+    with bind_agent("alpha"):
+        bus.emit(StatusEvent(tool="x", message="m", agent="beta"))
+    bus.emit(StatusEvent(tool="x", message="m"))
+    assert [e.agent for e in got] == ["beta", None]
+
+
+def test_bind_agent_restores_previous_value():
+    with bind_agent("a"):
+        with bind_agent("b"):
+            assert current_agent() == "b"
+        assert current_agent() == "a"
+    assert current_agent() is None

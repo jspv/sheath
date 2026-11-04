@@ -31,6 +31,7 @@ class StatusEvent:
     total: float | None = None      # progress denominator (optional)
     seq: int = 0                    # monotonic per-bus ordering (filled by the bus)
     timestamp: float = 0.0          # wall-clock, time.time() (filled by the bus)
+    agent: str | None = None        # emitting sub-agent; None = the main agent
 
 
 class StatusBus:
@@ -64,7 +65,10 @@ class StatusBus:
         """
         with self._lock:
             self._seq += 1
-            stamped = dataclasses.replace(event, seq=self._seq, timestamp=time.time())
+            stamped = dataclasses.replace(
+                event, seq=self._seq, timestamp=time.time(),
+                agent=event.agent if event.agent is not None else _current_agent.get(),
+            )
             subscribers = list(self._subscribers)
         for callback in subscribers:
             try:
@@ -76,6 +80,15 @@ class StatusBus:
 _current: contextvars.ContextVar[StatusBus | None] = contextvars.ContextVar(
     "sheath_status_bus", default=None
 )
+
+
+_current_agent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "sheath_status_agent", default=None
+)
+
+
+def current_agent() -> str | None:
+    return _current_agent.get()
 
 
 def current_bus() -> StatusBus | None:
@@ -97,6 +110,22 @@ def bind_bus(bus: StatusBus) -> Iterator[None]:
         yield
     finally:
         _current.set(prev)
+
+
+@contextmanager
+def bind_agent(name: str) -> Iterator[None]:
+    """Tag status events emitted in this block with agent ``name``.
+
+    Restores with ``set`` rather than ``reset(token)``, exactly like ``bind_bus``, so the block
+    may be entered and exited in different asyncio tasks/contexts without raising "Token was
+    created in a different Context".
+    """
+    prev = _current_agent.get()
+    _current_agent.set(name)
+    try:
+        yield
+    finally:
+        _current_agent.set(prev)
 
 
 def report_progress(message: str, *, current: float | None = None,

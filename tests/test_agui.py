@@ -111,7 +111,14 @@ def test_merge_status_emitted_during_final_event_is_not_lost():
 def test_status_to_agui_maps_fields():
     ev = status_to_agui(StatusEvent(tool="run_python", message="running", current=1, total=3))
     assert ev.name == "sheath.status"
-    assert ev.value == {"tool": "run_python", "message": "running", "current": 1, "total": 3}
+    assert ev.value == {"tool": "run_python", "message": "running", "current": 1, "total": 3,
+                        "agent": None}
+
+
+@pytest.mark.skipif(not _HAS_AGUI, reason="needs the agui extra (ag-ui-protocol)")
+def test_status_to_agui_carries_agent():
+    ev = status_to_agui(StatusEvent(tool="t", message="m", agent="alpha"))
+    assert ev.value["agent"] == "alpha"
 
 
 @pytest.mark.skipif(not _HAS_AGUI, reason="needs the agui extra (ag-ui-protocol)")
