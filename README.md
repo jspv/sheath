@@ -37,6 +37,7 @@ This is **v1: the general substrate**. Specific problems plug in later as user-s
   - [MCP servers](#mcp-servers)
   - [Live status updates](#live-status-updates)
   - [AG-UI and CopilotKit](#ag-ui-and-copilotkit)
+  - [Sub-agents (experimental)](#sub-agents-experimental)
 - [Reference](#reference)
   - [Tool surface](#tool-surface)
   - [Security and confinement](#security-and-confinement)
@@ -412,7 +413,7 @@ def show(event):
 Sheath(tools=[crunch], on_status=show).solve("crunch 5 items")
 ```
 
-The CLI exposes the same feed with `-v`/`--verbose` (printed to stderr). MCP-server status needs no extra wiring — a server's `notifications/message` arrive tagged `mcp:<server>`, and its `notifications/progress` arrive tagged with the calling tool's name plus `current`/`total`.
+The CLI exposes the same feed with `-v`/`--verbose` (printed to stderr). MCP-server status needs no extra wiring — a server's `notifications/message` arrive tagged `mcp:<server>`, and its `notifications/progress` arrive tagged with the calling tool's name plus `current`/`total`. Events from a [sub-agent](#sub-agents-experimental) carry an `agent` field with its name (`None` for the parent); the field is additive.
 
 ### AG-UI and CopilotKit
 
@@ -442,9 +443,57 @@ async def agent(request: Request):
     return StreamingResponse(sse(), media_type="text/event-stream")
 ```
 
-Point your AG-UI client at this endpoint. The sheath reuses the official `agent-framework-ag-ui` converter, so **frontend/generative-UI tools** (defined in the request), **shared state** (`state_schema`/`predict_state_config`, forwarded as keyword args to `agui_stream`), **human-in-the-loop**, and **multi-turn history** all work — with the sheath's own progress feed overlaid as `sheath.status` `CUSTOM` events. A runnable version is in [`examples/agui_server.py`](https://github.com/jspv/sheath/blob/main/examples/agui_server.py).
+Point your AG-UI client at this endpoint. The sheath reuses the official `agent-framework-ag-ui` converter, so **frontend/generative-UI tools** (defined in the request), **shared state** (`state_schema`/`predict_state_config`, forwarded as keyword args to `agui_stream`), **human-in-the-loop**, and **multi-turn history** all work — with the sheath's own progress feed overlaid as `sheath.status` `CUSTOM` events (whose value includes an `agent` key when a [sub-agent](#sub-agents-experimental) produced it). A runnable version is in [`examples/agui_server.py`](https://github.com/jspv/sheath/blob/main/examples/agui_server.py).
 
 Each request is one conversation turn: turns on the same `threadId` are serialized, and a turn counts as activity for `idle_ttl_s`. Close the event stream on client disconnect (Starlette's `StreamingResponse` does) so the conversation is released for the next turn; a stream a server never closes keeps the conversation busy, and therefore exempt from the idle TTL. While a stream is open, sync `Conversation.add_input` raises — use `aadd_input`, which waits for the turn. The `threadId` selects the workspace, so authenticate and authorize it in your endpoint before calling `agui_stream`.
+
+### Sub-agents (experimental)
+
+A parent can delegate to named sub-agents that run as background tasks, each with its own client, instructions, bundles and tools. This builds on MAF's background-agents provider, which MAF marks experimental; constructing it emits MAF's experimental-feature warning, and the surface may change.
+
+```python
+from sheath import Sheath, SubagentSpec
+
+sheath = Sheath(subagents={
+    "researcher": SubagentSpec(
+        description="reads sources and writes findings to the workspace",
+        instructions="You are a careful researcher. Cite what you read.",
+        bundles=("files", "search", "fetch"),
+        model="gpt-6.1-sol",
+    ),
+    "skimmer": SubagentSpec(
+        description="cheap first pass: counts, lists, quick lookups",
+        bundles=("files", "code"),
+        model="gpt-5-mini",
+        max_round_trips=8,
+    ),
+})
+result = sheath.solve("Find and compare the three most recent filings; have a sub-agent do the reading.")
+```
+
+The parent starts and collects tasks through MAF's `background_agents_*` tools (`start_task`, `wait_for_first_completion`, `continue_task`, and so on). `SubagentSpec` fields:
+
+| Field | Notes |
+|---|---|
+| `description` | Required. Shown to the parent model; it is how the parent chooses between sub-agents |
+| `instructions` | The sub-agent's domain prompt (like `agent_instructions`) |
+| `bundles` | Capability bundles; `None` uses the parent's selection. A sub-agent cannot have a bundle the parent lacks |
+| `tools` | Extra callables, `ToolFactory`s or MCP tools for this sub-agent |
+| `model` | Model for a client sheath builds; `None` uses `config.model` |
+| `client` | A ready client of its own, used instead of `model` |
+| `max_round_trips` | Per-task tool-loop budget |
+
+**Clients.** Every sub-agent gets its own client: `SubagentSpec.client`, else `client_factory(spec.model or config.model)`. Pass `Sheath(client_factory=...)` to build them (Azure, Foundry, a different provider). Without a factory: if you injected no `client`, the built-in OpenAI client is built for the given model; if you did inject one and a spec has no client of its own, a `ValueError` asks for `client_factory` or `SubagentSpec(client=...)`. Sub-agents may use different models or providers from the parent. MAF's `start_task` takes only an agent name, so the parent picks a model by picking a named sub-agent: declare one per role and model and describe each well.
+
+**Precedence.** `subagents=` is accepted by `Sheath(...)`, `aopen`, `asolve`, `solve` and the module-level `solve`. A per-call value that is not `None` replaces the `Sheath` default whole (as with `agent_instructions`); `{}` means no sub-agents.
+
+**Limits.** `SheathConfig.subagent_max_concurrent` (default `2`) bounds tasks running at once per session; `subagent_task_timeout_s` (default `600`, `None` for no bound) bounds one task, measured from when it gets a slot.
+
+**Waiting and cancelling.** A parent that tries to finish while tasks it started are still running is re-run by sheath (MAF's loop middleware, at most 10 runs; override with `loop_max_iterations` in `agent_kwargs`; a `loop_should_continue` you supply replaces sheath's loop). Any task still running when a turn ends is cancelled, and tasks are cancelled before a workspace is closed or reaped. Hosts with long sub-agent tasks should set generous parent limits: `SheathConfig.tool_loop_max_iterations` and `loop_max_iterations`, because each wait call is one model round-trip and blocks up to 300 s by default (MAF's `background_agents_wait_timeout_seconds`, also passable in `agent_kwargs`).
+
+**Status.** A sub-agent's events carry `agent=<name>`: `started`; per tool call `running`, then `done` or `failed: <ExceptionType>`; and at the end `finished` or `failed: <ExceptionType>`. Failure events carry only the exception type, never its message, because the message can echo untrusted content; the full error reaches the parent model through the task's result.
+
+**AG-UI.** Delegation streams as ordinary tool calls (`background_agents_start_task` and friends), and sub-agent activity streams as `sheath.status` `CUSTOM` events whose value includes `agent`. Status is delivered live, including while the parent is waiting, and the loop's re-run nudges are kept out of the chat stream. By default (no AG-UI thread snapshot store configured) each request starts with fresh task state and task ids restart at 1, so `continue_task` cannot continue a task from an earlier request; within one request it works.
 
 ## Reference
 
@@ -485,6 +534,7 @@ Every session has one **root directory**; everything — handles, agent-written 
 - **Bounded results and reads.** Every built-in tool result has a ceiling: `run_python` keeps the head and tail of `stdout`/`stderr` (`SandboxConfig.max_output_bytes` each) and stores a large emitted result as a handle; `inspect_handle`, `read_file`, `edit_file`, `list_files` and `search` cap what they return. The harness reads sandbox-written and fetched data with bounded memory: files are streamed, only regular files are opened (a FIFO cannot block it), a dataframe handle is never materialized in the host process (previews read one record batch, `inspect_handle(stats=True)` reads footer statistics, and `publish_handle` converts inside the sandbox), and HTTP bodies are streamed up to the byte limit under a total deadline. Document inputs are bounded too: a `read_document` URL download is capped at `FetchConfig.max_bytes` and refused, not truncated, when larger, and a workspace path is copied privately and capped at `SheathConfig.max_input_bytes`. A dataframe whose first row group exceeds 16 MiB gets no head rows or preview (`head_omitted` / "preview omitted"), because Arrow would decode the whole group.
 - **Residual risks.** The harness still parses the parquet footer and first record batch of a file sandboxed code wrote, and an oversized data page is decoded whole. Container-tier disk use is unbounded (`max_file_size_mb` applies to the `local` tier only). DNS rebinding between validation and connect is not closed, and the fetch deadline does not cover DNS resolution (see Layer 3). The `local` tier provides none of the guarantees in this section.
 - **Model-provider storage.** The built-in OpenAI client stores conversations at OpenAI by default. Because this agent sends fetched web pages, documents and workspace data to the model, `create_agent` sends `store=False`, so conversation history is kept in-process and OpenAI is asked not to retain it for later retrieval. That is a request to the provider, not a guarantee of zero retention: the provider's own logging and your account's data controls still apply, and the content is still sent to the model. Opt back in per agent with `default_options={"store": True}`. Connectors without the option are not sent it: clients from `agent_framework_anthropic` (including your subclasses of them) are exempt automatically, because that connector forwards every option to its SDK, which rejects `store`. For any other connector that lacks it, pass `default_options={"store": None}`, which removes the key; it survives the merge across `Sheath(...)`, `aopen(...)` and `solve`/`asolve`.
+- **Sub-agents.** A sub-agent can do nothing the parent could not: it gets a workspace-confined session of the parent's (same root, `safe_path`, sandbox tier, egress guard and spill), a bundle selection limited to the parent's, and the tools its spec names, and it cannot start tasks of its own. Residual risk: a sub-agent's report is model text that the parent reads, so it is treated as data, like fetched content; it can be wrong or carry injected instructions.
 - **Tool isolation.** Wrap stateful tools such as MCP servers in `tool_factory` so each conversation gets its own instance (see [MCP servers](#mcp-servers)).
 
 > The **container tier** is the default and provides real isolation. Select `local` explicitly with `SheathConfig.sandbox.backend = "local"` (or `SHEATH_SANDBOX_BACKEND=local`) to opt out; both sit behind the same `SandboxExecutor` interface.
@@ -562,6 +612,8 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 | `max_emit_bytes` | `1 MiB` | Cap on a sandbox emit payload, checked before parsing |
 | `max_control_bytes` | `8 MiB` | Read cap on the sandbox's new-handles control file |
 | `max_new_handles` | `256` | Handle records adopted per `run_python` call |
+| `subagent_max_concurrent` | `2` | Sub-agent tasks running at once per session; the rest queue |
+| `subagent_task_timeout_s` | `600.0` | Wall-clock bound on one sub-agent task, from when it gets a slot; `None` = no bound |
 | `search` | `SearchConfig()` | Tavily provider, key, `max_results` |
 | `documents` | `DocumentConfig()` | Docling ingestion: `ocr` (off by default) |
 

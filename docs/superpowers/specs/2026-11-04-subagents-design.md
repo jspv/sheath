@@ -174,7 +174,7 @@ input-tree context provider, compaction defaults and refused-kwargs check. It is
   6. spills the text with `_maybe_spill(session, name, text, source="subagent:<name>")`. A
      result over `spill_threshold_bytes` becomes a handle, and the parent sees the summary as
      JSON text. A result over `max_spill_bytes` fails the task with `SpillLimitExceeded`;
-  7. emits `finished`, or `failed: <error>`, and returns a fresh `AgentResponse` holding that
+  7. emits `finished`, or `failed: <ExceptionType>` (the type only; see Status tagging), and returns a fresh `AgentResponse` holding that
      text.
 
 ### The parent waits

@@ -8,6 +8,21 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 
 ## Unreleased
 
+### Sub-agents (experimental)
+- **New:** `subagents={name: SubagentSpec(...)}` on `Sheath`, `aopen`, `asolve` and `solve` gives the
+  parent named sub-agents that run as background tasks (MAF's background-agents provider, which
+  MAF marks experimental). Each has its own client (`SubagentSpec.client`, or
+  `client_factory(spec.model or config.model)`), instructions, bundles and tools, and is confined
+  to the parent's workspace and capabilities. `Sheath(client_factory=...)` is new.
+- Parents wait for their running tasks (re-run, cap 10, `loop_max_iterations`); tasks still
+  running at turn end are cancelled, and before a workspace closes.
+- `SheathConfig.subagent_max_concurrent` (`2`) and `subagent_task_timeout_s` (`600.0`).
+- **Additive:** `StatusEvent.agent` names the sub-agent that produced an event (`None` for the
+  parent); AG-UI `sheath.status` values include it. Sub-agent failure events carry only the
+  exception type.
+- AG-UI streams sub-agent status live, including during waits, and keeps the loop's re-run
+  nudges out of the chat.
+
 ### `search` sees exactly what `list_files` lists
 - **Behavior change:** ripgrep ran with its defaults, so hidden paths and anything a `.gitignore`
   or `.ignore` in the workspace named were invisible to `search` while `read_file` and
