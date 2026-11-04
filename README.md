@@ -248,7 +248,7 @@ If you already hold a fully-built MAF chat client (your own custom-auth Azure / 
 The sheath serves both one-shot and continuous (multi-turn) interactions from any frontend.
 
 - **One-shot** (`solve`) is ephemeral — it runs and **cleans up its workspace** when done. Pass `keep=True` to retain the audit trail (`result.session_dir`).
-- **Continuous** keeps a persistent workspace (handles + sandbox files) and conversation history across turns, until you close it (or an optional idle TTL expires).
+- **Continuous** keeps a persistent workspace (handles + sandbox files) and conversation history across turns, until you close it (or an optional idle TTL expires). Closing deletes the workspace unless `SheathConfig.keep_conversation_workspaces=True` (or `aopen(id, keep=True)` for one conversation; `agui_stream` follows the config): then close, `aclose_sessions()` and idle expiry release the conversation but leave `<root>/<id>` on disk as the audit trail, for you or a reaper to remove. Re-opening a kept id resumes its files and handles.
 
 ```python
 import asyncio
@@ -523,6 +523,7 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 | `tool_loop_max_consecutive_errors` | `None` | Tool errors in a row before the loop stops; `None` keeps the client's setting (MAF default 3). Applied to the chat client |
 | `root_dir` | `None` | `None` → a fresh one-shot dir `./.sheath/runs/run-XXXXXXXX`; continuous conversations use `./.sheath/sessions/<id>` (or `<root_dir>/<id>`) |
 | `idle_ttl_s` | `None` | Continuous-session idle TTL; `None` → never expire |
+| `keep_conversation_workspaces` | `False` | Leave a continuous conversation's workspace on disk when it closes or expires; `aopen(..., keep=)` overrides it per conversation |
 | `max_publish_bytes` | `100 MiB` | Largest file `publish_file` / `publish()` will deliver |
 | `max_input_bytes` | `100 MiB` | Largest upload `add_input` will accept |
 | `sandbox` | `SandboxConfig()` | `backend` (`container` by default; `local` = no isolation), `container_runtime`, timeout, limits, network, `pip_packages`, preinstalled libs, `require_isolation` (`False` — refuses a non-container backend however it was selected), `build_on_demand` (`None` → build unless isolation is required), `build_timeout_s` (`900`). **`max_file_size_mb` is enforced by the `local` tier only** — under the default `container` backend it has no effect (memory/cpu/pid limits and the network setting apply instead) |

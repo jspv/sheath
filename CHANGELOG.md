@@ -51,6 +51,13 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
   already set them on its client is unaffected. A limit on a client without a tool loop, or
   out of range, raises `ValueError`.
 
+### Keep a conversation's workspace after it closes
+- New `SheathConfig.keep_conversation_workspaces` (default `False`) and `aopen(..., keep=)`
+  to override it per conversation. With it set, closing a conversation,
+  `aclose_sessions()` and idle expiry release it but leave `<root>/<id>` on disk, so the
+  workspace can serve as the audit trail; re-opening the id resumes its files and handles.
+  `agui_stream` follows the config. The one-shot path already had `keep=True`.
+
 ## 0.3.0 — 2026-11-01
 
 ### `search` and `read_file` share 1-based line numbers

@@ -118,6 +118,9 @@ class SheathConfig:
     root_dir: Path | None = None  # None -> a fresh one-shot dir ./.sheath/runs/run-XXXXXXXX
     cleanup: bool = False  # delete the root on async-context exit (throwaway runs)
     idle_ttl_s: float | None = None  # continuous-session idle TTL (None = never expire)
+    # Leave a continuous conversation's workspace (<root>/<id>) on disk when it is closed or
+    # expires, e.g. when the workspace is the audit trail. aopen(keep=...) overrides it.
+    keep_conversation_workspaces: bool = False
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     fetch: FetchConfig = field(default_factory=FetchConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
