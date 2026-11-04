@@ -97,6 +97,11 @@ class SheathConfig:
     max_spill_bytes: int = 100 * 1024 * 1024   # upper edge: a return over this is rejected, not stored
     max_context_window_tokens: int = 128_000
     max_output_tokens: int = 4096
+    # Compaction (the framework's context-window strategy). The input budget is the window
+    # minus max_output_tokens; past 50% of it, tool-call groups older than the newest
+    # keep_last_tool_call_groups are collapsed to summaries; past 80%, the oldest groups are
+    # dropped, but never the first user message (the task itself).
+    keep_last_tool_call_groups: int = 4
     # Control-plane bounds (parent <-> sandbox channel). These live here rather than on
     # SandboxConfig because they bound the orchestration channel, not a backend's behavior.
     max_emit_bytes: int = 1024 * 1024          # emit payload cap, checked before parsing

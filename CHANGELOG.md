@@ -24,6 +24,16 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 - `default_options={"store": None}` removes the key for any client, at any level
   (`Sheath(...)`, `aopen(...)`, `solve`/`asolve`), for connectors sheath does not know.
 
+### Compaction never drops the original request
+- **Fix:** MAF's default context-window compaction removes the oldest non-system messages once
+  a conversation passes 80% of the input budget. In a one-shot task that is the task itself,
+  so a long run carried on without knowing what it was asked. `create_agent` now builds the
+  strategy with `preserve_first_user_group=True` unless you pass your own.
+- New `SheathConfig.keep_last_tool_call_groups` (default 4, MAF's default): how many recent
+  tool-call groups stay verbatim when older ones are collapsed to summaries.
+- The core instructions tell the model that older tool results may be collapsed, and to keep
+  important intermediate findings in a handle or a workspace file.
+
 ## 0.3.0 — 2026-11-01
 
 ### `search` and `read_file` share 1-based line numbers

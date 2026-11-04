@@ -304,6 +304,7 @@ class Session:
 
         maf_kwargs.setdefault("max_context_window_tokens", self.config.max_context_window_tokens)
         maf_kwargs.setdefault("max_output_tokens", self.config.max_output_tokens)
+        _default_compaction(maf_kwargs, self.config.keep_last_tool_call_groups)
         # The framework wires a tool-approval middleware by default that raises unless every
         # run() is given an AgentSession. We have no approval flow, and the returned agent is
         # public API, so keep it off: callers can run() it bare.
@@ -504,6 +505,34 @@ def _lacks_store_option(client: Any) -> bool:
     """Whether ``client``'s class, or any base class, comes from a connector without `store`."""
     return any((cls.__module__ or "").split(".")[0] in _NO_STORE_CONNECTORS
                for cls in type(client).__mro__)
+
+
+def _default_compaction(maf_kwargs: dict[str, Any], keep_last_tool_call_groups: int) -> None:
+    """Fill in the compaction strategies the caller did not pass, in place.
+
+    Mirrors the framework's own default (one context-window strategy shared by the per-call
+    and post-turn phases) except that truncation never drops the first user message: in a
+    one-shot task that message is the task, and a long run would go on without it.
+    """
+    if maf_kwargs.get("disable_compaction"):
+        return
+    if (maf_kwargs.get("before_compaction_strategy") is not None
+            and maf_kwargs.get("after_compaction_strategy") is not None):
+        return
+    window, output = maf_kwargs.get("max_context_window_tokens"), maf_kwargs.get("max_output_tokens")
+    if window is None or output is None:
+        return  # no budget: the framework builds no token strategy either
+    from agent_framework import ContextWindowCompactionStrategy
+
+    strategy = ContextWindowCompactionStrategy(
+        max_context_window_tokens=window, max_output_tokens=output,
+        tokenizer=maf_kwargs.get("tokenizer"),
+        keep_last_tool_call_groups=keep_last_tool_call_groups,
+        preserve_first_user_group=True,
+    )
+    for phase in ("before_compaction_strategy", "after_compaction_strategy"):
+        if maf_kwargs.get(phase) is None:
+            maf_kwargs[phase] = strategy
 
 
 def _build_sandbox(root: Path, store: HandleStore, sandbox_config: SandboxConfig,
