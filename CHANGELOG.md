@@ -42,6 +42,15 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
   `max_host_payload_size_bytes` to 1 byte, so no copy is kept, and downgrades MAF's resulting
   per-call warning to debug. A limit you set on the tool is left alone and warns as before.
 
+### Tool-loop limits are sheath settings
+- New `SheathConfig.tool_loop_max_iterations` and `tool_loop_max_consecutive_errors`. MAF
+  ends a turn after 40 model round-trips and after 3 tool errors in a row; long tool-driven
+  tasks need more. MAF reads both only from the chat client's
+  `function_invocation_configuration`, so `create_agent` sets them there: every agent sharing
+  the client gets them. `None` (the default) leaves the client's own setting, so a host that
+  already set them on its client is unaffected. A limit on a client without a tool loop, or
+  out of range, raises `ValueError`.
+
 ## 0.3.0 — 2026-11-01
 
 ### `search` and `read_file` share 1-based line numbers

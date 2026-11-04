@@ -58,7 +58,7 @@ The central design move is keeping large data out of context. When a tool, MCP s
   "preview": "date,units,revenue\n2025-01-01,12,840.0\n... (5 of 480000 rows)" }
 ```
 
-~200 tokens stand in for 18 MB. To actually work with the data, the agent is given a **computer**: it writes `.py` scripts and runs them in a sandbox that speaks the same handle store (`load(id)` / `save(id, obj)`). Only the small value it deliberately prints/returns flows back into context; derived data becomes new handles. The loop follows a **search → read → analyze** triad: `search` to locate, `read_file` to load the right slice, `run_python` to analyze.
+~200 tokens stand in for 18 MB. To actually work with the data, the agent is given a **computer**: it writes `.py` scripts and runs them in a sandbox that speaks the same handle store (`load(id)` / `save(id, obj)`). Only the small value it deliberately prints/returns flows back into context; derived data becomes new handles. The loop follows a **search → read → analyze** triad: `search` to locate, `read_file` to load the right slice, `run_python` to analyze. A turn's loop ends when the model answers, or after 40 model round-trips or 3 tool errors in a row (MAF's limits). Raise them with `SheathConfig.tool_loop_max_iterations` and `tool_loop_max_consecutive_errors`; MAF reads them only from the chat client, so sheath sets them there, and every agent sharing that client gets them.
 
 ## Getting started
 
@@ -519,6 +519,8 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 | `max_context_window_tokens` | `128_000` | Fed to MAF compaction; the input budget is this minus `max_output_tokens` |
 | `max_output_tokens` | `4096` | |
 | `keep_last_tool_call_groups` | `4` | Compaction: past 50% of the input budget, tool-call groups older than the newest N are collapsed to summaries; past 80%, the oldest groups are dropped, never the first user message (the task) |
+| `tool_loop_max_iterations` | `None` | Model round-trips per turn before the loop stops; `None` keeps the client's setting (MAF default 40). Applied to the chat client |
+| `tool_loop_max_consecutive_errors` | `None` | Tool errors in a row before the loop stops; `None` keeps the client's setting (MAF default 3). Applied to the chat client |
 | `root_dir` | `None` | `None` → a fresh one-shot dir `./.sheath/runs/run-XXXXXXXX`; continuous conversations use `./.sheath/sessions/<id>` (or `<root_dir>/<id>`) |
 | `idle_ttl_s` | `None` | Continuous-session idle TTL; `None` → never expire |
 | `max_publish_bytes` | `100 MiB` | Largest file `publish_file` / `publish()` will deliver |

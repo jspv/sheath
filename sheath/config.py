@@ -102,6 +102,12 @@ class SheathConfig:
     # keep_last_tool_call_groups are collapsed to summaries; past 80%, the oldest groups are
     # dropped, but never the first user message (the task itself).
     keep_last_tool_call_groups: int = 4
+    # Tool loop: MAF ends a turn after this many model round-trips, or after this many tool
+    # errors in a row. MAF reads both from the chat client, so they are applied to it (every
+    # agent sharing the client sees them). None leaves the client's own setting, which on a
+    # fresh client is MAF's default: 40 round-trips and 3 consecutive errors.
+    tool_loop_max_iterations: int | None = None
+    tool_loop_max_consecutive_errors: int | None = None
     # Control-plane bounds (parent <-> sandbox channel). These live here rather than on
     # SandboxConfig because they bound the orchestration channel, not a backend's behavior.
     max_emit_bytes: int = 1024 * 1024          # emit payload cap, checked before parsing

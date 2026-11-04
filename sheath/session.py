@@ -303,6 +303,7 @@ class Session:
             else:
                 external.append(spill_tool(self, tool))
 
+        _apply_tool_loop_limits(client, self.config)
         maf_kwargs.setdefault("max_context_window_tokens", self.config.max_context_window_tokens)
         maf_kwargs.setdefault("max_output_tokens", self.config.max_output_tokens)
         _default_compaction(maf_kwargs, self.config.keep_last_tool_call_groups)
@@ -573,6 +574,30 @@ def _default_compaction(maf_kwargs: dict[str, Any], keep_last_tool_call_groups: 
     for phase in ("before_compaction_strategy", "after_compaction_strategy"):
         if maf_kwargs.get(phase) is None:
             maf_kwargs[phase] = strategy
+
+
+def _apply_tool_loop_limits(client: Any, config: SheathConfig) -> None:
+    """Set the configured tool-loop limits on ``client``, where MAF reads them.
+
+    MAF has no per-agent or per-request form of these limits, only the client's
+    ``function_invocation_configuration``. A limit left at None is not touched, so a host's
+    own setting on the client survives.
+    """
+    limits = {"max_iterations": ("tool_loop_max_iterations", 1),
+              "max_consecutive_errors_per_request": ("tool_loop_max_consecutive_errors", 0)}
+    chosen = {key: getattr(config, field) for key, (field, _) in limits.items()
+              if getattr(config, field) is not None}
+    for key, value in chosen.items():
+        field, least = limits[key]
+        if value < least:
+            raise ValueError(f"SheathConfig.{field} must be at least {least}, got {value}")
+    if not chosen:
+        return
+    settings = getattr(client, "function_invocation_configuration", None)
+    if not isinstance(settings, dict):
+        raise ValueError(f"{type(client).__name__} has no function_invocation_configuration, "
+                         "so the SheathConfig tool-loop limits cannot be applied to it")
+    settings.update(chosen)
 
 
 def _build_sandbox(root: Path, store: HandleStore, sandbox_config: SandboxConfig,
