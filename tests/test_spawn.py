@@ -128,9 +128,10 @@ def test_spawn_two_with_different_models_and_tools(tmp_path):
     assert "A" in got["f1"] and "B" in got["f2"]
     files = {"read_file", "write_file", "edit_file", "list_files", "search", "inspect_handle"}
     small, big = factory.made[0][1], factory.made[1][1]
-    # send_message: every agent has it when the host's policy is on (messaging).
-    assert small.calls and all(set(c) == files | {"tool_a", "send_message"} for c in small.calls)
-    assert big.calls and all(set(c) == files | {"run_python", "tool_b", "send_message"}
+    # send_message, wait_for_message: every agent has them when the host's policy is on.
+    msg = {"send_message", "wait_for_message"}
+    assert small.calls and all(set(c) == files | {"tool_a"} | msg for c in small.calls)
+    assert big.calls and all(set(c) == files | {"run_python", "tool_b"} | msg
                              for c in big.calls)
     assert snap == {"nodes": ["a", "b"], "records": 2, "total": 2, "folders": ["a", "b"]}
     d = sess.delegation

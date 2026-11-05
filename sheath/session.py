@@ -523,7 +523,8 @@ class Session:
         if message_node is not None:
             from .delegation import MessagingProvider
             # Offers nothing until the session has a spawn policy (checked at each run).
-            providers.append(MessagingProvider(self.delegation, message_node))
+            msg_kw = {} if wait_timeout is None else {"wait_timeout_s": wait_timeout}
+            providers.append(MessagingProvider(self.delegation, message_node, **msg_kw))
         builtin = self.tools(*bundles)
         external: list = []
         for tool in tools or []:

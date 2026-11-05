@@ -29,12 +29,11 @@ def test_live_spawn_two_subagents_one_messages_the_other(tmp_path):
         try:
             return await conv.aask(
                 "Use spawn_subagent to create two sub-agents on model "
-                f"{MODEL}. First spawn `alpha` with the task: 'Pick the number 7 and use "
-                "send_message to tell `beta` the number, then reply done.' Give alpha "
-                "message_to=['beta']. Then spawn `beta` with the task: 'Wait for a message "
-                "from alpha containing a number; when it arrives, reply with that number "
-                "times 6.' Spawn beta BEFORE alpha so the recipient exists. Wait for both, "
-                "then reply with beta's result."
+                f"{MODEL}. First spawn `beta` with the task: 'Use wait_for_message to wait "
+                "for a message from alpha containing a number; when it arrives, reply with "
+                "that number times 6.' Then spawn `alpha` with the task: 'Pick the number 7 "
+                "and use send_message to tell `beta` the number, then reply done.' Give alpha "
+                "message_to=['beta']. Wait for both, then reply with beta's result."
             )
         finally:
             await conv.aclose()

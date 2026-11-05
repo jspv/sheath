@@ -9,6 +9,18 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 0.4.0 adds sub-agents, runtime sub-agents and messaging (all experimental) and caps
 `agent-framework-core` below 1.25.
 
+## Unreleased
+
+### Waiting for a message
+- **New:** `wait_for_message(timeout_s=None)`, offered with `send_message`. It blocks until
+  another agent messages the caller, returning at once if one is already queued, and otherwise
+  after `timeout_s` (at most, and by default, `background_agents_wait_timeout_seconds`, 300 s).
+  A waiting sub-agent frees its concurrency slot and its task clock pauses. Before, a sub-agent
+  told to wait for a message had no tool to wait with and could end its task before the
+  message arrived.
+- `send_message` to an agent that is not running, and has no task starting, now replies
+  `Message sent to <path>. <path> is not running: it will see the message when it next runs.`
+
 ## 0.4.0 — 2026-11-05
 
 ### `agent-framework-core` is capped below 1.25

@@ -80,6 +80,10 @@ def label(sender, msg):
     return f"[message from {sender}] {msg}"
 
 
+def idle_reply(path):
+    return f"Message sent to {path}. {path} is not running: it will see the message when it next runs."
+
+
 def setup(tmp_path, script, factory, *, policy=None, extra_tools=(), events=None, gates=None):
     box: dict = {}
     gates = gates if gates is not None else {}
@@ -119,7 +123,7 @@ def test_message_to_idle_agent_delivered_next_task(tmp_path):
     sess, _ = setup(tmp_path, script, Queue(a))
     node = sess.delegation.node("a")
     msg = label(TOP, "context for later")
-    assert got["m1"] == "Message sent to a."
+    assert got["m1"] == idle_reply("a")
     assert not any(msg in t for t in a_calls[0])
     assert sum(t == msg for t in a_calls[1]) == 1
     assert node.inbox == []
@@ -147,7 +151,7 @@ def test_status_event_without_text(tmp_path):
     script = [spawn("a", 1), send("a", "TOP-SECRET-PAYLOAD", 1), probe("a"), results(1, 1),
               record(got)]
     setup(tmp_path, script, Queue([text("a-done")]), events=events)
-    assert got["m1"] == "Message sent to a."
+    assert got["m1"] in ("Message sent to a.", idle_reply("a"))   # a may finish first
     sent = [e for e in events if e.tool == "sheath" and e.message.startswith("message to")]
     # The main agent is None on status events (StatusEvent's contract).
     assert [(e.message, e.agent) for e in sent] == [("message to a", None)]
@@ -270,7 +274,7 @@ def test_deny_holds_down_the_tree(tmp_path):
     sess, _ = setup(tmp_path, script, Queue(x, b, c))
     assert c_got["m1"] == "Message sent to x."
     assert c_got["m2"].startswith("Error: ") and "may not message 'x'" in c_got["m2"]
-    assert c_got["m3"] == "Message sent to x."
+    assert c_got["m3"] in ("Message sent to x.", idle_reply("x"))   # x may have finished
     assert sess.delegation.messages_sent == 2
 
 
@@ -343,7 +347,7 @@ def test_declared_role_message_to(tmp_path):
 
     sess = asyncio.run(asyncio.wait_for(main(), 5))
     d = sess.delegation
-    assert got["m1"] == "Message sent to b."
+    assert got["m1"] == idle_reply("b")                      # b never started
     assert got["m2"] == f"Message sent to {TOP}."
     assert top_got["p1"].startswith("Message permissions of b updated")
     assert d.node("b").message_to == {"a"}
@@ -389,7 +393,7 @@ def test_size_cap_refused_with_file_hint(tmp_path):
     assert reply.startswith("Error: ") and "max_message_chars" in reply
     assert "file" in reply and "path" in reply
     assert "x" * 11 not in reply
-    assert got["m2"] == "Message sent to a."
+    assert got["m2"] in ("Message sent to a.", idle_reply("a"))
     assert sess.delegation.messages_sent == 1
     assert len([e for e in events if e.message.startswith("message to")]) == 1
 
@@ -401,7 +405,8 @@ def test_count_cap_refused(tmp_path):
               send("a", "three", 4), probe("a"), results(1, 1), record(got)]
     sess, _ = setup(tmp_path, script, Queue([text("a-done")]), policy=policy)
     assert got["m1"].startswith("Error: ")                 # refused: does not count
-    assert got["m2"] == got["m3"] == "Message sent to a."
+    assert got["m2"] in ("Message sent to a.", idle_reply("a"))
+    assert got["m3"] in ("Message sent to a.", idle_reply("a"))
     assert got["m4"].startswith("Error: ") and "max_messages" in got["m4"]
     assert sess.delegation.messages_sent == 2
 
@@ -553,6 +558,7 @@ def test_tools_offered(tmp_path):
     assert "send_message" in offered(leaf_client)
     assert "set_message_permissions" not in offered(leaf_client)
     assert {"send_message", "set_message_permissions"} <= offered(lead_client)
+    assert "wait_for_message" in offered(parent) & offered(leaf_client) & offered(lead_client)
 
 
 def test_no_messaging_without_policy(tmp_path):
@@ -568,3 +574,135 @@ def test_no_messaging_without_policy(tmp_path):
     asyncio.run(asyncio.wait_for(main(), 5))
     assert "send_message" not in offered(parent) | offered(role_client)
     assert "set_message_permissions" not in offered(parent)
+    assert "wait_for_message" not in offered(parent) | offered(role_client)
+
+
+# --- wait_for_message --------------------------------------------------------------------------
+
+TIMED_OUT = "No message arrived within {} seconds. Call this tool again to keep waiting."
+
+
+def wait_msg(i, timeout_s=None):
+    args = {} if timeout_s is None else {"timeout_s": timeout_s}
+    return tool_call("wait_for_message", args, f"wm{i}")
+
+
+def until_waiting_tool(box: dict, seen: dict):
+    async def until_waiting(name: str) -> str:
+        """Wait until the named agent is blocked waiting."""
+        sess = box["sess"]
+        node = sess.delegation.node(name)
+
+        async def blocked():
+            while not node._waits:
+                await asyncio.sleep(0.005)
+
+        await asyncio.wait_for(blocked(), 5)
+        seen["free_while_waiting"] = sess._subagent_slots._value
+        return f"{name} waiting"
+
+    return until_waiting
+
+
+def test_wait_for_message_woken_by_sibling(tmp_path):
+    # The live failure: beta must wait for alpha's number. beta blocks in wait_for_message
+    # (giving its slot back), alpha sends once beta is blocked, beta wakes and sees it.
+    box: dict = {}
+    seen: dict = {}
+    got: dict = {}
+    beta_got: dict = {}
+    beta_calls: list = []
+    beta = [wait_msg(1), snap(beta_calls, record(beta_got, lambda m: text("42")))]
+    alpha = [tool_call("until_waiting", {"name": "beta"}, "uw"), send("beta", "7", 1),
+             text("alpha-done")]
+    script = [spawn("beta", 1), spawn("alpha", 2, tools=["until_waiting"], message_to=["beta"]),
+              probe("alpha", "beta"), results(1, 1), record(got)]
+    sess, _, _ = run_tree(tmp_path, script, Queue(beta, alpha),
+                          tools=[tools_for(box), until_waiting_tool(box, seen)], box=box,
+                          cfg={"subagent_max_concurrent": 2})
+    assert beta_got["wm1"] == ARRIVED
+    assert any(label("alpha", "7") in t for t in beta_calls[0])
+    assert got["r1"] == "42"
+    assert seen["free_while_waiting"] == 1        # alpha holds one slot; beta gave its back
+    assert sess._subagent_slots._value == 2       # and every slot came back
+    assert sess.delegation.node("beta")._waits == []
+
+
+def _bare_delegation():
+    from sheath.delegation import AgentNode, Delegation, attach
+
+    class FakeSession:
+        def __init__(self):
+            self.state = {}
+
+    class FakeSess:
+        class status_bus:
+            @staticmethod
+            def emit(e):
+                pass
+
+    d = Delegation(FakeSess())
+    d.policy = SpawnPolicy(models=("m",))
+    top = d.top(TOP)
+    kid = AgentNode(name="kid", path="kid", depth=1, creator=top)
+    d.add_node(kid)
+    s = FakeSession()
+    attach(kid, s)
+    return d, top, kid, s
+
+
+def test_wait_for_message_pending_returns_at_once():
+    async def main():
+        d, top, kid, s = _bare_delegation()
+        assert d.send_message(top, "kid", "ping") == "Message sent to kid."
+        return await asyncio.wait_for(d.wait_message(kid, session=s), 1)
+
+    assert asyncio.run(main()) == ARRIVED
+
+
+def test_wait_for_message_times_out():
+    async def main():
+        d, _, kid, s = _bare_delegation()
+        out = await asyncio.wait_for(d.wait_message(kid, timeout_s=0.05, session=s), 1)
+        return out, kid._waits
+
+    out, waits = asyncio.run(main())
+    assert out == TIMED_OUT.format("0.05")
+    assert waits == []
+
+
+def test_wait_for_message_clamped_to_bound():
+    async def main():
+        d, _, kid, s = _bare_delegation()
+        return await asyncio.wait_for(
+            d.wait_message(kid, timeout_s=10_000, max_s=0.05, session=s), 1)
+
+    assert asyncio.run(main()) == TIMED_OUT.format("0.05")
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("nan"), float("inf"), True, "5"])
+def test_wait_for_message_bad_timeout_refused(bad):
+    async def main():
+        d, _, kid, s = _bare_delegation()
+        return await d.wait_message(kid, timeout_s=bad, session=s)
+
+    out = asyncio.run(main())
+    assert out.startswith("Error: ") and "timeout_s" in out
+
+
+def test_wait_for_message_refused_while_closing():
+    async def main():
+        d, _, kid, s = _bare_delegation()
+        d.closed = True
+        return await d.wait_message(kid, session=s)
+
+    assert asyncio.run(main()).startswith("Error: ")
+
+
+def test_send_to_idle_agent_says_so():
+    from sheath.delegation import detach
+
+    d, top, kid, s = _bare_delegation()
+    detach(kid, s, force=True)
+    assert d.send_message(top, "kid", "later") == idle_reply("kid")
+    assert kid.inbox == [label(TOP, "later")]

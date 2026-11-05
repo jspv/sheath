@@ -583,6 +583,34 @@ class Delegation:
             _finalize(record)
         return f"Task {completed_id} finished with status: {_outcome(fut)}."
 
+    async def wait_message(self, owner: AgentNode, *, timeout_s: Any = None,
+                           max_s: float = DEFAULT_WAIT_TIMEOUT_S, session: Any = None) -> str:
+        """``wait_for_message``: block until a ``send_message`` message reaches the run on
+        ``session`` (any run of ``owner`` when None), or ``timeout_s`` passes (at most, and by
+        default, ``max_s``). A message already queued there unseen returns at once. Like
+        ``wait_first``, a waiting sub-agent frees its slot and its clock pauses."""
+        if self.closed:
+            return "Error: Session is being released; cannot wait for a message."
+        if timeout_s is None:
+            timeout_s = max_s
+        elif not _is_number(timeout_s) or not _is_finite(timeout_s) or timeout_s <= 0:
+            return "Error: timeout_s must be a positive number of seconds."
+        timeout_s = min(timeout_s, max_s)
+        if session is not None and _message_pending(session):
+            return MESSAGE_ARRIVED
+        entry = (session, asyncio.Event())
+        owner._waits.append(entry)
+        try:
+            async with owner.waiting():
+                try:
+                    await asyncio.wait_for(entry[1].wait(), timeout_s)
+                except TimeoutError:
+                    return (f"No message arrived within {timeout_s:g} seconds. Call this tool "
+                            "again to keep waiting.")
+        finally:
+            owner._waits[:] = [w for w in owner._waits if w is not entry]
+        return MESSAGE_ARRIVED
+
     def results(self, owner: AgentNode, task_id: int) -> str:
         record = self._find(owner, task_id)
         if record is None:
@@ -953,12 +981,17 @@ class Delegation:
             return (f"Error: message limit reached: {self.messages_sent} of "
                     f"{policy.max_messages} messages sent in this conversation (the host's "
                     "max_messages); no more messages can be sent.")
-        deliver(recipient, f"[message from {sender.path}] {text}", message=True)
+        queued_on = deliver(recipient, f"[message from {sender.path}] {text}", message=True)
         self.messages_sent += 1
         from .status import StatusEvent   # local: keep this module's imports light
         self._session.status_bus.emit(StatusEvent(
             tool="sheath", message=f"message to {recipient.path}",
             agent=None if sender.depth == 0 else sender.path))   # None: the main agent
+        starting = any(r.agent is recipient and r.future is not None and not r.future.done()
+                       for r in self._records)   # a task started whose run has not attached yet
+        if queued_on is None and not starting:   # idle: say so, so the sender can act on it
+            return (f"Message sent to {recipient.path}. {recipient.path} is not running: it "
+                    "will see the message when it next runs.")
         return f"Message sent to {recipient.path}."
 
     def set_message_permissions(self, caller: AgentNode, agent: Any, allow: Any = None,
@@ -1318,13 +1351,16 @@ class DelegationProvider(ContextProvider):
 
 
 class MessagingProvider(ContextProvider):
-    """Give one agent node ``send_message`` (when the conversation has a spawn policy) and
-    ``set_message_permissions`` (when it also has, or may create, sub-agents of its own)."""
+    """Give one agent node ``send_message`` and ``wait_for_message`` (when the conversation has
+    a spawn policy) and ``set_message_permissions`` (when it also has, or may create, sub-agents
+    of its own). ``wait_timeout_s`` bounds one ``wait_for_message`` call."""
 
-    def __init__(self, delegation: Delegation, node: AgentNode) -> None:
+    def __init__(self, delegation: Delegation, node: AgentNode, *,
+                 wait_timeout_s: int = DEFAULT_WAIT_TIMEOUT_S) -> None:
         super().__init__(_MESSAGING_SOURCE_ID)
         self._delegation = delegation
         self._node = node
+        self._wait_timeout_s = wait_timeout_s
 
     async def before_run(self, *, agent: Any, session: Any, context: Any,
                          state: dict[str, Any]) -> None:
@@ -1347,6 +1383,21 @@ class MessagingProvider(ContextProvider):
             text: Annotated[str, Field(description="The message")],
         ) -> str:
             return d.send_message(node, to, text)
+
+        max_s = self._wait_timeout_s
+
+        @tool(name="wait_for_message", approval_mode="never_require", description=(
+            "Wait until another agent sends you a message, when your work depends on one you "
+            "expect. Returns as soon as one arrives (it is in your next step), or after "
+            f"timeout_s seconds (at most and by default {max_s}); you can call it again. To "
+            "wait on your own background tasks instead, use "
+            "background_agents_wait_for_first_completion, which also returns when a message "
+            "arrives."))
+        async def wait_for_message(
+            timeout_s: Annotated[float | None, Field(description="Seconds to wait at most; "
+                                                     "omit for the longest allowed")] = None,
+        ) -> str:
+            return await d.wait_message(node, timeout_s=timeout_s, max_s=max_s, session=session)
 
         tools = [send_message]
         if node.can_spawn or d.reachable(node):
@@ -1372,7 +1423,7 @@ class MessagingProvider(ContextProvider):
             t._invoke_sync_on_event_loop = True
         if node.depth == 0:
             context.extend_instructions(self.source_id, [_TOP_MESSAGING_NOTE])
-        context.extend_tools(self.source_id, tools)
+        context.extend_tools(self.source_id, [*tools, wait_for_message])
 
 
 def tasks_running(node: AgentNode) -> Callable[..., bool]:
