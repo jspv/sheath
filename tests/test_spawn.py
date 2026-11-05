@@ -272,7 +272,7 @@ def test_refuse_name_taken_declared(tmp_path):
     declared = {"lead": SubagentSpec(description="d", client=StubChatClient([text("x")]))}
     reply, snap, factory = _refused(tmp_path, spawn("LEAD", 1), subagents=declared)
     assert "name" in reply and "lead" in reply
-    assert snap == {**NOTHING, "nodes": ["lead"]}
+    assert snap == {**NOTHING, "nodes": ["lead"], "folders": ["lead"]}
     assert factory.made == []
 
 
@@ -398,7 +398,7 @@ def test_refuse_factory_returning_declared_client(tmp_path):
     reply, snap, _ = _refused(tmp_path, spawn("a", 1), subagents=declared,
                               factory=lambda m: declared_client)
     assert "client" in reply
-    assert snap == {**NOTHING, "nodes": ["lead"]}
+    assert snap == {**NOTHING, "nodes": ["lead"], "folders": ["lead"]}
 
 
 # --- failures after the reservation release it ---------------------------------------------------
