@@ -111,3 +111,45 @@ def test_spawnpolicy_exported():
 
     assert sheath.SpawnPolicy is sheath.subagents.SpawnPolicy
     assert "SpawnPolicy" in sheath.__all__
+
+
+def test_sync_solve_passes_spawn(tmp_path, monkeypatch):
+    seen = _spy(monkeypatch)
+    default, over = _policy(), _policy("m2")
+    t = _sheath(tmp_path, spawn=default)
+    t.solve("hi", spawn=over)
+    t.solve("hi")
+    assert seen == [over, default]
+
+
+def test_module_solve_passes_spawn(tmp_path, monkeypatch):
+    from sheath import solve
+
+    seen = _spy(monkeypatch)
+    # module solve() has no client_factory; an injected client yields none, so supply one
+    monkeypatch.setattr(Sheath, "_subagent_client_factory", lambda self: _factory)
+    pol = _policy()
+    solve("hi", config=_cfg(tmp_path), client=StubChatClient([text("ok")]),
+          spawn=pol)
+    assert seen == [pol]
+
+
+def test_agui_stream_uses_sheath_default(tmp_path, monkeypatch):
+    import pytest
+
+    pytest.importorskip("agent_framework_ag_ui")
+    seen = _spy(monkeypatch)
+    pol = _policy()
+
+    async def run():
+        t = _sheath(tmp_path, spawn=pol)
+        try:
+            async for _ in t.agui_stream(
+                    {"threadId": "t1", "runId": "r1",
+                     "messages": [{"id": "u1", "role": "user", "content": "go"}]}):
+                pass
+        finally:
+            await t.aclose_sessions()
+
+    asyncio.run(run())
+    assert seen == [pol]
