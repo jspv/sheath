@@ -168,3 +168,55 @@ def test_declared_role_gets_its_folder(tmp_path):
 def test_instructions_allow_delegator_path_override():
     assert "unless the agent that delegated to it said to use another path" \
         in SUBAGENT_INSTRUCTIONS
+
+
+def test_write_file_never_touches_process_umask(tmp_path, monkeypatch):
+    # os.umask is process-wide: setting it from write_file's worker thread would hand umask 0
+    # to any file or subprocess the host creates meanwhile.
+    s = _session(tmp_path)
+
+    def boom(*a):
+        raise AssertionError("os.umask called")
+
+    monkeypatch.setattr(os, "umask", boom)
+    write_file(s, "new.txt", "x")
+    write_file(s, "new.txt", "y")
+    assert (s.root / "new.txt").read_text() == "y"
+
+
+def test_single_agent_never_hashes_whole_files(tmp_path, monkeypatch):
+    # The overwrite guard only matters between agents: a lone agent's reads and writes must
+    # not hash a (possibly huge) file under the io_lock.
+    import sheath.tools.files as files
+
+    s = _session(tmp_path)
+    (s.root / "big.txt").write_text("host data\n")
+
+    def boom(fd):
+        raise AssertionError("hashed a whole file")
+
+    monkeypatch.setattr(files, "_hash_fd", boom)
+    read_file(s, "big.txt")
+    write_file(s, "big.txt", "mine\n")
+    read_file(s, "big.txt")
+    write_file(s, "big.txt", "mine again\n")
+    edit_file(s, "big.txt", "again", "still")
+    assert read_file(s, "big.txt") == "mine still\n"
+
+
+@pytest.mark.parametrize("tool", ["write", "edit"])
+def test_special_mode_bits_not_copied(tmp_path, tool):
+    s = _session(tmp_path)
+    p = s.root / "f.txt"
+    p.write_text("old\n")
+    os.chmod(p, 0o4755)                 # e.g. sandbox code marking the file setuid
+    if not os.stat(p).st_mode & 0o4000:
+        pytest.skip("filesystem does not keep setuid")
+    # Empty content: no write() follows the chmod, and a write() would make the kernel clear
+    # setuid itself, hiding the copy.
+    if tool == "write":
+        write_file(s, "f.txt", "")
+    else:
+        edit_file(s, "f.txt", "old\n", "")
+    mode = os.stat(p).st_mode
+    assert mode & 0o7000 == 0 and mode & 0o777 == 0o755

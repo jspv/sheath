@@ -7,11 +7,11 @@ the sandbox is quarantined), so no sandboxed code runs between a path check and 
 from __future__ import annotations
 
 import errno
+import hashlib
 import os
 import re
+import secrets
 import stat
-import tempfile
-import hashlib
 from pathlib import Path
 
 from .. import status, workspace
@@ -72,6 +72,13 @@ def _check_overwrite(session: Session, rel: str, agent: str | None,
                      "(e.g. under your agents/ folder)")
 
 
+def _written_by_other(session: Session, rel: str, agent: str | None) -> bool:
+    """Whether another agent was the last to write ``rel`` through write_file / edit_file:
+    only then does the overwrite guard need a file's hash. A single-agent run never hashes."""
+    last = session._file_writers.get(rel)
+    return last is not None and last[0] != agent
+
+
 def _record(session: Session, rel: str, agent: str | None, digest: bytes,
             *, wrote: bool) -> None:
     if wrote:
@@ -110,7 +117,11 @@ def read_file(session: Session, path: str, start_line: int = 1, limit: int = _DE
             if b"\0" in os.read(fd, _BINARY_PROBE_BYTES):
                 raise ValueError(f"{path!r} is a binary file; open it inside run_python "
                                  "instead of reading it as text")
-            digest = _hash_fd(fd)   # the whole file, whatever range is returned
+            rel = target.relative_to(session.root).as_posix()
+            agent = status.current_agent()
+            # The whole file, whatever range is returned; only when the guard needs it.
+            digest = _hash_fd(fd) if _written_by_other(session, rel, agent) else None
+            os.lseek(fd, 0, os.SEEK_SET)   # back past the binary probe
             f = open(fd, encoding="utf-8", errors="replace", newline="")  # noqa: SIM115
         except BaseException:
             os.close(fd)
@@ -132,8 +143,8 @@ def read_file(session: Session, path: str, start_line: int = 1, limit: int = _DE
                 if size > max_chars:
                     truncated = True
                     break
-        _record(session, target.relative_to(session.root).as_posix(),
-                status.current_agent(), digest, wrote=False)
+        if digest is not None:
+            _record(session, rel, agent, digest, wrote=False)
     text = "".join(pieces)
     if truncated:
         text = (text[:max_chars]
@@ -162,13 +173,11 @@ def write_file(session: Session, path: str, content: str) -> str:
         try:                               # refuse links / non-regular targets as before
             fd = _open_checked(target, os.O_RDONLY, path)
         except FileNotFoundError:
-            umask = os.umask(0)
-            os.umask(umask)
-            mode, current = 0o666 & ~umask, None
+            mode, current = None, None     # a new file: the kernel applies the umask
         else:
             try:
                 mode = os.fstat(fd).st_mode
-                current = _hash_fd(fd)
+                current = _hash_fd(fd) if _written_by_other(session, rel, agent) else None
             finally:
                 os.close(fd)
         _check_overwrite(session, rel, agent, current)
@@ -282,7 +291,8 @@ def edit_file(session: Session, path: str, old: str, new: str,
                     raise ValueError(f"{path!r} is larger than {_MAX_EDIT_BYTES} bytes")
         finally:
             os.close(fd)
-        _check_overwrite(session, rel, agent, _sha(data))
+        if _written_by_other(session, rel, agent):
+            _check_overwrite(session, rel, agent, _sha(data))
         if b"\0" in data[:_BINARY_PROBE_BYTES]:
             raise ValueError(f"{path!r} is a binary file; edit it inside run_python instead")
         try:
@@ -361,11 +371,15 @@ def _edit_preview(text: str, start: int, length: int) -> str:
     return out
 
 
-def _replace_atomically(target: Path, data: bytes, mode: int) -> None:
-    """Write ``data`` beside ``target`` and rename it into place, keeping ``mode``."""
-    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+def _replace_atomically(target: Path, data: bytes, mode: int | None) -> None:
+    """Write ``data`` beside ``target`` and rename it into place, keeping the permission bits
+    of ``mode`` (never setuid, setgid or sticky: sandboxed code may have set them on the old
+    file). ``mode`` None: a new file, created 0o666 less the umask by the kernel. The process
+    umask is never read or set here: it is process-wide, and this runs in a worker thread."""
+    fd, tmp = _create_temp(target, 0o666 if mode is None else 0o600)
     try:
-        os.fchmod(fd, stat.S_IMODE(mode))
+        if mode is not None:
+            os.fchmod(fd, mode & 0o777)
         view = memoryview(data)
         while view:
             view = view[os.write(fd, view):]
@@ -381,3 +395,17 @@ def _replace_atomically(target: Path, data: bytes, mode: int) -> None:
         except OSError:
             pass                      # keep the original error
         raise
+
+
+def _create_temp(target: Path, perms: int) -> tuple[int, str]:
+    """Create a fresh temp file beside ``target`` with ``perms`` (less the umask), like
+    ``tempfile.mkstemp`` but without its fixed 0o600."""
+    for _ in range(100):
+        tmp = os.path.join(target.parent,
+                           f".{target.name}.{secrets.token_hex(8)}.tmp")
+        try:
+            return os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                           perms), tmp
+        except FileExistsError:
+            continue
+    raise FileExistsError(errno.EEXIST, "no usable temporary name", str(target.parent))
