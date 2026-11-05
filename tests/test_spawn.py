@@ -337,12 +337,8 @@ def test_refuse_empty_bundles(tmp_path):
     assert snap == NOTHING and factory.made == []
 
 
-@pytest.mark.parametrize("kw", [
-    {"timeout_s": 10}, {"max_round_trips": 3}, {"max_subagents": 1}, {"max_depth": 1},
-    {"tools": ["spawn_subagent"]}, {"message_to": ["b"]},
-])
-def test_not_supported_yet(tmp_path, kw):
-    reply, snap, factory = _refused(tmp_path, spawn("a", 1, **kw))
+def test_message_to_not_supported_yet(tmp_path):
+    reply, snap, factory = _refused(tmp_path, spawn("a", 1, message_to=["b"]))
     assert "not supported yet" in reply
     assert snap == NOTHING and factory.made == []
 

@@ -35,6 +35,7 @@ class SubagentSpec:
     model: str | None = None                 # model for a client sheath builds; None = config.model
     client: Any | None = None                # a ready client of its own, instead of model
     max_round_trips: int | None = None       # per-task tool-loop budget
+    can_spawn: bool = False                  # give it spawn_subagent (needs a SpawnPolicy)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -229,9 +230,11 @@ class ConfinedSubagent:
 
     Each run is registered with the session (so it can be cancelled, queued or running), waits
     for one of the session's ``subagent_max_concurrent`` slots, is tagged with the sub-agent's
-    name for status, is bounded by ``subagent_task_timeout_s``, and has its report spilled to a
-    handle when it is large. While it waits on its own sub-agents (``AgentNode.waiting``) it
-    gives its slot back and its clock stops.
+    path for status, is bounded by its node's effective ``timeout_s`` (the host's
+    ``subagent_task_timeout_s`` unless its creator set a lower one), and has its report spilled
+    to a handle when it is large. While it waits on its own sub-agents (``AgentNode.waiting``)
+    it gives its slot back and its clock stops. When it ends, for any reason, every task it
+    started that is still running is cancelled and awaited (the cascade).
     """
 
     def __init__(self, inner: Any, *, node: Any, session: Any) -> None:
@@ -282,16 +285,24 @@ class ConfinedSubagent:
         finally:
             run.close()            # releases only a slot it holds; drops a pending re-acquire
             CURRENT_RUN.reset(token)
-            detach(self._node, session)
-            if task is not None:
-                sess._subagent_tasks.discard(task)
+            try:
+                # Nothing runs under a creator whose task is gone: cancel what this run started.
+                delegation = self._node._delegation
+                if delegation is not None:
+                    await delegation.cascade(self._node, session)
+            finally:
+                detach(self._node, session, force=True)
+                if task is not None:
+                    sess._subagent_tasks.discard(task)
 
     async def _run_tagged(self, messages: Any, session: Any, kwargs: dict[str, Any],
                           maybe_spill: Callable[..., Any], run: RunState) -> AgentResponse:
         sess = self._session
         sess.status_bus.emit(StatusEvent(tool="sheath", message="started", agent=self.name))
         try:
-            timeout = sess.config.subagent_task_timeout_s
+            timeout = self._node.limits.timeout_s   # fixed when the node was created
+            limit_name = ("subagent_task_timeout_s"
+                          if timeout == sess.config.subagent_task_timeout_s else "timeout_s")
             bound = asyncio.timeout(timeout)   # None: no bound
             run.bound = bound                  # waiting() pauses it
             try:
@@ -304,7 +315,7 @@ class ConfinedSubagent:
                 if not bound.expired():
                     raise   # the agent's own TimeoutError, not our bound
                 raise TimeoutError(
-                    f"sub-agent {self.name!r} ran past subagent_task_timeout_s ({timeout:g}s)"
+                    f"sub-agent {self.name!r} ran past {limit_name} ({timeout:g}s)"
                 ) from None
             report = maybe_spill(sess, self.name, response.text,
                                  source=f"subagent:{self.name}")

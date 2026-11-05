@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -47,10 +47,13 @@ _PROVIDER_NOTE = (
 
 @dataclass
 class Limits:
-    timeout_s: float | None
-    max_round_trips: int | None
-    subtree_allowance: int | None
-    remaining_depth: int
+    """One agent's effective limits, fixed when it is created (tighten-only down the tree)."""
+
+    timeout_s: float | None          # wall-clock bound on each of its tasks; None: unbounded
+    max_round_trips: int | None      # model round-trips per task, on its own client
+    subtree_allowance: int | None    # spawns it and everything beneath it may make; None: none
+                                     # of its own (bounded by its ancestors and the total)
+    remaining_depth: int             # levels of nesting that may exist beneath it
 
 
 @dataclass
@@ -157,7 +160,13 @@ class AgentNode:
                                        subtree_allowance=None, remaining_depth=0)
         self.message_to: set[str] = set(message_to or ())
         self.inbox: list[str] = []
-        self.current_session: Any = None
+        # The AgentSessions of its runs in progress, oldest first. A sub-agent can have several
+        # at once (its creator may start a second task on it while one runs); each delivery
+        # goes to the run it belongs to (``deliver``).
+        self.sessions: list[Any] = []
+        self._attached: dict[int, int] = {}   # id(session) -> attach count
+        # Spawns made by it and beneath it, the ones being built included (subtree_allowance).
+        self.spawned_beneath = 0
         self.folder = folder
         self.declared = declared
         self.client = client           # its own chat client (never shared with another agent)
@@ -165,6 +174,14 @@ class AgentNode:
 
     def __repr__(self) -> str:
         return f"AgentNode(path={self.path!r}, depth={self.depth})"
+
+    @property
+    def current_session(self) -> Any:
+        """The most recently attached session of a run in progress, or None."""
+        return self.sessions[-1] if self.sessions else None
+
+    def has_session(self, session: Any) -> bool:
+        return any(s is session for s in self.sessions)
 
     @asynccontextmanager
     async def waiting(self) -> AsyncIterator[None]:
@@ -214,11 +231,15 @@ class TaskRecord:
     """One delegated task: who started it, on which agent, and how it stands."""
 
     def __init__(self, *, id: int, owner: AgentNode, agent: AgentNode, description: str,
-                 future: asyncio.Task | None = None, sub_session: Any = None) -> None:
+                 future: asyncio.Task | None = None, sub_session: Any = None,
+                 origin: Any = None) -> None:
         self.id = id
         self.owner = owner
         self.agent = agent
         self.description = description
+        # The owner's AgentSession whose run started (or last continued) it: its completion
+        # notice goes to that run, and that run's end cancels it (the cascade).
+        self.origin = origin
         self.status: Literal["running", "completed", "failed"] = "running"
         self.result_text: str | None = None
         self.error_text: str | None = None
@@ -226,7 +247,8 @@ class TaskRecord:
         self.sub_session = sub_session
         # Set when a run ends (completed or failed); cleared when the owner reads the result.
         self.unread = False
-        # Set when the host cancelled the run (Delegation.cancel_all): no notice, not unread.
+        # Set when sheath cancelled the run (the host's Delegation.cancel_all, or the cascade
+        # when the run of its owner that started it ended): no notice, not unread.
         self.host_cancelled = False
         self._run: asyncio.Task | None = None    # the current run's future, kept once finalized
         self._read: asyncio.Task | None = None   # the run whose result the owner read
@@ -259,11 +281,16 @@ def _notice(record: TaskRecord, outcome: str) -> str:
             "background_agents_get_task_results]")
 
 
-def deliver(node: AgentNode, text: str) -> None:
-    """Get ``text`` to ``node``'s model: into its next model call if a run of it is in
-    progress (MAF's message injection drains the queue, mid-run included), else into its inbox,
-    which is delivered when its next run starts."""
-    session = node.current_session
+def deliver(node: AgentNode, text: str, session: Any = None) -> None:
+    """Get ``text`` to ``node``'s model: into the next model call of a run of it in progress
+    (MAF's message injection drains the queue, mid-run included), else into its inbox, which is
+    delivered when its next run starts.
+
+    ``session`` names the run it belongs to (the one that started the task it reports on):
+    used while that run is in progress. Otherwise it goes to the most recent run in progress,
+    or to the inbox when none is."""
+    if session is None or not node.has_session(session):
+        session = node.current_session
     if session is None:
         node.inbox.append(text)
         return
@@ -287,26 +314,45 @@ def _reclaim(node: AgentNode, session: Any) -> None:
     node.inbox.extend(m.text for m in ours)
 
 
-def attach(node: AgentNode, session: Any) -> None:
-    """A run of ``node`` starts on ``session``: deliveries go there, the inbox first.
+def _drop_session(node: AgentNode, session: Any) -> None:
+    _reclaim(node, session)
+    node.sessions[:] = [s for s in node.sessions if s is not session]
+    node._attached.pop(id(session), None)
 
-    A previous session not detached (its run raised before ``after_run``) gives back what it
-    still holds undelivered, so nothing is stranded on a session that will not run again."""
-    previous = node.current_session
-    if previous is not None and previous is not session:
-        _reclaim(node, previous)
-    node.current_session = session
+
+def attach(node: AgentNode, session: Any) -> None:
+    """A run of ``node`` starts on ``session``: its deliveries go there, the inbox first.
+
+    Counted: a ``ConfinedSubagent`` run and the delegation provider inside it both attach the
+    one session, and it stays attached until both detach (or the run ends, ``force``).
+
+    The top agent runs one turn at a time, so for it a previous session still attached is one
+    whose run raised before ``after_run``: it gives back what it still holds undelivered, so
+    nothing is stranded on a session that will not run again. A sub-agent's runs always detach
+    (``ConfinedSubagent.run``'s ``finally``), so another session of it is a concurrent run."""
+    if node.depth == 0:
+        for stale in [s for s in node.sessions if s is not session]:
+            _drop_session(node, stale)
+    key = id(session)
+    if key not in node._attached:
+        node.sessions.append(session)
+        node._attached[key] = 0
+    node._attached[key] += 1
     if node.inbox:
         pending, node.inbox[:] = list(node.inbox), []
         for text in pending:
-            deliver(node, text)
+            deliver(node, text, session)
 
 
-def detach(node: AgentNode, session: Any) -> None:
-    """A run of ``node`` on ``session`` ended: later deliveries wait in the inbox."""
-    if node.current_session is session:
-        _reclaim(node, session)
-        node.current_session = None
+def detach(node: AgentNode, session: Any, *, force: bool = False) -> None:
+    """A run of ``node`` on ``session`` ended (its last attach, or any with ``force``): what is
+    still queued on it undrained, and later deliveries for it, wait in the inbox."""
+    key = id(session)
+    if key not in node._attached:
+        return
+    node._attached[key] -= 1
+    if force or node._attached[key] <= 0:
+        _drop_session(node, session)
 
 
 def _log_abandoned(task: asyncio.Task) -> None:
@@ -373,7 +419,7 @@ class Delegation:
     def _notify(self, record: TaskRecord, outcome: str | None = None) -> None:
         """Tell the owner its task ended (``outcome``, else the record's status), not what it
         returned: the result stays out of the owner's context until it reads it."""
-        deliver(record.owner, _notice(record, outcome or record.status))
+        deliver(record.owner, _notice(record, outcome or record.status), record.origin)
 
     def _watch(self, record: TaskRecord) -> None:
         """When ``record``'s current run ends, mark it unread and notify the owner, unless the
@@ -406,16 +452,25 @@ class Delegation:
     def _find(self, owner: AgentNode, task_id: int) -> TaskRecord | None:
         return next((r for r in self._refresh(owner) if r.id == task_id), None)
 
-    def running_owned(self, owner: AgentNode) -> list[TaskRecord]:
-        """``owner``'s tasks still running (refreshed first: a finished run is not counted)."""
-        return [r for r in self._refresh(owner) if r.status == "running"]
+    def _of_run(self, owner: AgentNode, session: Any) -> list[TaskRecord]:
+        """``owner``'s tasks (refreshed), only those its run on ``session`` started when
+        ``owner`` is a sub-agent and ``session`` is given: concurrent runs of one sub-agent each
+        wait for their own. The top agent runs one turn at a time, so all of its count."""
+        records = self._refresh(owner)
+        if session is None or owner.depth == 0:
+            return records
+        return [r for r in records if r.origin is session]
 
-    def unread_owned(self, owner: AgentNode) -> list[TaskRecord]:
+    def running_owned(self, owner: AgentNode, session: Any = None) -> list[TaskRecord]:
+        """``owner``'s tasks still running (refreshed first: a finished run is not counted)."""
+        return [r for r in self._of_run(owner, session) if r.status == "running"]
+
+    def unread_owned(self, owner: AgentNode, session: Any = None) -> list[TaskRecord]:
         """``owner``'s finished tasks whose result it has not read since they finished."""
-        return [r for r in self._refresh(owner) if r.status != "running" and r.unread]
+        return [r for r in self._of_run(owner, session) if r.status != "running" and r.unread]
 
     def start_task(self, owner: AgentNode, agent_name: str, input: str,
-                   description: str) -> str:
+                   description: str, origin: Any = None) -> str:
         if self.closed:
             return "Error: Session is being released; cannot start a new background task."
         target = next((n for n in self.reachable(owner)
@@ -427,7 +482,8 @@ class Delegation:
         sub_session = target.agent.create_session()
         future = asyncio.create_task(target.agent.run(input, session=sub_session))
         record = TaskRecord(id=self._next_id, owner=owner, agent=target,
-                            description=description, future=future, sub_session=sub_session)
+                            description=description, future=future, sub_session=sub_session,
+                            origin=origin)
         self._next_id += 1
         self._records.append(record)
         self._watch(record)
@@ -483,7 +539,8 @@ class Delegation:
             return "No tasks."
         return "\n".join(["Tasks:", *(_task_line(r) for r in records)])
 
-    def continue_task(self, owner: AgentNode, task_id: int, text: str) -> str:
+    def continue_task(self, owner: AgentNode, task_id: int, text: str,
+                      origin: Any = None) -> str:
         if self.closed:
             return "Error: Session is being released; cannot continue a background task."
         record = self._find(owner, task_id)
@@ -500,6 +557,7 @@ class Delegation:
             record.agent.agent.run(text, session=record.sub_session))
         record.status, record.result_text, record.error_text = "running", None, None
         record.unread = record.host_cancelled = False
+        record.origin = origin
         self._watch(record)
         return f"Task {task_id} continued with new input."
 
@@ -527,30 +585,54 @@ class Delegation:
         allowed = self.policy.max_subagents
         return max(allowed - self.spawned_total - len(self._pending), 0), allowed
 
+    def remaining_allowance(self, node: AgentNode) -> int:
+        """How many more sub-agents ``node`` may create now: the least of the conversation's
+        remaining budget and every allowance on the way up (its own included), spawns being
+        built counted."""
+        remaining = self.spawn_budget()[0]
+        for n in _chain(node):
+            if n.limits.subtree_allowance is not None:
+                remaining = min(remaining, n.limits.subtree_allowance - n.spawned_beneath)
+        return max(remaining, 0)
+
     def spawn_description(self, owner: AgentNode) -> str:
-        """``spawn_subagent``'s description for ``owner``: models, default and budget now."""
+        """``spawn_subagent``'s description for ``owner``: models, default, budget and its own
+        limits now."""
         policy = self.policy
         remaining, allowed = self.spawn_budget()
-        tools = ", ".join(owner.tool_objects) or "none"
+        lim = owner.limits
+        handable = list(owner.tool_objects)
+        if lim.remaining_depth >= 2:
+            handable.append("spawn_subagent")
+        own = (f"its max_subagents={lim.subtree_allowance}"
+               if lim.subtree_allowance is not None else "no allowance of its own")
         return (
             "Create a new sub-agent and start its first task in one step. Write its whole role "
             "in instructions; it does not see your conversation. It works in this workspace "
             "under your limits, with only the tools and bundles you hand down (tools: none "
             "unless named; bundles: all of yours unless named). Returns the task id; continue "
             "with the background_agents_* tools, and give it later tasks with "
-            "background_agents_start_task by name.\n"
+            "background_agents_start_task by name. Its limits (timeout_s, max_round_trips, and "
+            "with spawn_subagent handed down, max_subagents and max_depth) default to yours and "
+            "may only be lower.\n"
             f"Allowed models: {', '.join(policy.models)}. "
             f"Default model: {policy.effective_default}.\n"
             f"Sub-agent budget: {remaining} of {allowed} remaining in this conversation.\n"
-            f"Tools you can hand down: {tools}. "
+            f"Your limits: timeout_s={_limit(lim.timeout_s)}, "
+            f"max_round_trips={_limit(lim.max_round_trips)}; you and the sub-agents beneath "
+            f"you may create {self.remaining_allowance(owner)} more ({own}); max_depth: "
+            f"{lim.remaining_depth} level(s) may exist beneath you, so a sub-agent you create "
+            f"may be given max_depth up to {max(lim.remaining_depth - 1, 0)}.\n"
+            f"Tools you can hand down: {', '.join(handable) or 'none'}. "
             f"Your bundles: {', '.join(owner.bundles) or 'none'}."
         )
 
-    def _spawn_refusal(self, owner: AgentNode, *, name: Any, instructions: Any, task: Any,
-                       model: Any, tools: list[str], bundles: Any, message_to: Any,
-                       timeout_s: Any, max_round_trips: Any, max_subagents: Any,
-                       max_depth: Any) -> str | None:
-        """The first rule the call breaks, in the spec table's order (total cap last)."""
+    def _check_spawn(self, owner: AgentNode, *, name: Any, instructions: Any, task: Any,
+                     model: Any, tools: list[str], bundles: Any, message_to: Any,
+                     timeout_s: Any, max_round_trips: Any, max_subagents: Any,
+                     max_depth: Any) -> Limits | str:
+        """The first rule the call breaks, in the spec table's order (allowances, then the
+        total cap, last), as an ``Error: `` string; else the new sub-agent's limits."""
         from .subagents import _NAME_PATTERN, _NAME_RE   # local: subagents imports this module
 
         policy = self.policy
@@ -577,8 +659,11 @@ class Delegation:
             have = ", ".join(owner.tool_objects) or "none"
             return (f"Error: unknown tool(s) {', '.join(_short(t) for t in unknown)}: you can "
                     f"hand down only your own tools. Your tools: {have}.")
-        if "spawn_subagent" in tools:
-            return "Error: handing down spawn_subagent is not supported yet."
+        if "spawn_subagent" in tools and owner.limits.remaining_depth < 2:
+            return (f"Error: cannot hand down spawn_subagent: the new sub-agent would be at "
+                    f"depth {owner.depth + 1}, and no level of nesting is left beneath it "
+                    f"(your remaining max_depth: {owner.limits.remaining_depth}; the host's "
+                    f"max_depth: {policy.max_depth}). Create it without spawn_subagent.")
         if bundles is not None:
             if not bundles:
                 return ("Error: bundles must name at least one bundle; omit bundles to hand "
@@ -590,59 +675,81 @@ class Delegation:
                         f"{', '.join(owner.bundles) or 'none'}.")
         if message_to:
             return "Error: message_to is not supported yet."
-        for arg, value in (("timeout_s", timeout_s), ("max_round_trips", max_round_trips),
-                           ("max_subagents", max_subagents), ("max_depth", max_depth)):
-            if value is not None:
-                return f"Error: {arg} is not supported yet; omit it to inherit your own limit."
+        limits = effective_limits(owner, {
+            "tools": tools, "timeout_s": timeout_s, "max_round_trips": max_round_trips,
+            "max_subagents": max_subagents, "max_depth": max_depth})
+        if isinstance(limits, str):
+            return limits
+        for n in _chain(owner):
+            allowance = n.limits.subtree_allowance
+            if allowance is not None and n.spawned_beneath >= allowance:
+                whose = "your" if n is owner else f"{n.path}'s"
+                return (f"Error: sub-agent allowance reached: {n.path} and the sub-agents "
+                        f"beneath it have created {n.spawned_beneath} of {allowance} "
+                        f"({whose} max_subagents={allowance}). Give an existing sub-agent "
+                        "another task with background_agents_start_task instead.")
         used = self.spawned_total + len(self._pending)
         if used >= policy.max_subagents:
             return (f"Error: sub-agent limit reached: {used} of {policy.max_subagents} "
                     "spawned in this conversation (the host's max_subagents). Give an existing "
                     "sub-agent another task with background_agents_start_task instead.")
-        return None
+        return limits
 
     async def spawn(self, owner: AgentNode, *, name: Any, instructions: Any, task: Any,
                     model: Any = None, tools: Any = None, bundles: Any = None,
                     message_to: Any = None, description: str = "", timeout_s: Any = None,
                     max_round_trips: Any = None, max_subagents: Any = None,
-                    max_depth: Any = None) -> str:
+                    max_depth: Any = None, origin: Any = None) -> str:
         """Create a sub-agent of ``owner`` and start its first task: ``spawn_subagent``.
 
         Every refusal is an ``Error: `` string, and a refused call creates nothing: no node,
-        task, folder, client use or count. The name and a place in the budget are reserved
-        before the first await, so concurrent calls cannot both take the last one."""
+        task, folder, client use or count. The name and a place in the budget (the
+        conversation's and every allowance above) are reserved before the first await, so
+        concurrent calls cannot both take the last one. ``origin`` is the session of the
+        ``owner`` run calling it."""
         if self.closed:
             return "Error: Session is being released; cannot spawn a sub-agent."
         if self.policy is None or not owner.can_spawn:
             return "Error: this agent may not spawn sub-agents."
+        if owner.limits.remaining_depth < 1:
+            return ("Error: max_depth reached: no level of nesting is left beneath you, so you "
+                    "may not create sub-agents.")
         tools = list(dict.fromkeys(tools or ()))
         if bundles is not None:
             bundles = list(dict.fromkeys(bundles))
-        refusal = self._spawn_refusal(
+        limits = self._check_spawn(
             owner, name=name, instructions=instructions, task=task, model=model, tools=tools,
             bundles=bundles, message_to=message_to, timeout_s=timeout_s,
             max_round_trips=max_round_trips, max_subagents=max_subagents, max_depth=max_depth)
-        if refusal is not None:
-            return refusal
+        if isinstance(limits, str):
+            return limits
         key = name.lower()
+        chain = _chain(owner)
         self._pending.add(key)
+        for n in chain:
+            n.spawned_beneath += 1
         mine: list[Any] = []   # the client this call's build got, while it is pending
+        built: list[AgentNode] = []
         try:
             return await self._build_spawned(
                 owner, name=name, instructions=instructions, task=task,
                 model=model if model is not None else self.policy.effective_default,
                 tools=tools, bundles=tuple(bundles) if bundles is not None else owner.bundles,
-                description=description if isinstance(description, str) else "", mine=mine)
+                description=description if isinstance(description, str) else "",
+                limits=limits, mine=mine, built=built, origin=origin)
         finally:
             self._pending.discard(key)
+            if not built:          # refused or failed: it counts against nothing
+                for n in chain:
+                    n.spawned_beneath -= 1
             # Registered on its node or dropped: either way no longer pending.
             self._pending_clients[:] = [c for c in self._pending_clients
                                         if not any(c is m for m in mine)]
 
-
     async def _build_spawned(self, owner: AgentNode, *, name: str, instructions: str,
                              task: str, model: str, tools: list[str], bundles: tuple[str, ...],
-                             description: str, mine: list[Any]) -> str:
+                             description: str, limits: Limits, mine: list[Any],
+                             built: list[AgentNode], origin: Any) -> str:
         from .bundles import SUBAGENT_INSTRUCTIONS
         from .paths import safe_path
         from .subagents import ConfinedSubagent, _ToolActivity, client_reuse
@@ -659,35 +766,59 @@ class Delegation:
         # Pending until registered, so a concurrent spawn's identity check sees it.
         mine.append(client)
         self._pending_clients.append(client)
-        handed = {t: owner.tool_objects[t] for t in tools}
+        can_spawn = "spawn_subagent" in tools
+        handed = {t: owner.tool_objects[t] for t in tools if t != "spawn_subagent"}
+        path = name if owner.depth == 0 else f"{owner.path}/{name}"
+        folder = f"agents/{path}"
+        node = AgentNode(
+            name=name, path=path, depth=owner.depth + 1, creator=owner,
+            description=description, bundles=bundles, tool_objects=handed,
+            can_spawn=can_spawn, limits=limits, folder=folder, client=client)
         try:
             agent = await sess.create_agent(
                 client, agent_instructions=instructions, bundles=bundles, name=name,
                 _prebuilt_tools=list(handed.values()), _harness_extra=SUBAGENT_INSTRUCTIONS,
-                middleware=[_ToolActivity()])
-            _inherit_round_trips(client, owner.limits.max_round_trips)
+                _node=node if can_spawn else None, middleware=[_ToolActivity()])
+            # Its own effective budget, on its own client only.
+            _inherit_round_trips(client, limits.max_round_trips)
         except Exception as e:  # noqa: BLE001 - a tool error the agent can read; no message
             return f"Error: could not build sub-agent {name!r} ({type(e).__name__})."
         if self.closed:
             return "Error: Session is being released; cannot spawn a sub-agent."
-        path = name if owner.depth == 0 else f"{owner.path}/{name}"
-        folder = f"agents/{path}"
         try:
             with sess.file_io():
                 safe_path(sess.root, folder).mkdir(parents=True, exist_ok=True)
         except Exception as e:  # noqa: BLE001 - a tool error the agent can read; no message
             return f"Error: could not create the folder {folder}/ ({type(e).__name__})."
-        node = AgentNode(
-            name=name, path=path, depth=owner.depth + 1, creator=owner,
-            description=description, bundles=bundles, tool_objects=handed, can_spawn=False,
-            limits=Limits(timeout_s=owner.limits.timeout_s,
-                          max_round_trips=owner.limits.max_round_trips, subtree_allowance=None,
-                          remaining_depth=max(owner.limits.remaining_depth - 1, 0)),
-            folder=folder, client=client)
         node.agent = ConfinedSubagent(agent, node=node, session=sess)
         self.add_node(node)
+        built.append(node)
         self.spawned_total += 1
-        return self.start_task(owner, name, task, description or name)
+        return self.start_task(owner, name, task, description or name, origin=origin)
+
+    async def cascade(self, node: AgentNode, session: Any) -> None:
+        """The run of ``node`` on ``session`` ended: cancel every task it started that is still
+        running, and wait for them (bounded by ``CANCEL_WAIT_S``). Each cancelled run does the
+        same in its own ``finally``, so nothing runs under a creator whose task is gone.
+        Cancelled this way, a task sends no notice and is not left unread."""
+        mine = [r for r in self._records
+                if r.owner is node and r.origin is session and r.future is not None
+                and not r.future.done()]
+        if not mine:
+            return
+        futures = [r.future for r in mine]
+        for record in mine:
+            record.host_cancelled = True
+            record.future.cancel()   # type: ignore[union-attr]
+        _, pending = await asyncio.wait(futures, timeout=CANCEL_WAIT_S)
+        for record in mine:
+            if record.status == "running":
+                _finalize(record)
+        if pending:
+            for t in pending:
+                t.add_done_callback(_log_abandoned)
+            _log.warning("%d sub-agent task(s) of %s still running %.0fs after cancellation",
+                         len(pending), node.path, CANCEL_WAIT_S)
 
     async def cancel_all(self) -> None:
         """Cancel every running task and registered sub-agent run, and wait for them, bounded
@@ -728,6 +859,84 @@ class Delegation:
                          ", ".join(sorted(t.get_name() for t in pending)))
 
 
+def _chain(node: AgentNode) -> list[AgentNode]:
+    """``node`` and its ancestors below the top agent: whose allowances a spawn by ``node``
+    counts against (the top agent's is the conversation total, kept by ``Delegation``)."""
+    out = []
+    n: AgentNode | None = node
+    while n is not None and n.depth > 0:
+        out.append(n)
+        n = n.creator
+    return out
+
+
+def _limit(value: Any) -> str:
+    if value is None:
+        return "none"
+    return f"{value:g}" if isinstance(value, float) else str(value)
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def effective_limits(creator: AgentNode, args: Mapping[str, Any]) -> Limits | str:
+    """The limits of a sub-agent ``creator`` creates with ``spawn_subagent``'s ``args``
+    (``tools``, ``timeout_s``, ``max_round_trips``, ``max_subagents``, ``max_depth``; missing
+    or None: inherited), or the ``Error: `` refusal naming the limit.
+
+    Tighten only: a value above the creator's own effective value is refused. Inherited:
+    timeout and round trips are the creator's; the allowance is what remains of the creator's
+    once this sub-agent is counted; depth is the creator's remaining depth minus one.
+    ``max_subagents`` and ``max_depth`` only mean something to a sub-agent that may spawn, so
+    they are refused unless ``spawn_subagent`` is handed down in ``tools``."""
+    lim = creator.limits
+    hands = "spawn_subagent" in (args.get("tools") or ())
+    timeout_s = args.get("timeout_s")
+    max_round_trips = args.get("max_round_trips")
+    max_subagents = args.get("max_subagents")
+    max_depth = args.get("max_depth")
+    tighten = "a sub-agent's limits may only be lower than yours; omit it to inherit yours"
+    if timeout_s is not None:
+        if not _is_number(timeout_s) or timeout_s <= 0:
+            return f"Error: timeout_s must be a positive number of seconds, got {_short(timeout_s)}."
+        if lim.timeout_s is not None and timeout_s > lim.timeout_s:
+            return (f"Error: timeout_s={_limit(timeout_s)} is above your own timeout_s "
+                    f"({_limit(lim.timeout_s)}s): {tighten}.")
+    if max_round_trips is not None:
+        if not _is_int(max_round_trips) or max_round_trips < 1:
+            return (f"Error: max_round_trips must be an integer of at least 1, got "
+                    f"{_short(max_round_trips)}.")
+        if lim.max_round_trips is not None and max_round_trips > lim.max_round_trips:
+            return (f"Error: max_round_trips={max_round_trips} is above your own "
+                    f"max_round_trips ({lim.max_round_trips}): {tighten}.")
+    d = creator._delegation
+    allowance = (d.remaining_allowance(creator) if d is not None else 0) - 1
+    depth = lim.remaining_depth - 1
+    for arg, value, cap, what in (
+            ("max_subagents", max_subagents, allowance,
+             "your remaining allowance once this sub-agent is counted"),
+            ("max_depth", max_depth, depth, "the levels left beneath you, less this one")):
+        if value is None:
+            continue
+        if not hands:
+            return (f"Error: {arg} applies only to a sub-agent that may create its own: hand "
+                    f"down spawn_subagent in tools, or omit {arg}.")
+        if not _is_int(value) or value < 1:
+            return f"Error: {arg} must be an integer of at least 1, got {_short(value)}."
+        if value > cap:
+            return (f"Error: {arg}={value} is above {what} ({max(cap, 0)}): {tighten}.")
+    return Limits(
+        timeout_s=timeout_s if timeout_s is not None else lim.timeout_s,
+        max_round_trips=max_round_trips if max_round_trips is not None else lim.max_round_trips,
+        subtree_allowance=max_subagents if max_subagents is not None else max(allowance, 0),
+        remaining_depth=max_depth if max_depth is not None else max(depth, 0))
+
+
 def _short(value: Any, limit: int = 80) -> str:
     """``repr`` of a model-supplied value, cut to ``limit`` characters for an error."""
     text = repr(value)
@@ -735,9 +944,9 @@ def _short(value: Any, limit: int = 80) -> str:
 
 
 def _inherit_round_trips(client: Any, max_round_trips: int | None) -> None:
-    """Give a spawned sub-agent's own client its creator's round-trip budget. Fails closed: a
-    client the budget cannot be set on raises (``spawn`` refuses it) rather than run unbounded
-    by its creator's budget."""
+    """Give a spawned sub-agent's own client its effective round-trip budget (its creator's,
+    or a lower one it was given). Fails closed: a client the budget cannot be set on raises
+    (``spawn`` refuses it) rather than run unbounded by it."""
     if max_round_trips is None:
         return
     settings = getattr(client, "function_invocation_configuration", None)
@@ -775,11 +984,13 @@ class DelegationProvider(ContextProvider):
                          state: dict[str, Any]) -> None:
         d, node, wait_s = self._delegation, self._node, self._wait_timeout_s
         attach(node, session)
+        # Tasks this run starts or continues belong to it (``session``): their notices come
+        # here, and its end cancels them when ``node`` is a sub-agent.
 
         @tool(name="background_agents_start_task", approval_mode="never_require")
         def background_agents_start_task(agent_name: str, input: str, description: str) -> str:
             """Start a background task on a named agent. Returns a confirmation with the task ID."""
-            return d.start_task(node, agent_name, input, description)
+            return d.start_task(node, agent_name, input, description, origin=session)
 
 
         @tool(name="background_agents_wait_for_first_completion", approval_mode="never_require")
@@ -804,7 +1015,7 @@ class DelegationProvider(ContextProvider):
         @tool(name="background_agents_continue_task", approval_mode="never_require")
         def background_agents_continue_task(task_id: int, text: str) -> str:
             """Send follow-up input to a completed or failed task to resume its work."""
-            return d.continue_task(node, task_id, text)
+            return d.continue_task(node, task_id, text, origin=session)
 
 
         @tool(name="background_agents_clear_completed_task", approval_mode="never_require")
@@ -813,7 +1024,7 @@ class DelegationProvider(ContextProvider):
             return d.clear(node, task_id)
 
         spawn_tools: list = []
-        if node.can_spawn and d.policy is not None:
+        if node.can_spawn and d.policy is not None and node.limits.remaining_depth >= 1:
 
             @tool(name="spawn_subagent", description=d.spawn_description(node),
                   approval_mode="never_require")
@@ -842,7 +1053,7 @@ class DelegationProvider(ContextProvider):
                     tools=tools, bundles=bundles, message_to=message_to,
                     description=description, timeout_s=timeout_s,
                     max_round_trips=max_round_trips, max_subagents=max_subagents,
-                    max_depth=max_depth)
+                    max_depth=max_depth, origin=session)
 
             spawn_tools.append(spawn_subagent)
         context.extend_instructions(
@@ -877,11 +1088,14 @@ class DelegationProvider(ContextProvider):
 def tasks_running(node: AgentNode) -> Callable[..., bool]:
     """``should_continue`` for the parent loop: True while ``node`` has a task still running,
     or a finished one whose result it has not read since it finished (so a result that lands
-    during the last pass is not dropped). Bounded by the loop's ``max_iterations``."""
+    during the last pass is not dropped). Bounded by the loop's ``max_iterations``. For a
+    sub-agent, only the tasks this run (the loop's ``session``) started count."""
 
     def _should_continue(**kwargs: Any) -> bool:
         d = node._delegation
-        return d is not None and bool(d.running_owned(node) or d.unread_owned(node))
+        session = kwargs.get("session")
+        return d is not None and bool(d.running_owned(node, session)
+                                      or d.unread_owned(node, session))
 
     return _should_continue
 
@@ -892,8 +1106,9 @@ def tasks_running_message(node: AgentNode) -> Callable[..., str | None]:
 
     def _next_message(**kwargs: Any) -> str | None:
         d = node._delegation
-        running = d.running_owned(node) if d is not None else []
-        unread = d.unread_owned(node) if d is not None else []
+        session = kwargs.get("session")
+        running = d.running_owned(node, session) if d is not None else []
+        unread = d.unread_owned(node, session) if d is not None else []
         parts = []
         if running:
             parts.append(

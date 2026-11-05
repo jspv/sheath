@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from sheath import SheathConfig, Session
-from sheath.delegation import AgentNode
+from sheath.delegation import AgentNode, Limits
 from sheath.subagents import ConfinedSubagent
 from sheath.testing import StubChatClient, text, tool_call
 from tests.test_subagents import spec
@@ -27,7 +27,10 @@ async def _build(sess, a_tool, b_tool=None):
         inner = await sess.create_agent(
             StubChatClient([tool_call(b_tool.__name__), text("b-done")]), tools=[b_tool],
             bundles=("files",), name="b")
-        b = AgentNode(name="b", path="a/b", depth=2, creator=a)
+        b = AgentNode(name="b", path="a/b", depth=2, creator=a,
+                      limits=Limits(timeout_s=sess.config.subagent_task_timeout_s,
+                                    max_round_trips=None, subtree_allowance=None,
+                                    remaining_depth=0))
         b.agent = ConfinedSubagent(inner, node=b, session=sess)
         d.add_node(b)
     return a

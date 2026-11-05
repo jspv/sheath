@@ -446,6 +446,7 @@ class Session:
         _mcp_agent: str | None = None,
         _harness_extra: str | None = None,
         _prebuilt_tools: list | None = None,
+        _node: Any = None,
         **maf_kwargs: Any,
     ):
         """Build a MAF agent over the selected bundles plus developer tools/MCP.
@@ -464,6 +465,10 @@ class Session:
 
         ``_prebuilt_tools`` are tool objects another agent already built (spill-wrapped, or
         connected MCP functions), handed down as they are.
+
+        ``_node`` is the ``AgentNode`` of a sub-agent being built that may spawn its own: it
+        gets the delegation tools and the parent-wait loop bound to that node, exactly as a
+        delegating top agent does, so it waits for its own sub-agents before reporting.
         """
         from agent_framework import create_harness_agent  # local: heavy dep, imported at call time
 
@@ -487,12 +492,15 @@ class Session:
             top.bundles = _bundles.selected_bundles(bundles)
             if subagents:
                 await self._build_subagents(client, subagents, top=top, bundles=bundles,
-                                            client_factory=client_factory)
+                                            client_factory=client_factory, spawn=spawn)
             if spawn is not None:
                 self._set_spawn_policy(spawn, client_factory)
                 top.can_spawn = True
             providers.append(self._delegation_provider(top, wait_timeout))
             _add_parent_loop(maf_kwargs, top)
+        elif _node is not None:
+            providers.append(self._delegation_provider(_node, wait_timeout))
+            _add_parent_loop(maf_kwargs, _node)
         builtin = self.tools(*bundles)
         external: list = []
         for tool in tools or []:
@@ -503,6 +511,9 @@ class Session:
         external.extend(_prebuilt_tools or [])
 
         _apply_tool_loop_limits(client, self.config)
+        if _node is not None:
+            # The tools it may hand down, by name: the objects it was itself given.
+            _node.tool_objects = {t.name: t for t in external}
         if top is not None:
             # The tools this agent may hand down, by name: the objects it was itself given.
             top.tool_objects = {t.name: t for t in external}
@@ -570,9 +581,11 @@ class Session:
 
     async def _build_subagents(self, client: Any, subagents: Mapping[str, "SubagentSpec"], *,
                                top: Any, bundles: tuple[str, ...],
-                               client_factory: Callable[[str], Any] | None) -> None:
+                               client_factory: Callable[[str], Any] | None,
+                               spawn: "SpawnPolicy | None" = None) -> None:
         """Validate the specs and build each sub-agent over this session as a node under
-        ``top``."""
+        ``top``. A spec with ``can_spawn`` gets ``spawn_subagent`` when there is a policy whose
+        ``max_depth`` leaves a level beneath it."""
         from .api import expand_tools  # local: api imports session
         from .bundles import SUBAGENT_INSTRUCTIONS
         from .delegation import AgentNode, Limits
@@ -584,24 +597,31 @@ class Session:
         taken = [n for n in subagents if delegation.node(n) is not None]
         if taken:
             raise ValueError(f"sub-agent names {taken} are already used in this session")
+        depth_left = spawn.max_depth - 1 if spawn is not None else 0
         for sub_name, spec in subagents.items():
             sub_client = clients[sub_name]
             sub_bundles = spec.bundles or bundles
+            can_spawn = bool(spec.can_spawn) and spawn is not None and depth_left >= 1
             node = AgentNode(name=sub_name, path=sub_name, depth=1, creator=top,
                              description=spec.description, bundles=tuple(sub_bundles),
+                             can_spawn=can_spawn,
                              limits=Limits(timeout_s=self.config.subagent_task_timeout_s,
                                            max_round_trips=spec.max_round_trips,
-                                           subtree_allowance=None, remaining_depth=0),
+                                           subtree_allowance=None,
+                                           remaining_depth=depth_left if can_spawn else 0),
                              declared=True, client=sub_client)
             agent = await self.create_agent(
                 sub_client, agent_instructions=spec.instructions,
                 tools=expand_tools(spec.tools), bundles=sub_bundles,
                 name=sub_name, _mcp_agent=sub_name, _harness_extra=SUBAGENT_INSTRUCTIONS,
-                middleware=[_ToolActivity()])
+                _node=node if can_spawn else None, middleware=[_ToolActivity()])
             # The spec's budget, on the sub-agent's own client only.
             _apply_tool_loop_limits(sub_client, dataclasses.replace(
                 self.config, tool_loop_max_iterations=spec.max_round_trips,
                 tool_loop_max_consecutive_errors=None))
+            if can_spawn:
+                # What it runs with: the ceiling for the sub-agents it creates.
+                node.limits.max_round_trips = _round_trips(sub_client)
             node.agent = ConfinedSubagent(agent, node=node, session=self)
             delegation.add_node(node)
         self.subagent_names = tuple(subagents)
