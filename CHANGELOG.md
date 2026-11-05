@@ -32,6 +32,11 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 - A `client_factory` that returns the parent's client, or one client for two sub-agents, raises
   `ValueError`.
 
+### `Sheath(on_status=...)` reaches conversations
+- **Fix:** the callback reached only one-shot `solve`/`asolve` runs. Conversations opened with
+  `aopen`, and so `agui_stream`, never received it, and a host had to call
+  `conv.session.subscribe(...)` itself. Each new conversation now subscribes it once.
+
 ### `search` sees exactly what `list_files` lists
 - **Behavior change:** ripgrep ran with its defaults, so hidden paths and anything a `.gitignore`
   or `.ignore` in the workspace named were invisible to `search` while `read_file` and

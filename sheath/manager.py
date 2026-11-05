@@ -141,6 +141,9 @@ class SessionManager:
             subagents=(subagents if subagents is not None else self._sheath._subagents),
             client_factory=self._sheath._subagent_client_factory(),
         )
+        # Subscribed once per conversation, here at creation: resuming an id must not add it again.
+        if self._sheath._on_status is not None:
+            conv.session.subscribe(self._sheath._on_status)
         self._store.put(conv_id, conv)
         return conv
 
