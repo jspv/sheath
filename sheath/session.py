@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import hashlib
 import logging
 import mimetypes
@@ -11,11 +13,11 @@ import stat
 import tempfile
 import threading
 import warnings
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from . import bundles as _bundles
 from . import input_trees as _input_trees
@@ -29,11 +31,70 @@ from .sandbox import (
 )
 from .status import StatusBus, StatusEvent, bind_bus
 
+if TYPE_CHECKING:
+    from .subagents import SubagentSpec
+
 _DELIVER = "deliver"
 _INPUTS = "inputs"
 _COPY_CHUNK = 1024 * 1024
 # create_harness_agent options that add a capability path around the sandbox, safe_path or egress.
 _UNSANDBOXED_KWARGS = frozenset({"shell_executor", "file_access_store", "background_agents"})
+# How long cancelling sub-agent tasks waits for them to finish before giving up (logged).
+_SUBAGENT_CANCEL_WAIT_S = 30.0
+# How many times cancelling sub-agent tasks yields and looks again for newly registered ones.
+_SUBAGENT_CANCEL_ROUNDS = 3
+
+_log = logging.getLogger(__name__)
+
+
+def _remove_root_locked(root: Path, lock: Any,
+                        check_quarantine: Callable[[], None] | None = None) -> None:
+    """Remove ``root`` while holding ``lock`` (the session's ``io_lock``).
+
+    Sync on purpose, and run with ``asyncio.to_thread``: a sync file tool still in flight on a
+    worker thread (its task already cancelled) holds the lock, and the directory must not go
+    until it has finished. Taking the lock on the event loop would stall the loop instead.
+
+    Best effort: sandboxed code can ``chmod 000`` a directory in the root, so every real
+    directory under it is first made listable and writable (everything in the root is owned by
+    the host user, so the reset can always succeed). That walk checks each entry with ``lstat``
+    before ``chmod``, which is safe only while nothing else writes in the root; the lock and
+    the cancelled sub-agent tasks ensure that, except under a quarantined sandbox (a
+    timed-out container that may still be running). ``check_quarantine`` (the sandbox's,
+    called with the lock held) detects that case, and the permission reset is then skipped;
+    a check that fails any other way is treated the same (logged, never raised).
+    An entry that still cannot be removed does not stop the walk; everything else goes, and
+    a root left behind is logged as a warning rather than raised.
+    """
+    failures: list[str] = []
+
+    def _record(func: Any, path: str, exc: BaseException) -> None:
+        failures.append(f"{path!r}: {type(exc).__name__}")  # repr: names are untrusted
+
+    with lock:
+        if not root.exists():
+            return
+        quarantined = False
+        if check_quarantine is not None:
+            try:
+                check_quarantine()
+            except SandboxQuarantinedError as e:
+                quarantined = True
+                _log.warning("removing %s: the sandbox is quarantined (a container may still "
+                             "be writing); permissions not reset, so directories sandboxed code "
+                             "made unreadable may be left behind. %s Once the container is "
+                             "removed, delete %s to finish cleanup", root, e, root)
+            except Exception as e:  # noqa: BLE001 - fail safe: a close path must not raise
+                quarantined = True
+                _log.warning("removing %s: the quarantine check failed (%s); treating the "
+                             "sandbox as quarantined, permissions not reset", root,
+                             type(e).__name__)
+        if not quarantined:
+            _make_tree_writable(root, best_effort=True)
+        shutil.rmtree(root, onexc=_record)
+    if root.exists():
+        _log.warning("could not fully remove %s (%d entr%s left: %s)", root, len(failures),
+                     "y" if len(failures) == 1 else "ies", "; ".join(failures[:5]))
 
 
 @dataclass
@@ -48,6 +109,14 @@ class Session:
     _status_cm: Any = field(default=None, init=False, repr=False)
     # Serializes parent-side file work in the root with sandbox runs (shared with the sandbox).
     io_lock: Any = field(default_factory=threading.RLock, init=False, repr=False)
+    # Sub-agents create_agent built over this session, by name.
+    subagent_names: tuple[str, ...] = field(default=(), init=False)
+    # Sub-agent runs registered by ConfinedSubagent, queued or running.
+    _subagent_tasks: set[asyncio.Task] = field(default_factory=set, init=False, repr=False)
+    # The BackgroundAgentsProvider instances create_agent built (for release).
+    _subagent_providers: list[Any] = field(default_factory=list, init=False, repr=False)
+    # The subagent_max_concurrent semaphore, created lazily inside the running loop.
+    _subagent_slots: Any = field(default=None, init=False, repr=False)
 
     @classmethod
     def create(cls, config: SheathConfig, *, on_publish: OnPublish | None = None,
@@ -110,20 +179,70 @@ class Session:
                 check()
             yield
 
+    @property
+    def subagents_running(self) -> int:
+        """Sub-agent runs registered with this session, queued or running."""
+        return len(self._subagent_tasks)
+
     def subscribe(self, callback: Callable[[StatusEvent], None]) -> Callable[[], None]:
         """Register a status subscriber; returns a zero-arg unsubscribe handle."""
         return self.status_bus.subscribe(callback)
 
-    async def aclose(self) -> None:
-        """Close every connected MCP server, then honor the cleanup policy."""
-        for tool in self._mcp_connected:
+    async def cancel_subagents(self) -> None:
+        """Cancel every registered sub-agent task and wait for it, bounded by
+        ``_SUBAGENT_CANCEL_WAIT_S``. A task still pending after that is logged and left.
+
+        A task MAF's ``start_task`` created but that has not yet taken a step is not registered
+        yet (``ConfinedSubagent.run`` registers on its first step, then yields). So after
+        cancelling what is registered, this yields once, letting such tasks register, and looks
+        again until a look finds nothing new (bounded by ``_SUBAGENT_CANCEL_ROUNDS``). The
+        registered tasks are cancelled before the yield, so none of them gets a step to work."""
+        me = asyncio.current_task()
+        tasks: list[asyncio.Task] = []
+        for look in range(_SUBAGENT_CANCEL_ROUNDS):
+            new = [t for t in self._subagent_tasks
+                   if t is not me and not t.done() and t not in tasks]
+            for task in new:
+                task.cancel()
+            tasks.extend(new)
+            if look and not new:
+                break   # a look after a yield found nothing new
+            await asyncio.sleep(0)
+        if not tasks:
+            return
+        _, pending = await asyncio.wait(tasks, timeout=_SUBAGENT_CANCEL_WAIT_S)
+        if pending:
+            _log.warning("%d sub-agent task(s) still running %.0fs after cancellation: %s",
+                         len(pending), _SUBAGENT_CANCEL_WAIT_S,
+                         ", ".join(sorted(t.get_name() for t in pending)))
+
+    async def release_subagents(self, agent_session: Any) -> None:
+        """Release ``agent_session``'s runtime state in every provider this session built
+        (MAF cancels and drains that session's tasks). Failures are logged, not raised."""
+        for provider in self._subagent_providers:
             try:
-                await tool.close()
+                await provider.release_session(agent_session, timeout=_SUBAGENT_CANCEL_WAIT_S)
             except Exception:  # noqa: BLE001 - best-effort teardown
-                pass
-        self._mcp_connected.clear()
-        if self.config.cleanup and self.root.exists():
-            shutil.rmtree(self.root)
+                _log.warning("releasing sub-agent session state failed", exc_info=True)
+
+    async def aclose(self) -> None:
+        """Cancel sub-agent tasks, close every connected MCP server, then honor the cleanup
+        policy. In that order: no sub-agent outlives its MCP servers or its root.
+
+        Removing the root is best effort, as for ``Conversation.aclose``: an entry that cannot
+        be removed is skipped, and a root left behind is logged as a warning, not raised."""
+        try:
+            await self.cancel_subagents()
+        finally:
+            for tool in self._mcp_connected:
+                try:
+                    await tool.close()
+                except Exception:  # noqa: BLE001 - best-effort teardown
+                    pass
+            self._mcp_connected.clear()
+            if self.config.cleanup:
+                await asyncio.to_thread(_remove_root_locked, self.root, self.io_lock,
+                                        getattr(self.sandbox, "check_quarantine", None))
 
     def _unavailable_bundles(self) -> tuple[str, ...]:
         """Bundles that are selected-but-inert: ``deliver`` needs a host publish callback."""
@@ -337,12 +456,21 @@ class Session:
         tools: list | None = None,
         bundles: tuple[str, ...] = ("code", "files", "web"),
         name: str = "data-integrator",
+        subagents: Mapping[str, "SubagentSpec"] | None = None,
+        client_factory: Callable[[str], Any] | None = None,
+        _mcp_agent: str | None = None,
+        _harness_extra: str | None = None,
         **maf_kwargs: Any,
     ):
         """Build a MAF agent over the selected bundles plus developer tools/MCP.
 
         Plain callables are spill-wrapped; MCP servers are connected and their tools get
         the spill parser (Task 5). Operational instructions ride in ``sheath_instructions``.
+
+        ``subagents`` names sub-agents the model may delegate to. Each is built here, over this
+        same session, so it can do nothing this agent could not; each gets a client of its own,
+        ``spec.client`` or ``client_factory(spec.model or config.model)``. While a delegated
+        task is still running, the agent is re-run rather than allowed to finish.
         """
         from agent_framework import create_harness_agent  # local: heavy dep, imported at call time
 
@@ -353,18 +481,25 @@ class Session:
             raise TypeError(
                 f"{', '.join(refused)}: refused, would give the model shell, file or agent access "
                 "outside the sandbox, safe_path and egress checks")
+        wait_timeout = maf_kwargs.pop("background_agents_wait_timeout_seconds", None)
+        providers: list = []
+        if subagents:
+            providers.append(await self._build_subagents(
+                client, subagents, bundles=bundles, client_factory=client_factory,
+                wait_timeout=wait_timeout))
+            _add_parent_loop(maf_kwargs)
         builtin = self.tools(*bundles)
         external: list = []
         for tool in tools or []:
             if looks_like_mcp(tool):
-                external.extend(await self._attach_mcp(tool))
+                external.extend(await self._attach_mcp(tool, agent=_mcp_agent))
             else:
                 external.append(spill_tool(self, tool))
 
         _apply_tool_loop_limits(client, self.config)
         # Announce staged input trees on every run (a tree staged between turns included).
         maf_kwargs["context_providers"] = [*(maf_kwargs.get("context_providers") or []),
-                                           _input_trees.context_provider(self)]
+                                           _input_trees.context_provider(self), *providers]
         maf_kwargs.setdefault("max_context_window_tokens", self.config.max_context_window_tokens)
         maf_kwargs.setdefault("max_output_tokens", self.config.max_output_tokens)
         _default_compaction(maf_kwargs, self.config.keep_last_tool_call_groups)
@@ -382,10 +517,13 @@ class Session:
         if "store" not in options and not _lacks_store_option(client):
             options["store"] = False
         maf_kwargs["default_options"] = options
+        harness_instructions = self.sheath_instructions(*bundles)
+        if _harness_extra:
+            harness_instructions = f"{harness_instructions}\n\n{_harness_extra}"
         return create_harness_agent(
             client,
             name=name,
-            harness_instructions=self.sheath_instructions(*bundles),
+            harness_instructions=harness_instructions,
             agent_instructions=agent_instructions,
             tools=builtin + external,
             disable_todo=True,
@@ -395,15 +533,53 @@ class Session:
             **maf_kwargs,
         )
 
-    async def _attach_mcp(self, tool: Any) -> list:
-        """Connect an MCP server, attach the spill parser, capture its status, own its lifecycle."""
+    async def _build_subagents(self, client: Any, subagents: Mapping[str, "SubagentSpec"], *,
+                               bundles: tuple[str, ...],
+                               client_factory: Callable[[str], Any] | None,
+                               wait_timeout: Any) -> Any:
+        """Validate the specs, build each sub-agent over this session, return their provider."""
+        from agent_framework import BackgroundAgentsProvider
+
+        from .api import expand_tools  # local: api imports session
+        from .bundles import SUBAGENT_INSTRUCTIONS
+        from .subagents import (ConfinedSubagent, _ToolActivity, provider_instructions,
+                                validate_subagents)
+
+        clients = validate_subagents(subagents, parent_bundles=bundles, parent_client=client,
+                                     client_factory=client_factory, config=self.config)
+        wrapped = []
+        for sub_name, spec in subagents.items():
+            sub_client = clients[sub_name]
+            agent = await self.create_agent(
+                sub_client, agent_instructions=spec.instructions,
+                tools=expand_tools(spec.tools), bundles=spec.bundles or bundles,
+                name=sub_name, _mcp_agent=sub_name, _harness_extra=SUBAGENT_INSTRUCTIONS,
+                middleware=[_ToolActivity()])
+            # The spec's budget, on the sub-agent's own client only.
+            _apply_tool_loop_limits(sub_client, dataclasses.replace(
+                self.config, tool_loop_max_iterations=spec.max_round_trips,
+                tool_loop_max_consecutive_errors=None))
+            wrapped.append(ConfinedSubagent(agent, name=sub_name, description=spec.description,
+                                            session=self))
+        provider_kw = {} if wait_timeout is None else {"wait_timeout_seconds": wait_timeout}
+        provider = BackgroundAgentsProvider(wrapped, instructions=provider_instructions(),
+                                            **provider_kw)
+        self._subagent_providers.append(provider)
+        self.subagent_names = tuple(subagents)
+        return provider
+
+    async def _attach_mcp(self, tool: Any, *, agent: str | None = None) -> list:
+        """Connect an MCP server, attach the spill parser, capture its status, own its lifecycle.
+
+        ``agent`` tags the server's status events with the sub-agent that owns it.
+        """
         from .mcp_status import inject_progress_tokens, install_status_wrappers
         from .spill import make_spill_parser
 
         server = getattr(tool, "name", None) or repr(tool)
         _drop_mcp_host_payload(tool)
         # Install before connect so the wrappers reach the underlying MCP ClientSession.
-        token_map = install_status_wrappers(self.status_bus, tool, server)
+        token_map = install_status_wrappers(self.status_bus, tool, server, agent=agent)
         try:
             await tool.connect()
         except Exception as e:  # noqa: BLE001 - add context naming the server, then re-raise
@@ -544,19 +720,36 @@ def _clear_squatter(target: Path) -> None:
         shutil.rmtree(target)      # rmtree does not follow symlinks
 
 
-def _make_tree_writable(top: Path) -> None:
+def _make_tree_writable(top: Path, *, best_effort: bool = False) -> None:
     """Make every real directory under ``top`` listable and writable so rmtree can empty it.
 
     Walks top-down without following links (``os.walk`` default), chmods each directory
     before descending into it, and touches nothing that ``lstat`` doesn't show to be a real
-    directory.
+    directory. Strict by default: the caller has already ``lstat``-ed ``top``, and any error
+    propagates. With ``best_effort``, ``top`` is ``lstat``-checked here too, and an ``OSError``
+    on any one entry is skipped (the rmtree that follows reports what is then left).
     """
-    os.chmod(top, 0o700)       # the caller's lstat proved it is a real directory
+    if best_effort:
+        try:
+            if not stat.S_ISDIR(os.lstat(top).st_mode):
+                return
+        except OSError:
+            return
+        try:
+            os.chmod(top, 0o700)   # lstat just proved it is a real directory
+        except OSError:
+            pass
+    else:
+        os.chmod(top, 0o700)       # the caller's lstat proved it is a real directory
     for dirpath, dirnames, _ in os.walk(top):
         for d in dirnames:
             child = os.path.join(dirpath, d)
-            if stat.S_ISDIR(os.lstat(child).st_mode):
-                os.chmod(child, 0o700)
+            try:
+                if stat.S_ISDIR(os.lstat(child).st_mode):
+                    os.chmod(child, 0o700)
+            except OSError:
+                if not best_effort:
+                    raise
 
 
 def _sha256_file(path: Path | str) -> bytes:
@@ -635,6 +828,33 @@ def _default_compaction(maf_kwargs: dict[str, Any], keep_last_tool_call_groups: 
     for phase in ("before_compaction_strategy", "after_compaction_strategy"):
         if maf_kwargs.get(phase) is None:
             maf_kwargs[phase] = strategy
+
+
+def _add_parent_loop(maf_kwargs: dict[str, Any]) -> None:
+    """Re-run a delegating agent while a task it started is still running, in place.
+
+    Built here rather than through ``loop_should_continue``, which returns every pass joined
+    together: ``return_final_only`` keeps only the final answer. A caller who passed
+    ``loop_should_continue`` has taken over that decision, so nothing is added. The loop goes
+    first in ``middleware``, ahead of the caller's own, preceded only by ``_DropLoopNudges``,
+    which keeps the loop's nudges out of a streamed reply.
+    """
+    if "loop_should_continue" in maf_kwargs:
+        return
+    from agent_framework import (AgentLoopMiddleware, background_tasks_running,
+                                 background_tasks_running_message)
+
+    loop_kw: dict[str, Any] = {}
+    max_iterations = maf_kwargs.pop("loop_max_iterations", None)
+    if max_iterations is not None:
+        loop_kw["max_iterations"] = max_iterations   # else MAF's default cap
+    loop = AgentLoopMiddleware(background_tasks_running(),
+                               next_message=background_tasks_running_message,
+                               return_final_only=True, inject_progress=False, **loop_kw)
+    from .subagents import _DropLoopNudges
+
+    # The nudge filter sits outside the loop, so it sees every pass's updates.
+    maf_kwargs["middleware"] = [_DropLoopNudges(), loop, *(maf_kwargs.get("middleware") or [])]
 
 
 def _apply_tool_loop_limits(client: Any, config: SheathConfig) -> None:

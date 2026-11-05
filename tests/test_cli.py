@@ -11,6 +11,14 @@ def test_status_printer_formats_event():
     assert lines == ["→ read_document: converting d.pdf via Docling [1/4]"]
 
 
+def test_status_printer_prefixes_agent_only_when_set():
+    lines = []
+    printer = make_status_printer(write=lines.append)
+    printer(StatusEvent(tool="t", message="m", agent="alpha"))
+    printer(StatusEvent(tool="t", message="m"))
+    assert lines == ["→ [alpha] t: m", "→ t: m"]
+
+
 def test_verbose_prints_tool_status_to_stderr(tmp_path, capsys):
     client = StubChatClient([
         tool_call("run_python", {"code": "from sheath_sandbox import emit\nemit(1)\n"}),

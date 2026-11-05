@@ -84,3 +84,9 @@ def instructions_for(bundles: tuple[str, ...], *, exclude: tuple[str, ...] = ())
         if b not in exclude:
             parts.append(BUNDLE_INSTRUCTIONS[b])
     return "\n\n".join(parts)
+
+SUBAGENT_INSTRUCTIONS = (
+    "You are a sub-agent: another agent delegated this task to you, and your final message is "
+    "your report back to it. Files and handles you create are shared with it, so name the ones "
+    "that matter in your report rather than pasting their contents."
+)

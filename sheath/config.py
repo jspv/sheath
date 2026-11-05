@@ -108,6 +108,10 @@ class SheathConfig:
     # fresh client is MAF's default: 40 round-trips and 3 consecutive errors.
     tool_loop_max_iterations: int | None = None
     tool_loop_max_consecutive_errors: int | None = None
+    # Sub-agents: tasks allowed to run at once per session, and a per-task wall-clock bound in
+    # seconds, measured from when the task gets a slot (queue time does not count). None = no bound.
+    subagent_max_concurrent: int = 2
+    subagent_task_timeout_s: float | None = 600.0
     # Control-plane bounds (parent <-> sandbox channel). These live here rather than on
     # SandboxConfig because they bound the orchestration channel, not a backend's behavior.
     max_emit_bytes: int = 1024 * 1024          # emit payload cap, checked before parsing

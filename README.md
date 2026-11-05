@@ -37,6 +37,7 @@ This is **v1: the general substrate**. Specific problems plug in later as user-s
   - [MCP servers](#mcp-servers)
   - [Live status updates](#live-status-updates)
   - [AG-UI and CopilotKit](#ag-ui-and-copilotkit)
+  - [Sub-agents (experimental)](#sub-agents-experimental)
 - [Reference](#reference)
   - [Tool surface](#tool-surface)
   - [Security and confinement](#security-and-confinement)
@@ -412,7 +413,7 @@ def show(event):
 Sheath(tools=[crunch], on_status=show).solve("crunch 5 items")
 ```
 
-The CLI exposes the same feed with `-v`/`--verbose` (printed to stderr). MCP-server status needs no extra wiring — a server's `notifications/message` arrive tagged `mcp:<server>`, and its `notifications/progress` arrive tagged with the calling tool's name plus `current`/`total`.
+The CLI exposes the same feed with `-v`/`--verbose` (printed to stderr). MCP-server status needs no extra wiring — a server's `notifications/message` arrive tagged `mcp:<server>`, and its `notifications/progress` arrive tagged with the calling tool's name plus `current`/`total`. Events from a [sub-agent](#sub-agents-experimental) carry an `agent` field with its name (`None` for the parent); the field is additive.
 
 ### AG-UI and CopilotKit
 
@@ -442,9 +443,61 @@ async def agent(request: Request):
     return StreamingResponse(sse(), media_type="text/event-stream")
 ```
 
-Point your AG-UI client at this endpoint. The sheath reuses the official `agent-framework-ag-ui` converter, so **frontend/generative-UI tools** (defined in the request), **shared state** (`state_schema`/`predict_state_config`, forwarded as keyword args to `agui_stream`), **human-in-the-loop**, and **multi-turn history** all work — with the sheath's own progress feed overlaid as `sheath.status` `CUSTOM` events. A runnable version is in [`examples/agui_server.py`](https://github.com/jspv/sheath/blob/main/examples/agui_server.py).
+Point your AG-UI client at this endpoint. The sheath reuses the official `agent-framework-ag-ui` converter, so **frontend/generative-UI tools** (defined in the request), **shared state** (`state_schema`/`predict_state_config`, forwarded as keyword args to `agui_stream`), **human-in-the-loop**, and **multi-turn history** all work — with the sheath's own progress feed overlaid as `sheath.status` `CUSTOM` events (whose value includes an `agent` key when a [sub-agent](#sub-agents-experimental) produced it). A runnable version is in [`examples/agui_server.py`](https://github.com/jspv/sheath/blob/main/examples/agui_server.py).
 
 Each request is one conversation turn: turns on the same `threadId` are serialized, and a turn counts as activity for `idle_ttl_s`. Close the event stream on client disconnect (Starlette's `StreamingResponse` does) so the conversation is released for the next turn; a stream a server never closes keeps the conversation busy, and therefore exempt from the idle TTL. While a stream is open, sync `Conversation.add_input` raises — use `aadd_input`, which waits for the turn. The `threadId` selects the workspace, so authenticate and authorize it in your endpoint before calling `agui_stream`.
+
+### Sub-agents (experimental)
+
+A parent can delegate to named sub-agents that run as background tasks, each with its own client, instructions, bundles and tools. This builds on MAF's background-agents provider, which MAF marks experimental; constructing it emits MAF's experimental-feature warning, and the surface may change.
+
+```python
+from sheath import Sheath, SubagentSpec
+
+sheath = Sheath(subagents={
+    "researcher": SubagentSpec(
+        description="reads sources and writes findings to the workspace",
+        instructions="You are a careful researcher. Cite what you read.",
+        bundles=("files", "web"),
+        model="gpt-6.1-sol",
+    ),
+    "skimmer": SubagentSpec(
+        description="cheap first pass: counts, lists, quick lookups",
+        bundles=("files", "code"),
+        model="gpt-5-mini",
+        max_round_trips=8,
+    ),
+})
+result = sheath.solve("Find and compare the three most recent filings; have a sub-agent do the reading.")
+```
+
+The parent starts and collects tasks through MAF's `background_agents_*` tools (`start_task`, `wait_for_first_completion`, `continue_task`, and so on). `SubagentSpec` fields:
+
+| Field | Notes |
+|---|---|
+| `description` | Required. Shown to the parent model; it is how the parent chooses between sub-agents |
+| `instructions` | The sub-agent's domain prompt (like `agent_instructions`) |
+| `bundles` | Capability bundles; `None` uses the parent's selection. A bundle outside the parent's selection raises `ValueError` |
+| `tools` | Extra callables, `ToolFactory`s or MCP tools for this sub-agent |
+| `model` | Model for a client sheath builds; `None` uses `config.model` |
+| `client` | A ready client of its own, used instead of `model`; setting both raises `ValueError` |
+| `max_round_trips` | Per-task tool-loop budget |
+
+**Clients.** Every sub-agent gets its own client: `SubagentSpec.client`, else `client_factory(spec.model or config.model)`. Pass `Sheath(client_factory=...)` to build them (Azure, Foundry, a different provider). Without a factory: if you injected no `client`, the built-in OpenAI client is built for the given model; if you did inject one and a spec has no client of its own, a `ValueError` asks for `client_factory` or `SubagentSpec(client=...)`. Sub-agents may use different models or providers from the parent. MAF's `start_task` takes only an agent name, so the parent picks a model by picking a named sub-agent: declare one per role and model and describe each well.
+
+**What a sub-agent inherits.** `agent_kwargs` (`middleware`, `context_providers`, `default_options`, `skills` and the rest) apply to the parent only. A sub-agent gets sheath's own guards (workspace confinement, spill, status) and the tools its spec names, nothing more, so a host's policy or audit middleware must be supplied per sub-agent, for now by wrapping the callables in its spec's `tools` or by giving it a `client` that carries the middleware.
+
+**MCP tools.** Every agent, the parent and each sub-agent, needs its own MCP tool instance: the same MCP object placed in both the parent's `tools` and a spec's `tools` is attached twice. Wrap the server in `tool_factory` (see [MCP servers](#mcp-servers)) so each agent builds its own.
+
+**Precedence.** `subagents=` is accepted by `Sheath(...)`, `aopen`, `asolve`, `solve` and the module-level `solve`. A per-call value that is not `None` replaces the `Sheath` default whole (as with `agent_instructions`); `{}` means no sub-agents.
+
+**Limits.** `SheathConfig.subagent_max_concurrent` (default `2`) bounds tasks running at once per session; `subagent_task_timeout_s` (default `600`, `None` for no bound) bounds one task, measured from when it gets a slot.
+
+**Waiting and cancelling.** A parent that tries to finish while tasks it started are still running is re-run by sheath (MAF's loop middleware, at most 10 runs; override with `loop_max_iterations` in `agent_kwargs`; a `loop_should_continue` you supply replaces sheath's loop). Any task still running when a turn ends is cancelled, and tasks are cancelled before a workspace is closed or reaped. Hosts with long sub-agent tasks should set generous parent limits: `SheathConfig.tool_loop_max_iterations` and `loop_max_iterations`, because each wait call is one model round-trip and blocks up to 300 s by default (MAF's `background_agents_wait_timeout_seconds`, also passable in `agent_kwargs`).
+
+**Status.** A sub-agent's events carry `agent=<name>`: `started`; per tool call `running`, then `done` or `failed: <ExceptionType>`; and at the end `finished` or `failed: <ExceptionType>`. Failure events carry only the exception type, never its message, because the message can echo untrusted content; the full error reaches the parent model through the task's result.
+
+**AG-UI.** Delegation streams as ordinary tool calls (`background_agents_start_task` and friends), and sub-agent activity streams as `sheath.status` `CUSTOM` events whose value includes `agent`. Status is delivered live, including while the parent is waiting, and the loop's re-run nudges are kept out of the chat stream. By default (no AG-UI thread snapshot store configured) each request starts with fresh task state and task ids restart at 1, so `continue_task` cannot continue a task from an earlier request; within one request it works.
 
 ## Reference
 
@@ -475,7 +528,7 @@ Every session has one **root directory**; everything — handles, agent-written 
 - **Layer 1 — Tool path-jail (guaranteed).** All model-supplied paths route through one chokepoint, `safe_path(root, p)`, which resolves symlinks *before* checking and rejects any path outside the root (blocks `..`, absolute paths, symlink escapes). It's the most heavily tested code in the project.
 - **Layer 2 — Executed code.** `run_python` runs in the **container** tier by default: a hardened Podman/Docker container (network off, read-only root filesystem, dropped capabilities, non-root, memory/cpu/pid limits) — see [Sandbox tiers](#sandbox-tiers). If no usable container runtime is present, building the sandbox is a hard error (`SandboxRuntimeUnavailable`) that names the `local` opt-out; it never falls back silently. **The `local` tier is not a security boundary**: the code runs as the host user, with that user's file and network access, in a scrubbed-env subprocess with `resource` rlimits and a wall-clock timeout. Use it only when you have chosen that deliberately. A host that must not be able to opt out sets `SandboxConfig.require_isolation=True`, which refuses the local tier however it was selected — see [Sandbox tiers](#sandbox-tiers).
 - **Workspace trust zones.** The session root is bind-mounted into the sandbox, so the harness never trusts what it finds directly under it. Four directories are owned by the harness and mounted **read-only** into the container: `handles/` (handle files), `inputs/` (uploads), `.scripts/` (inline scripts) and `.sheath/` (the manifest, scratch files and per-run exchange directories). Sandboxed code can neither write inside them nor replace them, and `write_file` and `edit_file` refuse paths that resolve into them. Each run gets one writable exchange directory (`/sheath-run`): `save()`, `emit()` and `publish()` write there, and the harness reads it back by fixed file name with no-follow, regular-file-only, size-capped opens, then **moves** saved payloads into `handles/` itself. Nothing sandboxed code wrote is ever followed: a `publish()` request's path is joined to the root lexically and then walked component by component with `lstat`, refusing any link, and the harness's own `outputs/`, `.sheath/tmp/` and `.sheath/runs/` are required to be real directories (a link planted at `outputs/` is replaced by a real directory, never written through). Before and after every run the harness checks that the four directories, `.sheath/tmp/` and `.sheath/runs/` are still real directories and raises `WorkspaceTamperedError` otherwise.
-- **Orphan quarantine.** If a container-tier run times out and the runtime cannot confirm the container was removed, it may still be writing in the root. The session is then quarantined: every later `run_python` call and every file tool (`read_file`, `write_file`, `edit_file`, `list_files`, `search`, `publish_file`, `publish_handle`, `read_document` on a workspace path, `add_input`) first retries `<runtime> rm -f <that exact container>` and, until the runtime confirms it is gone, refuses with `SandboxQuarantinedError` (the publish and document tools return it as an `error`) without touching the root. Only the recorded container names are ever removed.
+- **Orphan quarantine.** If a container-tier run times out and the runtime cannot confirm the container was removed, it may still be writing in the root. The session is then quarantined: every later `run_python` call and every file tool (`read_file`, `write_file`, `edit_file`, `list_files`, `search`, `publish_file`, `publish_handle`, `read_document` on a workspace path, `add_input`) first retries `<runtime> rm -f <that exact container>` and, until the runtime confirms it is gone, refuses with `SandboxQuarantinedError` (the publish and document tools return it as an `error`) without touching the root. Only the recorded container names are ever removed. Closing or reaping a quarantined workspace removes what it can but may leave directories the sandboxed code made unreadable (`chmod 000`); the warning names the workspace and the container, and once the container is removed the leftover workspace directory can be deleted.
 - **Bounded search fallback.** Without ripgrep, `search` scans in a separate Python process that is killed after 30 s (like the ripgrep path), so a catastrophic model-supplied regex cannot freeze the host process.
 - **Layer 3 — Egress.** The model chooses the URLs the harness fetches, so egress is filtered. `fetch_url` and `read_document(url)` deny loopback, private, link-local, reserved, multicast and unspecified addresses by default, plus `100.64.0.0/10` (RFC 6598 carrier-grade NAT), which no standard `ipaddress` flag reports as private and so is denied explicitly. The harness follows redirects itself (`follow_redirects=False` is forced on every request), so **every hop is re-validated**, including its scheme against `FetchConfig.allowed_schemes`. Bodies are streamed: reading stops at the byte limit, a model-supplied `max_bytes` is clamped to `FetchConfig.max_bytes_ceiling`, and the whole fetch is bounded by `FetchConfig.total_timeout_s`. `read_document` downloads through the same guard and hands Docling a local path, never a URL, so Docling cannot follow its own redirects outside policy. To reach an internal data source, name it in `FetchConfig.allow_private_hosts` (hostnames or CIDRs).
   - **Cloud metadata endpoints are denied unconditionally and cannot be allowlisted.** `allow_private_hosts` cannot open them, by design: `169.254.169.254`, `169.254.170.2`, `168.63.129.16`, `100.100.100.200`, `192.0.0.192` and `fd00:ec2::254`. Note `168.63.129.16` (Azure's wireserver) is a *public* address that nothing else would block; Azure users should expect it to be refused.
@@ -485,6 +538,7 @@ Every session has one **root directory**; everything — handles, agent-written 
 - **Bounded results and reads.** Every built-in tool result has a ceiling: `run_python` keeps the head and tail of `stdout`/`stderr` (`SandboxConfig.max_output_bytes` each) and stores a large emitted result as a handle; `inspect_handle`, `read_file`, `edit_file`, `list_files` and `search` cap what they return. The harness reads sandbox-written and fetched data with bounded memory: files are streamed, only regular files are opened (a FIFO cannot block it), a dataframe handle is never materialized in the host process (previews read one record batch, `inspect_handle(stats=True)` reads footer statistics, and `publish_handle` converts inside the sandbox), and HTTP bodies are streamed up to the byte limit under a total deadline. Document inputs are bounded too: a `read_document` URL download is capped at `FetchConfig.max_bytes` and refused, not truncated, when larger, and a workspace path is copied privately and capped at `SheathConfig.max_input_bytes`. A dataframe whose first row group exceeds 16 MiB gets no head rows or preview (`head_omitted` / "preview omitted"), because Arrow would decode the whole group.
 - **Residual risks.** The harness still parses the parquet footer and first record batch of a file sandboxed code wrote, and an oversized data page is decoded whole. Container-tier disk use is unbounded (`max_file_size_mb` applies to the `local` tier only). DNS rebinding between validation and connect is not closed, and the fetch deadline does not cover DNS resolution (see Layer 3). The `local` tier provides none of the guarantees in this section.
 - **Model-provider storage.** The built-in OpenAI client stores conversations at OpenAI by default. Because this agent sends fetched web pages, documents and workspace data to the model, `create_agent` sends `store=False`, so conversation history is kept in-process and OpenAI is asked not to retain it for later retrieval. That is a request to the provider, not a guarantee of zero retention: the provider's own logging and your account's data controls still apply, and the content is still sent to the model. Opt back in per agent with `default_options={"store": True}`. Connectors without the option are not sent it: clients from `agent_framework_anthropic` (including your subclasses of them) are exempt automatically, because that connector forwards every option to its SDK, which rejects `store`. For any other connector that lacks it, pass `default_options={"store": None}`, which removes the key; it survives the merge across `Sheath(...)`, `aopen(...)` and `solve`/`asolve`.
+- **Sub-agents.** A sub-agent can do nothing the parent could not: it gets a workspace-confined session of the parent's (same root, `safe_path`, sandbox tier, egress guard and spill), a bundle selection limited to the parent's, and the tools its spec names, and it cannot start tasks of its own. Residual risk: a sub-agent's report is model text that the parent reads, so it is treated as data, like fetched content; it can be wrong or carry injected instructions.
 - **Tool isolation.** Wrap stateful tools such as MCP servers in `tool_factory` so each conversation gets its own instance (see [MCP servers](#mcp-servers)).
 
 > The **container tier** is the default and provides real isolation. Select `local` explicitly with `SheathConfig.sandbox.backend = "local"` (or `SHEATH_SANDBOX_BACKEND=local`) to opt out; both sit behind the same `SandboxExecutor` interface.
@@ -562,6 +616,8 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 | `max_emit_bytes` | `1 MiB` | Cap on a sandbox emit payload, checked before parsing |
 | `max_control_bytes` | `8 MiB` | Read cap on the sandbox's new-handles control file |
 | `max_new_handles` | `256` | Handle records adopted per `run_python` call |
+| `subagent_max_concurrent` | `2` | Sub-agent tasks running at once per session; the rest queue |
+| `subagent_task_timeout_s` | `600.0` | Wall-clock bound on one sub-agent task, from when it gets a slot; `None` = no bound |
 | `search` | `SearchConfig()` | Tavily provider, key, `max_results` |
 | `documents` | `DocumentConfig()` | Docling ingestion: `ocr` (off by default) |
 

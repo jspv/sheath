@@ -84,6 +84,14 @@ def test_logging_wrapper_emits_and_chains():
     assert len(tool.log_seen) == 1                     # original still called
 
 
+def test_logging_wrapper_stamps_agent():
+    bus, events = _bus()
+    tool = _FakeTool()
+    install_status_wrappers(bus, tool, "srv", agent="alpha")
+    asyncio.run(tool.logging_callback(_LogParams("hello there")))
+    assert events[0].agent == "alpha"
+
+
 def test_progress_wrapper_emits_with_tool_name_and_chains():
     bus, events = _bus()
     tool = _FakeTool()

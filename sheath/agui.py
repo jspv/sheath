@@ -10,7 +10,8 @@ imports it (and ``ag_ui``) lazily so the sheath core never depends on it.
 from __future__ import annotations
 
 import asyncio
-from contextlib import aclosing, nullcontext
+import contextvars
+from contextlib import aclosing
 from typing import Any, AsyncIterator, Callable
 
 from .status import StatusBus, StatusEvent
@@ -26,7 +27,7 @@ def status_to_agui(event: StatusEvent) -> Any:
     return CustomEvent(
         name="sheath.status",
         value={"tool": event.tool, "message": event.message,
-               "current": event.current, "total": event.total},
+               "current": event.current, "total": event.total, "agent": event.agent},
     )
 
 
@@ -36,8 +37,12 @@ async def merge_status(events: AsyncIterator[Any], bus: StatusBus,
 
     StatusEvents may be emitted from a worker thread (sync tools run via ``asyncio.to_thread``),
     so the subscriber marshals onto the loop with ``call_soon_threadsafe`` (an ``asyncio.Queue``
-    is not thread-safe). Queued status events are flushed at each source-event boundary and once
-    the source ends. The subscriber is always removed on exit.
+    is not thread-safe). The next source event and the status queue are awaited together, so a
+    status is yielded as soon as it lands, also while the source is blocked (a parent sitting in
+    a wait tool). Source events keep their order; status queued before a source event is
+    yielded ahead of it, and whatever is queued when the source ends is flushed. On early exit
+    the pending source read is cancelled and awaited, then the source is closed. The subscriber
+    is always removed on exit.
     """
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue[Any] = asyncio.Queue()
@@ -45,20 +50,71 @@ async def merge_status(events: AsyncIterator[Any], bus: StatusBus,
     def _sink(status_event: StatusEvent) -> None:
         loop.call_soon_threadsafe(queue.put_nowait, to_event(status_event))
 
+    next_event: asyncio.Future[Any] | None = None
+    next_status: asyncio.Future[Any] | None = None
     unsubscribe = bus.subscribe(_sink)
     try:
-        # Close the source deterministically on early exit (it may be a plain async iterable).
-        with_close = aclosing(events) if hasattr(events, "aclose") else nullcontext(events)
-        async with with_close as source:
-            async for event in source:
-                while not queue.empty():
+        # Every pull of the source (and its close) runs in one Context: the agent run sets
+        # context variables in one pull and resets them in a later one, which fails across
+        # Contexts. Inside the try, so a source that is not iterable still unsubscribes.
+        context = contextvars.copy_context()
+        iterator = aiter(events)
+
+        async def _pull() -> Any:
+            return await anext(iterator)
+
+        try:
+            next_event = loop.create_task(_pull(), context=context)
+            while True:
+                if next_status is None:
+                    next_status = asyncio.ensure_future(queue.get())
+                await asyncio.wait({next_event, next_status},
+                                   return_when=asyncio.FIRST_COMPLETED)
+                if next_status.done():
+                    status, next_status = next_status.result(), None
+                    yield status
+                if not next_event.done():
+                    continue
+                done, next_event = next_event, None
+                try:
+                    event = done.result()
+                except StopAsyncIteration:
+                    break
+                while not queue.empty():              # status queued before this event
                     yield queue.get_nowait()
                 yield event
+                next_event = loop.create_task(_pull(), context=context)
+        finally:
+            # Stop the pending source read, then close the source deterministically on early
+            # exit (aclose() on a generator that is still running raises).
+            await _cancel(next_event)
+            if hasattr(events, "aclose"):
+                await loop.create_task(_aclose(events), context=context)
+        if next_status is not None:
+            await _cancel(next_status)
+            if next_status.done() and not next_status.cancelled():
+                yield next_status.result()
+            next_status = None
         await asyncio.sleep(0)          # let any last call_soon_threadsafe put land
         while not queue.empty():
             yield queue.get_nowait()
     finally:
+        await _cancel(next_status)
         unsubscribe()
+
+
+async def _aclose(source: Any) -> None:
+    await source.aclose()
+
+
+async def _cancel(task: asyncio.Future[Any] | None) -> None:
+    """Cancel ``task`` and wait for it to finish, without raising its outcome."""
+    if task is None:
+        return
+    task.cancel()
+    await asyncio.wait({task})
+    if not task.cancelled():
+        task.exception()                # retrieved, so it is never reported as unhandled
 
 
 def _call_ids(m: dict[str, Any]) -> list[str]:

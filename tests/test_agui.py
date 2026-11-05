@@ -90,6 +90,18 @@ def test_merge_status_unsubscribes_on_exit():
     assert bus._subscribers == []                    # sink removed in finally
 
 
+def test_merge_status_unsubscribes_when_source_is_not_iterable():
+    bus = StatusBus()
+
+    async def run():
+        async for _ in merge_status(object(), bus, to_event=_tag):
+            pass
+
+    with pytest.raises(TypeError):
+        asyncio.run(run())
+    assert bus._subscribers == []                    # removed even when aiter() raises
+
+
 def test_merge_status_emitted_during_final_event_is_not_lost():
     bus = StatusBus()
 
@@ -111,7 +123,14 @@ def test_merge_status_emitted_during_final_event_is_not_lost():
 def test_status_to_agui_maps_fields():
     ev = status_to_agui(StatusEvent(tool="run_python", message="running", current=1, total=3))
     assert ev.name == "sheath.status"
-    assert ev.value == {"tool": "run_python", "message": "running", "current": 1, "total": 3}
+    assert ev.value == {"tool": "run_python", "message": "running", "current": 1, "total": 3,
+                        "agent": None}
+
+
+@pytest.mark.skipif(not _HAS_AGUI, reason="needs the agui extra (ag-ui-protocol)")
+def test_status_to_agui_carries_agent():
+    ev = status_to_agui(StatusEvent(tool="t", message="m", agent="alpha"))
+    assert ev.value["agent"] == "alpha"
 
 
 @pytest.mark.skipif(not _HAS_AGUI, reason="needs the agui extra (ag-ui-protocol)")
@@ -198,3 +217,65 @@ def test_agui_event_stream_errors_clearly_without_the_extra(monkeypatch):
 
     with pytest.raises(RuntimeError, match="install the 'agui' extra"):
         asyncio.run(run())
+
+
+def test_status_yielded_while_source_is_blocked():
+    # The source cannot produce "b" until the consumer has seen the status, so merge_status must
+    # deliver queued status while it waits on the source (the parent sitting in a wait tool).
+    bus = StatusBus()
+
+    async def run():
+        release = asyncio.Event()
+
+        async def source():
+            yield "a"
+            await release.wait()
+            yield "b"
+
+        async def emit():
+            bus.emit(StatusEvent(tool="t", message="live"))
+
+        out = []
+
+        async def consume():
+            async for ev in merge_status(source(), bus, to_event=_tag):
+                out.append(ev)
+                if ev == "a":
+                    asyncio.get_running_loop().create_task(emit())
+                elif isinstance(ev, tuple):
+                    release.set()
+
+        await asyncio.wait_for(consume(), timeout=5)
+        return out
+
+    assert asyncio.run(run()) == ["a", ("status", "live"), "b"]
+
+
+def test_early_close_cancels_pending_source_read():
+    bus = StatusBus()
+
+    async def run():
+        never = asyncio.Event()
+        source_closed = asyncio.Event()
+
+        async def source():
+            try:
+                yield "a"
+                await never.wait()
+                yield "unreachable"
+            finally:
+                source_closed.set()
+
+        merged = merge_status(source(), bus, to_event=_tag)
+        assert await asyncio.wait_for(merged.__anext__(), timeout=5) == "a"
+        # The next read leaves a source read pending; a status lands while it waits.
+        asyncio.get_running_loop().call_soon(bus.emit, StatusEvent(tool="t", message="mid"))
+        assert await asyncio.wait_for(merged.__anext__(), timeout=5) == ("status", "mid")
+        await merged.aclose()
+        leftover = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        return source_closed.is_set(), leftover
+
+    closed, leftover = asyncio.run(run())
+    assert closed                                     # the pending source read was cancelled
+    assert leftover == []                             # no task left behind
+    assert bus._subscribers == []                     # subscriber removed

@@ -103,14 +103,19 @@ def _should_spill(result: Any, threshold_bytes: int) -> bool:
     return size is not None and size > threshold_bytes
 
 
-def _maybe_spill(session: Session, tool_name: str, result: Any) -> Any:
+def _maybe_spill(session: Session, tool_name: str, result: Any, *,
+                 source: str | None = None) -> Any:
+    """Spill ``result`` to a handle when it crosses the threshold; reject it past the cap.
+
+    ``source`` is recorded on the handle; it defaults to ``tool:<tool_name>``.
+    """
     result = normalize_mcp_result(result)
     if not _should_spill(result, session.config.spill_threshold_bytes):
         return result
     size = _spill_size_bytes(result) or 0
     if size > session.config.max_spill_bytes:
         raise SpillLimitExceeded(tool_name, size, session.config.max_spill_bytes)
-    handle = session.store.put(result, source=f"tool:{tool_name}")
+    handle = session.store.put(result, source=source or f"tool:{tool_name}")
     report_progress(f"stored {size} bytes as {handle.id}", tool=tool_name)
     return handle.summary()
 

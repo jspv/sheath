@@ -76,6 +76,7 @@ class SessionManager:
                     agent_instructions: str | None = None,
                     on_publish: Any | None = None,
                     agent_kwargs: dict[str, Any] | None = None,
+                    subagents: Any | None = None,
                     keep: bool | None = None) -> Conversation:
         """Reuse the live conversation for ``session_id`` (if any, not expired), else create one.
 
@@ -86,7 +87,7 @@ class SessionManager:
         an expired conversation (whose teardown may wait for a running turn) happens outside
         the manager lock; only opens of that same id wait for it.
 
-        ``agent_instructions``, ``on_publish``, ``agent_kwargs`` and ``keep`` override the Sheath
+        ``agent_instructions``, ``on_publish``, ``agent_kwargs``, ``subagents`` and ``keep`` override the Sheath
         defaults for a conversation being *created*; re-opening a live id returns the existing
         conversation unchanged. ``keep`` (default: ``SheathConfig.keep_conversation_workspaces``)
         leaves the workspace on disk when the conversation is closed or expires.
@@ -101,7 +102,8 @@ class SessionManager:
                         return await self._create(session_id, tools=tools, bundles=bundles,
                                                   agent_instructions=agent_instructions,
                                                   on_publish=on_publish,
-                                                  agent_kwargs=agent_kwargs, keep=keep)
+                                                  agent_kwargs=agent_kwargs,
+                                                  subagents=subagents, keep=keep)
                     if not self._expired(existing):
                         # Opening is activity: without this, a caller could be handed a
                         # conversation that a sweep reaps before its turn takes the lock.
@@ -118,7 +120,8 @@ class SessionManager:
             # Retry: the id is now free (or someone else recreated it first).
 
     async def _create(self, session_id: str | None, *, tools, bundles, agent_instructions,
-                      on_publish, agent_kwargs, keep: bool | None = None) -> Conversation:
+                      on_publish, agent_kwargs, subagents=None,
+                      keep: bool | None = None) -> Conversation:
         conv_id = session_id if session_id is not None else uuid.uuid4().hex
         config = dataclasses.replace(
             self._sheath.config, root_dir=str(_conv_root(self._sheath.config, conv_id)))
@@ -135,6 +138,8 @@ class SessionManager:
             on_publish=(on_publish if on_publish is not None
                         else self._sheath._on_publish),
             agent_kwargs=self._sheath._merged_agent_kwargs(agent_kwargs),
+            subagents=(subagents if subagents is not None else self._sheath._subagents),
+            client_factory=self._sheath._subagent_client_factory(),
         )
         self._store.put(conv_id, conv)
         return conv

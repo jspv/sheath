@@ -35,7 +35,8 @@ def make_status_printer(write: Callable[[str], None] | None = None):
         progress = ""
         if event.current is not None and event.total is not None:
             progress = f" [{event.current:g}/{event.total:g}]"
-        write(f"→ {event.tool}: {event.message}{progress}")
+        who = f"[{event.agent}] " if event.agent else ""
+        write(f"→ {who}{event.tool}: {event.message}{progress}")
 
     return on_status
 

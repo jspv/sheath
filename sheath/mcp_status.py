@@ -25,10 +25,12 @@ def _is_progress(root: Any) -> bool:
     return getattr(root, "method", None) == "notifications/progress" and hasattr(root, "params")
 
 
-def _wrap_logging(original: Callable, bus: StatusBus, server: str) -> Callable:
+def _wrap_logging(original: Callable, bus: StatusBus, server: str,
+                  agent: str | None = None) -> Callable:
     async def logging_callback(params: Any) -> Any:
         try:
-            bus.emit(StatusEvent(tool=f"mcp:{server}", message=str(getattr(params, "data", ""))))
+            bus.emit(StatusEvent(tool=f"mcp:{server}",
+                                 message=str(getattr(params, "data", "")), agent=agent))
         except Exception:  # noqa: BLE001 - status is best-effort; never break the handler
             pass
         return await original(params)
@@ -37,7 +39,7 @@ def _wrap_logging(original: Callable, bus: StatusBus, server: str) -> Callable:
 
 
 def _wrap_message(original: Callable, bus: StatusBus, server: str,
-                  token_map: dict[Any, str]) -> Callable:
+                  token_map: dict[Any, str], agent: str | None = None) -> Callable:
     async def message_handler(message: Any) -> Any:
         try:
             root = getattr(message, "root", None)
@@ -45,7 +47,7 @@ def _wrap_message(original: Callable, bus: StatusBus, server: str,
                 p = root.params
                 tool = token_map.get(p.progressToken, f"mcp:{server}")
                 bus.emit(StatusEvent(tool=tool, message=p.message or "",
-                                     current=p.progress, total=p.total))
+                                     current=p.progress, total=p.total, agent=agent))
         except Exception:  # noqa: BLE001 - best-effort; never break the handler
             pass
         return await original(message)
@@ -53,7 +55,8 @@ def _wrap_message(original: Callable, bus: StatusBus, server: str,
     return message_handler
 
 
-def install_status_wrappers(bus: StatusBus, tool: Any, server: str) -> dict[Any, str]:
+def install_status_wrappers(bus: StatusBus, tool: Any, server: str, *,
+                            agent: str | None = None) -> dict[Any, str]:
     """Wrap the tool's logging/message handlers (before connect) to emit StatusEvents.
 
     Returns a (mutable) token->tool-name map shared with the message wrapper; it is empty
@@ -62,10 +65,10 @@ def install_status_wrappers(bus: StatusBus, tool: Any, server: str) -> dict[Any,
     token_map: dict[Any, str] = {}
     orig_logging = getattr(tool, "logging_callback", None)
     if callable(orig_logging):
-        tool.logging_callback = _wrap_logging(orig_logging, bus, server)
+        tool.logging_callback = _wrap_logging(orig_logging, bus, server, agent)
     orig_message = getattr(tool, "message_handler", None)
     if callable(orig_message):
-        tool.message_handler = _wrap_message(orig_message, bus, server, token_map)
+        tool.message_handler = _wrap_message(orig_message, bus, server, token_map, agent)
     return token_map
 
 
