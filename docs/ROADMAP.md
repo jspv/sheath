@@ -1,6 +1,6 @@
 # Roadmap
 
-Status of work beyond the shipped v0.4.0 surface. The README documents what exists;
+Status of work beyond the shipped v0.4.1 surface. The README documents what exists;
 this file tracks what doesn't yet. Per-item design specs and phased plans live in
 `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 

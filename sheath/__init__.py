@@ -19,7 +19,7 @@ from .subagents import SpawnPolicy, SubagentSpec
 from .status import StatusBus, StatusEvent, report_progress
 from .tools.registry import build_tools
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 __all__ = [
     "Sheath", "Result", "solve", "ToolFactory", "tool_factory",

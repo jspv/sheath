@@ -9,7 +9,10 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 0.4.0 adds sub-agents, runtime sub-agents and messaging (all experimental) and caps
 `agent-framework-core` below 1.25.
 
-## Unreleased
+0.4.1 confines sub-agent writes to their folder and granted paths (a behavior change for
+sub-agents that wrote elsewhere) and adds `wait_for_message` and `subagent_middleware`.
+
+## 0.4.1 — 2026-11-05
 
 ### Waiting for a message
 - **New:** `wait_for_message(timeout_s=None)`, offered with `send_message`. It blocks until
