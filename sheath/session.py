@@ -23,7 +23,7 @@ from . import bundles as _bundles
 from . import input_trees as _input_trees
 from .config import SheathConfig, SandboxConfig
 from .handles import Handle, HandleStore
-from .paths import safe_filename, validate_segment
+from .paths import safe_filename, safe_path, validate_segment
 from .publish import OnPublish, PublishError, validate_publication
 from .sandbox import (
     ControlPlaneLimits, LocalSubprocessSandbox, NoSandboxIsolationWarning,
@@ -613,7 +613,7 @@ class Session:
                                            max_round_trips=spec.max_round_trips,
                                            subtree_allowance=None,
                                            remaining_depth=depth_left if can_spawn else 0),
-                             declared=True, client=sub_client)
+                             declared=True, client=sub_client, folder=f"agents/{sub_name}")
             agent = await self.create_agent(
                 sub_client, agent_instructions=spec.instructions,
                 tools=expand_tools(spec.tools), bundles=sub_bundles,
@@ -626,6 +626,8 @@ class Session:
             if can_spawn:
                 # What it runs with: the ceiling for the sub-agents it creates.
                 node.limits.max_round_trips = _round_trips(sub_client)
+            with self.file_io():
+                safe_path(self.root, node.folder).mkdir(parents=True, exist_ok=True)
             node.agent = ConfinedSubagent(agent, node=node, session=self)
             delegation.add_node(node)
         self.subagent_names = tuple(subagents)

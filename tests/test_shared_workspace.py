@@ -121,3 +121,50 @@ def test_explicit_handle_id_collision_refused(tmp_path):
         res = sb.run_code(code)
     assert "handle id already exists" in res.error and "a_h" in res.error
     assert store.get("a_h") == "first"
+
+
+def test_untracked_change_then_read_allows_write_and_edit(tmp_path):
+    s = _session(tmp_path)
+    with bind_agent("a"):
+        write_file(s, "f.md", "from a\n")
+    (s.root / "f.md").write_text("changed by run_python\n")   # untracked writer
+    with bind_agent("b"):
+        with pytest.raises(ValueError):
+            write_file(s, "f.md", "blind\n")
+        read_file(s, "f.md")
+        edit_file(s, "f.md", "changed", "edited")
+        (s.root / "f.md").write_text("again\n")
+        read_file(s, "f.md")
+        write_file(s, "f.md", "from b\n")
+    assert read_file(s, "f.md") == "from b\n"
+
+
+def test_new_file_honours_umask(tmp_path):
+    s = _session(tmp_path)
+    old = os.umask(0o027)
+    try:
+        write_file(s, "m.txt", "x")
+    finally:
+        os.umask(old)
+    assert (os.stat(s.root / "m.txt").st_mode & 0o777) == 0o640
+
+
+def test_declared_role_gets_its_folder(tmp_path):
+    import asyncio
+
+    from sheath.testing import StubChatClient, text
+    from tests.test_subagents import spec
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            await sess.create_agent(StubChatClient([text("x")]), bundles=("files",),
+                                    subagents={"a": spec([text("r")])})
+            assert (sess.root / "agents" / "a").is_dir()
+            assert sess.delegation.node("a").folder == "agents/a"
+
+    asyncio.run(main())
+
+
+def test_instructions_allow_delegator_path_override():
+    assert "unless the agent that delegated to it said to use another path" \
+        in SUBAGENT_INSTRUCTIONS

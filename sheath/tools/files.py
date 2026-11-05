@@ -50,16 +50,22 @@ def _sha(data: bytes) -> bytes:
     return hashlib.sha256(data).digest()
 
 
-def _check_overwrite(session: Session, rel: str, agent: str | None) -> None:
+def _check_overwrite(session: Session, rel: str, agent: str | None,
+                     current: bytes | None) -> None:
     """Refuse to overwrite a file another agent wrote last unless ``agent`` has read (or
-    written) its current content. Call inside ``session.file_io()``. Only files written
-    through ``write_file`` / ``edit_file`` are tracked; ``run_python`` output is not."""
+    written) its CURRENT content (``current`` is its sha256; ``None`` if it does not exist).
+    Call inside ``session.file_io()``.
+
+    This guards against accidental lost updates between cooperating agents, not against an
+    adversary: only files written through ``write_file`` / ``edit_file`` are tracked
+    (``run_python`` output is not), and case or Unicode aliases of a path on case-insensitive
+    filesystems, and hard links, are not normalized."""
     last = session._file_writers.get(rel)
-    if last is None or last[0] == agent:
+    if last is None or last[0] == agent or current is None:
         return
-    writer, written = last
-    if session._file_seen.get((agent, rel)) == written:
+    if session._file_seen.get((agent, rel)) == current:
         return
+    writer = last[0]
     who = f"agent {writer!r}" if writer is not None else "the top agent"
     raise ValueError(f"{rel!r} was last written by {who} and you have not read its current "
                      "content; read_file it first, or write to your own file elsewhere "
@@ -156,13 +162,16 @@ def write_file(session: Session, path: str, content: str) -> str:
         try:                               # refuse links / non-regular targets as before
             fd = _open_checked(target, os.O_RDONLY, path)
         except FileNotFoundError:
-            mode = 0o644
+            umask = os.umask(0)
+            os.umask(umask)
+            mode, current = 0o666 & ~umask, None
         else:
             try:
                 mode = os.fstat(fd).st_mode
+                current = _hash_fd(fd)
             finally:
                 os.close(fd)
-        _check_overwrite(session, rel, agent)
+        _check_overwrite(session, rel, agent, current)
         _replace_atomically(target, data, mode)
         _record(session, rel, agent, _sha(data), wrote=True)
     return f"wrote {len(data)} bytes to {rel}"
@@ -260,7 +269,6 @@ def edit_file(session: Session, path: str, old: str, new: str,
                              "elsewhere (e.g. under outputs/)")
         rel = target.relative_to(session.root).as_posix()
         agent = status.current_agent()
-        _check_overwrite(session, rel, agent)
         fd = _open_checked(target, os.O_RDONLY, path)
         try:
             st = os.fstat(fd)
@@ -274,6 +282,7 @@ def edit_file(session: Session, path: str, old: str, new: str,
                     raise ValueError(f"{path!r} is larger than {_MAX_EDIT_BYTES} bytes")
         finally:
             os.close(fd)
+        _check_overwrite(session, rel, agent, _sha(data))
         if b"\0" in data[:_BINARY_PROBE_BYTES]:
             raise ValueError(f"{path!r} is a binary file; edit it inside run_python instead")
         try:
@@ -367,5 +376,8 @@ def _replace_atomically(target: Path, data: bytes, mode: int) -> None:
     except BaseException:
         if fd != -1:
             os.close(fd)
-        os.unlink(tmp)
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass                      # keep the original error
         raise
