@@ -451,6 +451,7 @@ class Session:
         _harness_extra: str | None = None,
         _prebuilt_tools: list | None = None,
         _node: Any = None,
+        _message_node: Any = None,
         **maf_kwargs: Any,
     ):
         """Build a MAF agent over the selected bundles plus developer tools/MCP.
@@ -473,6 +474,10 @@ class Session:
         ``_node`` is the ``AgentNode`` of a sub-agent being built that may spawn its own: it
         gets the delegation tools and the parent-wait loop bound to that node, exactly as a
         delegating top agent does, so it waits for its own sub-agents before reporting.
+
+        ``_message_node`` is the ``AgentNode`` of any sub-agent being built: it gets
+        ``send_message`` (and ``set_message_permissions`` when it has or may create sub-agents)
+        whenever the session has a spawn policy. A top agent with a tree gets them likewise.
         """
         from agent_framework import create_harness_agent  # local: heavy dep, imported at call time
 
@@ -505,6 +510,11 @@ class Session:
         elif _node is not None:
             providers.append(self._delegation_provider(_node, wait_timeout))
             _add_parent_loop(maf_kwargs, _node)
+        message_node = top if top is not None else (_node or _message_node)
+        if message_node is not None:
+            from .delegation import MessagingProvider
+            # Offers nothing until the session has a spawn policy (checked at each run).
+            providers.append(MessagingProvider(self.delegation, message_node))
         builtin = self.tools(*bundles)
         external: list = []
         for tool in tools or []:
@@ -613,12 +623,14 @@ class Session:
                                            max_round_trips=spec.max_round_trips,
                                            subtree_allowance=None,
                                            remaining_depth=depth_left if can_spawn else 0),
-                             declared=True, client=sub_client, folder=f"agents/{sub_name}")
+                             declared=True, client=sub_client, folder=f"agents/{sub_name}",
+                             message_to=set(spec.message_to))
             agent = await self.create_agent(
                 sub_client, agent_instructions=spec.instructions,
                 tools=expand_tools(spec.tools), bundles=sub_bundles,
                 name=sub_name, _mcp_agent=sub_name, _harness_extra=subagent_instructions(sub_name),
-                _node=node if can_spawn else None, middleware=[_ToolActivity()])
+                _node=node if can_spawn else None, _message_node=node,
+                middleware=[_ToolActivity()])
             # The spec's budget, on the sub-agent's own client only.
             _apply_tool_loop_limits(sub_client, dataclasses.replace(
                 self.config, tool_loop_max_iterations=spec.max_round_trips,

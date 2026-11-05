@@ -36,6 +36,7 @@ class SubagentSpec:
     client: Any | None = None                # a ready client of its own, instead of model
     max_round_trips: int | None = None       # per-task tool-loop budget
     can_spawn: bool = False                  # give it spawn_subagent (needs a SpawnPolicy)
+    message_to: tuple[str, ...] = ()         # agents it may message besides its creator
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -133,6 +134,13 @@ def validate_subagents(
                     f"sub-agent {name!r} asks for bundles {outside} outside the parent's "
                     f"selection {sorted(parent_allowed)}"
                 )
+        if (not isinstance(spec.message_to, (tuple, list))
+                or not all(isinstance(m, str) and _NAME_RE.fullmatch(m)
+                           for m in spec.message_to)):
+            raise ValueError(
+                f"sub-agent {name!r}: message_to must be a tuple of agent names matching "
+                f"{_NAME_PATTERN}, got {spec.message_to!r}"
+            )
         if spec.max_round_trips is not None and spec.max_round_trips < 1:
             raise ValueError(
                 f"sub-agent {name!r}: max_round_trips must be >= 1, got {spec.max_round_trips}"

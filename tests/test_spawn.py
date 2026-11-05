@@ -128,8 +128,10 @@ def test_spawn_two_with_different_models_and_tools(tmp_path):
     assert "A" in got["f1"] and "B" in got["f2"]
     files = {"read_file", "write_file", "edit_file", "list_files", "search", "inspect_handle"}
     small, big = factory.made[0][1], factory.made[1][1]
-    assert small.calls and all(set(c) == files | {"tool_a"} for c in small.calls)
-    assert big.calls and all(set(c) == files | {"run_python", "tool_b"} for c in big.calls)
+    # send_message: every agent has it when the host's policy is on (messaging).
+    assert small.calls and all(set(c) == files | {"tool_a", "send_message"} for c in small.calls)
+    assert big.calls and all(set(c) == files | {"run_python", "tool_b", "send_message"}
+                             for c in big.calls)
     assert snap == {"nodes": ["a", "b"], "records": 2, "total": 2, "folders": ["a", "b"]}
     d = sess.delegation
     top = d.top("data-integrator")
@@ -337,9 +339,10 @@ def test_refuse_empty_bundles(tmp_path):
     assert snap == NOTHING and factory.made == []
 
 
-def test_message_to_not_supported_yet(tmp_path):
-    reply, snap, factory = _refused(tmp_path, spawn("a", 1, message_to=["b"]))
-    assert "not supported yet" in reply
+def test_refuse_bad_message_to_name(tmp_path):
+    # The top agent may grant any name, but each must be a valid agent name.
+    reply, snap, factory = _refused(tmp_path, spawn("a", 1, message_to=["not a name!"]))
+    assert "message_to" in reply
     assert snap == NOTHING and factory.made == []
 
 
