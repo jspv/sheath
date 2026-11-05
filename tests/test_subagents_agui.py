@@ -183,13 +183,11 @@ def test_nonstreaming_run_unaffected(tmp_path):
 
 
 def test_continue_task_across_agui_requests(tmp_path):
-    """OBSERVED: a task from an earlier AG-UI request can NOT be continued: "No task found".
+    """A task from an earlier AG-UI request can be continued.
 
     Request 1 starts task 1 and waits for it; request 2 on the same ``threadId`` calls
-    ``continue_task(1, ...)`` and gets "Error: No task found with ID 1.". The AG-UI wrapper
-    builds a fresh ``AgentSession`` (same ``session_id``, the ``threadId``) with empty state for
-    every request, and MAF's provider keeps its task list in that session state, so each
-    request starts with no tasks (and task ids start again at 1).
+    ``continue_task(1, ...)``. The AG-UI wrapper builds a fresh ``AgentSession`` for every
+    request, but task state lives in the conversation's ``Session``, so the task is found.
     """
     async def main():
         seen = {}
@@ -202,7 +200,7 @@ def test_continue_task_across_agui_requests(tmp_path):
         subs = {"a": SubagentSpec(description="agent",
                                   client=StubChatClient([text("first"), text("second")]))}
         parent = StubChatClient([start("a", 1), wait([1], 1), results(1, 1), text("r1-done"),
-                                 cont(1, "more", 1), record])
+                                 cont(1, "more", 1), wait([1], 2), results(1, 2), record])
         sheath = Sheath(_cfg(tmp_path), client=parent, bundles=("files",), subagents=subs)
         try:
             await _collect(sheath, {"threadId": "t1", "runId": "r1",
@@ -217,7 +215,8 @@ def test_continue_task_across_agui_requests(tmp_path):
         return seen
 
     seen = asyncio.run(main())
-    assert seen["c1"] == "Error: No task found with ID 1."
+    assert seen["c1"] == "Task 1 continued with new input."
+    assert seen["r2"] == "second"
 
 
 def test_client_disconnect_stops_the_run_and_its_subagents(tmp_path):

@@ -414,6 +414,9 @@ def test_subagent_cannot_delegate(tmp_path):
 
 
 def test_stream_true_refused():
-    sub = ConfinedSubagent(object(), name="a", description="d", session=None)
+    from sheath.delegation import AgentNode
+
+    node = AgentNode(name="a", path="a", depth=1, description="d")
+    sub = ConfinedSubagent(object(), node=node, session=None)
     with pytest.raises(ValueError, match="stream"):
         asyncio.run(sub.run("go", stream=True))

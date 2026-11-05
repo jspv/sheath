@@ -10,9 +10,8 @@ import time
 from contextlib import aclosing
 
 import pytest
-from agent_framework import BackgroundAgentsProvider
-
 from sheath import Conversation, SheathConfig, Session
+from sheath.delegation import Delegation, DelegationProvider
 from sheath.testing import StubChatClient, text, tool_call
 from tests.test_subagents import spec, start
 
@@ -84,13 +83,18 @@ def test_conversation_close_releases_and_reaps_after_cancel(tmp_path, monkeypatc
     gate, flag = Gate(), {}
     marker = tmp_path / "marker.txt"
     released: list = []
-    real = BackgroundAgentsProvider.release_session
+    real_release, real_cancel = Session.release_subagents, Delegation.cancel_all
 
-    async def spy(self, session, **kw):
-        released.append(session)
-        return await real(self, session, **kw)
+    async def spy(self, agent_session):
+        released.append(agent_session)
+        return await real_release(self, agent_session)
 
-    monkeypatch.setattr(BackgroundAgentsProvider, "release_session", spy)
+    async def cancel_spy(self):
+        released.append(("cancel_all", self.closed))
+        return await real_cancel(self)
+
+    monkeypatch.setattr(Session, "release_subagents", spy)
+    monkeypatch.setattr(Delegation, "cancel_all", cancel_spy)
     subs = {"a": spec([tool_call("nap"), text("never")], tools=[sleeper(gate, flag, marker)])}
 
     async def main():
@@ -104,7 +108,9 @@ def test_conversation_close_releases_and_reaps_after_cancel(tmp_path, monkeypatc
         return conv
 
     conv = asyncio.run(main())
-    assert released and all(s is conv.agent_session for s in released)
+    sessions = [s for s in released if not isinstance(s, tuple)]
+    assert sessions and all(s is conv.agent_session for s in sessions)
+    assert ("cancel_all", True) in released   # the release cancelled with new tasks refused
     assert not (tmp_path / "r").exists()
     assert flag.get("cancelled") is True
     assert not marker.exists()
@@ -512,7 +518,7 @@ def test_reap_removes_nested_chmod_000_directories(tmp_path):
 
 
 def test_session_close_cancels_task_not_yet_started(tmp_path):
-    """A task MAF's start tool created but that has not taken a step yet is cancelled too."""
+    """A task the start tool created but that has not taken a step yet is cancelled too."""
     from agent_framework import SessionContext
 
     ran: dict = {}
@@ -528,7 +534,8 @@ def test_session_close_cancels_task_not_yet_started(tmp_path):
         async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
             agent = await sess.create_agent(StubChatClient([text("bye")]), bundles=("files",),
                                             subagents=subs)
-            provider = sess._subagent_providers[0]
+            provider = next(p for p in agent.context_providers
+                            if isinstance(p, DelegationProvider))
             agent_session = agent.create_session()
             ctx = SessionContext(input_messages=[])
             await provider.before_run(agent=agent, session=agent_session, context=ctx,

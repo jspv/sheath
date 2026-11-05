@@ -1,8 +1,8 @@
-"""Sub-agents: specs, their up-front validation, and the confining wrapper MAF's provider runs.
+"""Sub-agents: specs, their up-front validation, and the confining wrapper each task runs in.
 
-``Session.create_agent`` builds each sub-agent over its own ``Session`` and hands it to MAF's
-``BackgroundAgentsProvider`` wrapped in ``ConfinedSubagent``, which bounds, tags and spills
-every run.
+``Session.create_agent`` builds each sub-agent over the same ``Session``, wraps it in
+``ConfinedSubagent`` (which bounds, tags and spills every run) and registers it as an
+``AgentNode`` with the session's ``Delegation`` (``sheath.delegation``).
 """
 
 from __future__ import annotations
@@ -124,18 +124,6 @@ def validate_subagents(
     return resolved
 
 
-_PROVIDER_NOTE = (
-    "Sub-agents work in this workspace under the same limits as you. Delegate a self-contained "
-    "side task with background_agents_start_task, wait for every task you start before you "
-    "finish, and open a long result with inspect_handle."
-)
-
-
-def provider_instructions() -> str:
-    """sheath's note on delegation, followed by MAF's listing of the sub-agents."""
-    return _PROVIDER_NOTE + "\n\n{background_agents}"
-
-
 class _ToolActivity(FunctionMiddleware):
     """Emit ``running`` before each sub-agent tool call and ``done`` or ``failed: <type>`` after.
 
@@ -188,7 +176,7 @@ class _DropLoopNudges(AgentMiddleware):
 
 
 class ConfinedSubagent:
-    """What MAF's ``BackgroundAgentsProvider`` runs: a sheath-built agent, bounded per run.
+    """What a delegated task runs: a sheath-built agent, bounded per run.
 
     Each run is registered with the session (so it can be cancelled, queued or running), waits
     for one of the session's ``subagent_max_concurrent`` slots, is tagged with the sub-agent's
@@ -196,10 +184,11 @@ class ConfinedSubagent:
     handle when it is large.
     """
 
-    def __init__(self, inner: Any, *, name: str, description: str, session: Any) -> None:
+    def __init__(self, inner: Any, *, node: Any, session: Any) -> None:
         self._inner = inner
-        self.name = name
-        self.description = description
+        self._node = node                  # its sheath.delegation.AgentNode
+        self.name = node.path
+        self.description = node.description
         self._session = session
 
     @property
@@ -224,8 +213,8 @@ class ConfinedSubagent:
             sess._subagent_tasks.add(task)
         try:
             # Yield once right after registering, so Session.cancel_subagents (which yields
-            # before it looks) sees a task MAF started but that had not yet run, and cancels
-            # it before it can do any work.
+            # before it looks again) sees a run started outside the delegation's own records
+            # that had not yet run, and cancels it before it can do any work.
             await asyncio.sleep(0)
             if sess._subagent_slots is None:
                 # Created here, not with the session: it must belong to the running loop.

@@ -32,6 +32,7 @@ from .sandbox import (
 from .status import StatusBus, StatusEvent, bind_bus
 
 if TYPE_CHECKING:
+    from .delegation import Delegation
     from .subagents import SubagentSpec
 
 _DELIVER = "deliver"
@@ -39,10 +40,6 @@ _INPUTS = "inputs"
 _COPY_CHUNK = 1024 * 1024
 # create_harness_agent options that add a capability path around the sandbox, safe_path or egress.
 _UNSANDBOXED_KWARGS = frozenset({"shell_executor", "file_access_store", "background_agents"})
-# How long cancelling sub-agent tasks waits for them to finish before giving up (logged).
-_SUBAGENT_CANCEL_WAIT_S = 30.0
-# How many times cancelling sub-agent tasks yields and looks again for newly registered ones.
-_SUBAGENT_CANCEL_ROUNDS = 3
 
 _log = logging.getLogger(__name__)
 
@@ -113,8 +110,8 @@ class Session:
     subagent_names: tuple[str, ...] = field(default=(), init=False)
     # Sub-agent runs registered by ConfinedSubagent, queued or running.
     _subagent_tasks: set[asyncio.Task] = field(default_factory=set, init=False, repr=False)
-    # The BackgroundAgentsProvider instances create_agent built (for release).
-    _subagent_providers: list[Any] = field(default_factory=list, init=False, repr=False)
+    # The agent tree and its tasks (sheath.delegation), created on first use.
+    _delegation: Any = field(default=None, init=False, repr=False)
     # The subagent_max_concurrent semaphore, created lazily inside the running loop.
     _subagent_slots: Any = field(default=None, init=False, repr=False)
 
@@ -188,42 +185,29 @@ class Session:
         """Register a status subscriber; returns a zero-arg unsubscribe handle."""
         return self.status_bus.subscribe(callback)
 
-    async def cancel_subagents(self) -> None:
-        """Cancel every registered sub-agent task and wait for it, bounded by
-        ``_SUBAGENT_CANCEL_WAIT_S``. A task still pending after that is logged and left.
+    @property
+    def delegation(self) -> "Delegation":
+        """This session's agent tree and tasks (``sheath.delegation.Delegation``)."""
+        if self._delegation is None:
+            from .delegation import Delegation  # local: agent_framework is a heavy import
+            self._delegation = Delegation(self)
+        return self._delegation
 
-        A task MAF's ``start_task`` created but that has not yet taken a step is not registered
-        yet (``ConfinedSubagent.run`` registers on its first step, then yields). So after
-        cancelling what is registered, this yields once, letting such tasks register, and looks
-        again until a look finds nothing new (bounded by ``_SUBAGENT_CANCEL_ROUNDS``). The
-        registered tasks are cancelled before the yield, so none of them gets a step to work."""
-        me = asyncio.current_task()
-        tasks: list[asyncio.Task] = []
-        for look in range(_SUBAGENT_CANCEL_ROUNDS):
-            new = [t for t in self._subagent_tasks
-                   if t is not me and not t.done() and t not in tasks]
-            for task in new:
-                task.cancel()
-            tasks.extend(new)
-            if look and not new:
-                break   # a look after a yield found nothing new
-            await asyncio.sleep(0)
-        if not tasks:
-            return
-        _, pending = await asyncio.wait(tasks, timeout=_SUBAGENT_CANCEL_WAIT_S)
-        if pending:
-            _log.warning("%d sub-agent task(s) still running %.0fs after cancellation: %s",
-                         len(pending), _SUBAGENT_CANCEL_WAIT_S,
-                         ", ".join(sorted(t.get_name() for t in pending)))
+    async def cancel_subagents(self) -> None:
+        """Cancel every running sub-agent task and wait for it, bounded by
+        ``sheath.delegation.CANCEL_WAIT_S``. A task still pending after that is logged and
+        left. See ``Delegation.cancel_all``."""
+        await self.delegation.cancel_all()
 
     async def release_subagents(self, agent_session: Any) -> None:
-        """Release ``agent_session``'s runtime state in every provider this session built
-        (MAF cancels and drains that session's tasks). Failures are logged, not raised."""
-        for provider in self._subagent_providers:
-            try:
-                await provider.release_session(agent_session, timeout=_SUBAGENT_CANCEL_WAIT_S)
-            except Exception:  # noqa: BLE001 - best-effort teardown
-                _log.warning("releasing sub-agent session state failed", exc_info=True)
+        """Cancel this conversation's running sub-agent tasks and refuse new ones; for a
+        closing conversation. ``agent_session`` is the conversation's ``AgentSession``; task
+        state lives in this session, so every task goes. Failures are logged, not raised."""
+        try:
+            self.delegation.closed = True
+            await self.delegation.cancel_all()
+        except Exception:  # noqa: BLE001 - best-effort teardown
+            _log.warning("releasing sub-agent tasks failed", exc_info=True)
 
     async def aclose(self) -> None:
         """Cancel sub-agent tasks, close every connected MCP server, then honor the cleanup
@@ -484,10 +468,11 @@ class Session:
         wait_timeout = maf_kwargs.pop("background_agents_wait_timeout_seconds", None)
         providers: list = []
         if subagents:
+            top = self.delegation.top(name)
             providers.append(await self._build_subagents(
-                client, subagents, bundles=bundles, client_factory=client_factory,
+                client, subagents, top=top, bundles=bundles, client_factory=client_factory,
                 wait_timeout=wait_timeout))
-            _add_parent_loop(maf_kwargs)
+            _add_parent_loop(maf_kwargs, top)
         builtin = self.tools(*bundles)
         external: list = []
         for tool in tools or []:
@@ -534,39 +519,45 @@ class Session:
         )
 
     async def _build_subagents(self, client: Any, subagents: Mapping[str, "SubagentSpec"], *,
-                               bundles: tuple[str, ...],
+                               top: Any, bundles: tuple[str, ...],
                                client_factory: Callable[[str], Any] | None,
                                wait_timeout: Any) -> Any:
-        """Validate the specs, build each sub-agent over this session, return their provider."""
-        from agent_framework import BackgroundAgentsProvider
-
+        """Validate the specs, build each sub-agent over this session as a node under ``top``,
+        and return ``top``'s delegation provider."""
         from .api import expand_tools  # local: api imports session
         from .bundles import SUBAGENT_INSTRUCTIONS
-        from .subagents import (ConfinedSubagent, _ToolActivity, provider_instructions,
-                                validate_subagents)
+        from .delegation import AgentNode, DelegationProvider, Limits
+        from .subagents import ConfinedSubagent, _ToolActivity, validate_subagents
 
         clients = validate_subagents(subagents, parent_bundles=bundles, parent_client=client,
                                      client_factory=client_factory, config=self.config)
-        wrapped = []
+        delegation = self.delegation
+        taken = [n for n in subagents if delegation.node(n) is not None]
+        if taken:
+            raise ValueError(f"sub-agent names {taken} are already used in this session")
         for sub_name, spec in subagents.items():
             sub_client = clients[sub_name]
+            sub_bundles = spec.bundles or bundles
+            node = AgentNode(name=sub_name, path=sub_name, depth=1, creator=top,
+                             description=spec.description, bundles=tuple(sub_bundles),
+                             limits=Limits(timeout_s=self.config.subagent_task_timeout_s,
+                                           max_round_trips=spec.max_round_trips,
+                                           subtree_allowance=None, remaining_depth=0),
+                             declared=True)
             agent = await self.create_agent(
                 sub_client, agent_instructions=spec.instructions,
-                tools=expand_tools(spec.tools), bundles=spec.bundles or bundles,
+                tools=expand_tools(spec.tools), bundles=sub_bundles,
                 name=sub_name, _mcp_agent=sub_name, _harness_extra=SUBAGENT_INSTRUCTIONS,
                 middleware=[_ToolActivity()])
             # The spec's budget, on the sub-agent's own client only.
             _apply_tool_loop_limits(sub_client, dataclasses.replace(
                 self.config, tool_loop_max_iterations=spec.max_round_trips,
                 tool_loop_max_consecutive_errors=None))
-            wrapped.append(ConfinedSubagent(agent, name=sub_name, description=spec.description,
-                                            session=self))
-        provider_kw = {} if wait_timeout is None else {"wait_timeout_seconds": wait_timeout}
-        provider = BackgroundAgentsProvider(wrapped, instructions=provider_instructions(),
-                                            **provider_kw)
-        self._subagent_providers.append(provider)
+            node.agent = ConfinedSubagent(agent, node=node, session=self)
+            delegation.add_node(node)
         self.subagent_names = tuple(subagents)
-        return provider
+        provider_kw = {} if wait_timeout is None else {"wait_timeout_s": wait_timeout}
+        return DelegationProvider(delegation, top, **provider_kw)
 
     async def _attach_mcp(self, tool: Any, *, agent: str | None = None) -> list:
         """Connect an MCP server, attach the spill parser, capture its status, own its lifecycle.
@@ -830,29 +821,29 @@ def _default_compaction(maf_kwargs: dict[str, Any], keep_last_tool_call_groups: 
             maf_kwargs[phase] = strategy
 
 
-def _add_parent_loop(maf_kwargs: dict[str, Any]) -> None:
+def _add_parent_loop(maf_kwargs: dict[str, Any], node: Any) -> None:
     """Re-run a delegating agent while a task it started is still running, in place.
 
     Built here rather than through ``loop_should_continue``, which returns every pass joined
     together: ``return_final_only`` keeps only the final answer. A caller who passed
     ``loop_should_continue`` has taken over that decision, so nothing is added. The loop goes
     first in ``middleware``, ahead of the caller's own, preceded only by ``_DropLoopNudges``,
-    which keeps the loop's nudges out of a streamed reply.
+    which keeps the loop's nudges out of a streamed reply. ``node`` is the delegating agent's
+    ``AgentNode``: the loop reads its tasks.
     """
     if "loop_should_continue" in maf_kwargs:
         return
-    from agent_framework import (AgentLoopMiddleware, background_tasks_running,
-                                 background_tasks_running_message)
+    from agent_framework import AgentLoopMiddleware
+
+    from .delegation import tasks_running, tasks_running_message
+    from .subagents import _DropLoopNudges
 
     loop_kw: dict[str, Any] = {}
     max_iterations = maf_kwargs.pop("loop_max_iterations", None)
     if max_iterations is not None:
         loop_kw["max_iterations"] = max_iterations   # else MAF's default cap
-    loop = AgentLoopMiddleware(background_tasks_running(),
-                               next_message=background_tasks_running_message,
+    loop = AgentLoopMiddleware(tasks_running(node), next_message=tasks_running_message(node),
                                return_final_only=True, inject_progress=False, **loop_kw)
-    from .subagents import _DropLoopNudges
-
     # The nudge filter sits outside the loop, so it sees every pass's updates.
     maf_kwargs["middleware"] = [_DropLoopNudges(), loop, *(maf_kwargs.get("middleware") or [])]
 

@@ -451,7 +451,7 @@ Each request is one conversation turn: turns on the same `threadId` are serializ
 
 ### Sub-agents (experimental)
 
-A parent can delegate to named sub-agents that run as background tasks, each with its own client, instructions, bundles and tools. This builds on MAF's background-agents provider, which MAF marks experimental; constructing it emits MAF's experimental-feature warning, and the surface may change.
+A parent can delegate to named sub-agents that run as background tasks, each with its own client, instructions, bundles and tools. sheath runs delegation with its own provider, which keeps the tool names and return strings of MAF's background-agents provider; the feature is experimental, and the surface may change.
 
 ```python
 from sheath import Sheath, SubagentSpec
@@ -499,7 +499,7 @@ The parent starts and collects tasks through MAF's `background_agents_*` tools (
 
 **Status.** A sub-agent's events carry `agent=<name>`: `started`; per tool call `running`, then `done` or `failed: <ExceptionType>`; and at the end `finished` or `failed: <ExceptionType>`. Failure events carry only the exception type, never its message, because the message can echo untrusted content; the full error reaches the parent model through the task's result.
 
-**AG-UI.** Delegation streams as ordinary tool calls (`background_agents_start_task` and friends), and sub-agent activity streams as `sheath.status` `CUSTOM` events whose value includes `agent`. Status is delivered live, including while the parent is waiting, and the loop's re-run nudges are kept out of the chat stream. By default (no AG-UI thread snapshot store configured) each request starts with fresh task state and task ids restart at 1, so `continue_task` cannot continue a task from an earlier request; within one request it works.
+**AG-UI.** Delegation streams as ordinary tool calls (`background_agents_start_task` and friends), and sub-agent activity streams as `sheath.status` `CUSTOM` events whose value includes `agent`. Status is delivered live, including while the parent is waiting, and the loop's re-run nudges are kept out of the chat stream. Task state lives in the conversation's workspace session, not in the per-request `AgentSession`, so `continue_task` can continue a task from an earlier request on the same thread, and task ids keep counting up across requests.
 
 ## Reference
 
