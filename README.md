@@ -413,6 +413,8 @@ def show(event):
 Sheath(tools=[crunch], on_status=show).solve("crunch 5 items")
 ```
 
+`Sheath(on_status=...)` reaches every run: one-shot `solve`/`asolve` (where a per-call `on_status` overrides it) and every conversation opened with `aopen` or `agui_stream`. To watch only one conversation, subscribe on it instead: `conv.session.subscribe(callback)`.
+
 The CLI exposes the same feed with `-v`/`--verbose` (printed to stderr). MCP-server status needs no extra wiring — a server's `notifications/message` arrive tagged `mcp:<server>`, and its `notifications/progress` arrive tagged with the calling tool's name plus `current`/`total`. Events from a [sub-agent](#sub-agents-experimental) carry an `agent` field with its name (`None` for the parent); the field is additive.
 
 ### AG-UI and CopilotKit

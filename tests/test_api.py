@@ -213,3 +213,25 @@ def test_environment_key_wins_over_dotenv_and_explicit_key_wins_over_both(tmp_pa
     assert Sheath(SheathConfig(), client=client).config.search.api_key == "from-env"
     explicit = SheathConfig(search=SearchConfig(api_key="explicit"))
     assert Sheath(explicit, client=client).config is explicit
+
+
+def test_on_status_reaches_conversations_from_aopen(tmp_path):
+    events = []
+    client = StubChatClient([tool_call("noisy", {"n": 1}), text("done")])
+    h = Sheath(SheathConfig(root_dir=tmp_path / "s"), client=client,
+               tools=[noisy], on_status=events.append)
+
+    async def run():
+        conv = await h.aopen("t1")
+        again = await h.aopen("t1")          # resuming the same id must not subscribe twice
+        assert again is conv
+        try:
+            return await conv.aask("go")
+        finally:
+            await h.aclose_sessions()
+
+    result = asyncio.run(run())
+    assert result.final_text == "done"
+    seen = [(e.tool, e.message) for e in events]
+    assert seen.count(("noisy", "step A")) == 1
+    assert seen.count(("noisy", "step B")) == 1
