@@ -78,10 +78,12 @@ def _remove_root_locked(root: Path, lock: Any,
         if check_quarantine is not None:
             try:
                 check_quarantine()
-            except SandboxQuarantinedError:
+            except SandboxQuarantinedError as e:
                 quarantined = True
                 _log.warning("removing %s: the sandbox is quarantined (a container may still "
-                             "be writing); permissions not reset", root)
+                             "be writing); permissions not reset, so directories sandboxed code "
+                             "made unreadable may be left behind. %s Once the container is "
+                             "removed, delete %s to finish cleanup", root, e, root)
             except Exception as e:  # noqa: BLE001 - fail safe: a close path must not raise
                 quarantined = True
                 _log.warning("removing %s: the quarantine check failed (%s); treating the "

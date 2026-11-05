@@ -25,7 +25,8 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 - **Behavior change:** removing a workspace root (`SheathConfig.cleanup`, or reaping a
   conversation) runs under the workspace lock and first resets directory permissions, so a
   directory sandboxed code made unreadable (`chmod 000`) is removed too (the reset is skipped
-  while the sandbox is quarantined, as a container may still be writing). An entry that still
+  while the sandbox is quarantined, as a container may still be writing, and the warning then
+  names the container and the command to remove it before deleting the leftover root). An entry that still
   cannot be removed no longer stops the walk, and a root left behind is logged as a warning.
   `Session.aclose` used to raise on the first error.
 - A `client_factory` that returns the parent's client, or one client for two sub-agents, raises

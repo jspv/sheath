@@ -344,6 +344,31 @@ def test_reap_skips_permission_reset_when_quarantined(tmp_path, caplog):
 
 @pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
                     reason="root ignores directory permissions")
+def test_reap_quarantine_warning_says_how_to_finish_cleanup(tmp_path, caplog):
+    from sheath.sandbox import SandboxQuarantinedError
+    from sheath.session import _remove_root_locked
+
+    def quarantined():
+        raise SandboxQuarantinedError(
+            "container sheath-deadbeef may still be running; run: podman rm -f sheath-deadbeef")
+
+    root = tmp_path / "r"
+    root.mkdir()
+    locked, _ = _lock_out(root)
+    try:
+        with caplog.at_level(logging.WARNING, logger="sheath"):
+            _remove_root_locked(root, threading.RLock(), quarantined)   # must not raise
+        msgs = [r.getMessage() for r in caplog.records if "quarantine" in r.getMessage()]
+        assert msgs
+        assert str(root) in msgs[0]
+        assert "sheath-deadbeef" in msgs[0]
+        assert "rm -f" in msgs[0]
+    finally:
+        _unlock(locked)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
 def test_reap_permission_reset_failure_does_not_stop_removal(tmp_path, caplog, monkeypatch):
     import sheath.session as session_mod
 
