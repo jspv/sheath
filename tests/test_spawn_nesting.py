@@ -618,3 +618,64 @@ def test_concurrent_run_waits_for_and_cancels_only_its_own_tasks(tmp_path):
     # Run B was never nudged about run A's task.
     assert not any("lead/gA" in t and "must finish" in t
                    for call in lead_client.seen["run-B"] for t in call if t)
+
+
+# --- non-finite timeouts (NaN slips past <= and > comparisons; inf is no bound) -------------------
+
+@pytest.mark.parametrize("value", [float("nan"), "nan", float("inf"), "inf", float("-inf")])
+def test_non_finite_timeout_refused(tmp_path, value):
+    got: dict = {}
+    factory = Queue()
+    _, snap, _ = run_tree(tmp_path, [spawn("lead", 1, timeout_s=value), record(got)], factory,
+                          cfg=HOST)
+    reply = got["sp1"]
+    assert reply.startswith("Error: ") and "timeout_s" in reply, reply
+    assert snap == NOTHING and factory.made == []
+
+
+@pytest.mark.parametrize("value", [float("inf")])
+def test_non_finite_timeout_refused_unbounded_host(tmp_path, value):
+    got: dict = {}
+    factory = Queue()
+    _, snap, _ = run_tree(tmp_path, [spawn("lead", 1, timeout_s=value), record(got)], factory,
+                          cfg={"subagent_task_timeout_s": None})
+    assert got["sp1"].startswith("Error: ") and "timeout_s" in got["sp1"], got["sp1"]
+    assert snap == NOTHING
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), 1e9])
+def test_grandchild_never_exceeds_host_timeout(tmp_path, value):
+    got: dict = {}
+    lead_got: dict = {}
+    lead = [spawn("child", 1, timeout_s=value), record(lead_got, lambda m: text("lead-report"))]
+    factory = Queue(lead)
+    script = [spawn("lead", 1, tools=HAND), wait([1], 1), results(1, 1), record(got)]
+    sess, snap, _ = run_tree(tmp_path, script, factory, cfg=HOST)
+    assert lead_got["sp1"].startswith("Error: ") and "timeout_s" in lead_got["sp1"]
+    assert snap["nodes"] == ["lead"]
+    assert all(n.limits.timeout_s is not None and n.limits.timeout_s <= 100
+               for n in sess.delegation._nodes.values() if n.depth > 0)
+
+
+def test_effective_limits_refuses_non_finite_directly():
+    import math
+
+    from sheath.delegation import AgentNode, Limits, effective_limits
+
+    node = AgentNode(name="t", path="t", depth=0,
+                     limits=Limits(timeout_s=100, max_round_trips=10, subtree_allowance=5,
+                                   remaining_depth=2))
+    for value in (math.nan, math.inf, -math.inf):
+        out = effective_limits(node, {"timeout_s": value})
+        assert isinstance(out, str) and out.startswith("Error: ") and "timeout_s" in out
+
+
+def test_effective_limits_refuses_int_too_large_for_float():
+    from sheath.delegation import AgentNode, Limits, effective_limits
+
+    for timeout in (100, None):
+        node = AgentNode(name="t", path="t", depth=0,
+                         limits=Limits(timeout_s=timeout, max_round_trips=10,
+                                       subtree_allowance=5, remaining_depth=2))
+        out = effective_limits(node, {"timeout_s": 10 ** 400})
+        assert isinstance(out, str) and out.startswith("Error: ") and "timeout_s" in out

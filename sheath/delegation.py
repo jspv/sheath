@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -1096,6 +1097,17 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+def _is_finite(value: Any) -> bool:
+    """A number that is neither NaN nor infinite and fits a float (``asyncio.timeout`` needs
+    one): NaN compares False both ways, so it would slip past every bound check."""
+    if not _is_number(value):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:          # an int too large for a float
+        return False
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -1118,8 +1130,9 @@ def effective_limits(creator: AgentNode, args: Mapping[str, Any]) -> Limits | st
     max_depth = args.get("max_depth")
     tighten = "a sub-agent's limits may only be lower than yours; omit it to inherit yours"
     if timeout_s is not None:
-        if not _is_number(timeout_s) or timeout_s <= 0:
-            return f"Error: timeout_s must be a positive number of seconds, got {_short(timeout_s)}."
+        if not _is_finite(timeout_s) or timeout_s <= 0:
+            return (f"Error: timeout_s must be a positive, finite number of seconds, got "
+                    f"{_short(timeout_s)}.")
         if lim.timeout_s is not None and timeout_s > lim.timeout_s:
             return (f"Error: timeout_s={_limit(timeout_s)} is above your own timeout_s "
                     f"({_limit(lim.timeout_s)}s): {tighten}.")
