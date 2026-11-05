@@ -6,7 +6,12 @@ accurate ``__name__``, and a docstring that MAF turns into the tool description.
 
 from __future__ import annotations
 
+import functools
+from collections.abc import Callable
+from typing import Any
+
 from ..session import Session
+from ..status import note_refusal
 # Import the impl functions directly. NB: importing the submodules with `from . import
 # search` would get the *function* `search` (the package __init__ re-exports it, shadowing
 # the submodule of the same name) -- so always alias the functions, not the modules.
@@ -21,9 +26,27 @@ from .search import search as _search
 from .web import web_extract as _web_extract, web_search as _web_search
 
 
+def _refusals(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Return a tool's own refusal (``ValueError``: its message is written for the model, and
+    names only what the model passed in) as ``Error: <message>``. The framework would reduce it
+    to "Function failed.", so the model could not learn why or what to do instead. Any other
+    exception still reaches the framework, which reports it without detail."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except ValueError as e:
+            note_refusal(type(e).__name__)   # activity status still reports it as failed
+            return f"Error: {e}"
+
+    return wrapper
+
+
 def build_tools(session: Session) -> list:
     """Return the agent's tool callables, each bound to ``session``."""
 
+    @_refusals
     def read_file(path: str, start_line: int = 1, limit: int = 2000,
                   line_numbers: bool = False) -> str:
         """Read up to `limit` lines from a file in the workspace, starting at 1-based line
@@ -32,22 +55,26 @@ def build_tools(session: Session) -> list:
         edit_file."""
         return _read_file(session, path, start_line, limit, line_numbers=line_numbers)
 
+    @_refusals
     def write_file(path: str, content: str) -> str:
         """Write `content` to a file in the workspace (creates parent directories)."""
         return _write_file(session, path, content)
 
+    @_refusals
     def edit_file(path: str, old: str, new: str, replace_all: bool = False) -> str:
         """Replace the exact text `old` with `new` in a workspace file. `old` must occur
         exactly once (include surrounding lines to make it unique) unless replace_all=True.
         Returns the edited lines, numbered. Use write_file to create or rewrite a file."""
         return _edit_file(session, path, old, new, replace_all)
 
+    @_refusals
     def list_files(path: str = ".", pattern: str | None = None) -> list[str]:
         """List files under `path` (a file or folder) in the workspace, recursively. An
         optional glob `pattern` filters paths relative to `path`: `*` stays in one folder,
         `**` spans folders (e.g. `**/*.csv`)."""
         return _list_files(session, path, pattern)
 
+    @_refusals
     def search(pattern: str, path: str = ".", glob: str | None = None,
                ignore_case: bool = False, max_matches: int = 100,
                context: int = 0, output: str = "hits") -> list[dict]:

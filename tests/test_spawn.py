@@ -107,16 +107,18 @@ NOTHING = {"nodes": [], "records": 0, "total": 0, "folders": []}
 
 def test_spawn_two_with_different_models_and_tools(tmp_path):
     factory = Factory({
-        "m-small": [tool_call("write_file", {"path": "a.txt", "content": "A"}), text("report-a")],
-        "m-big": [tool_call("write_file", {"path": "b.txt", "content": "B"}), text("report-b")],
+        "m-small": [tool_call("write_file", {"path": "agents/a/a.txt", "content": "A"}),
+                    text("report-a")],
+        "m-big": [tool_call("write_file", {"path": "agents/b/b.txt", "content": "B"}),
+                  text("report-b")],
     })
     got: dict = {}
     script = [
         spawn("a", 1, model="m-small", tools=["tool_a"], bundles=["files"]),
         spawn("b", 2, model="m-big", tools=["tool_b"]),
         wait([1, 2], 1), wait([2], 2), results(1, 1), results(2, 2),
-        tool_call("read_file", {"path": "a.txt"}, "f1"),
-        tool_call("read_file", {"path": "b.txt"}, "f2"),
+        tool_call("read_file", {"path": "agents/a/a.txt"}, "f1"),
+        tool_call("read_file", {"path": "agents/b/b.txt"}, "f2"),
         record(got),
     ]
     sess, snap, factory, _ = run_spawn(tmp_path, script, factory=factory,

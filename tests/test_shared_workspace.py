@@ -165,9 +165,9 @@ def test_declared_role_gets_its_folder(tmp_path):
     asyncio.run(main())
 
 
-def test_instructions_allow_delegator_path_override():
-    assert "unless the agent that delegated to it said to use another path" \
-        in SUBAGENT_INSTRUCTIONS
+def test_instructions_state_the_write_scope():
+    # Writes are confined to the folder and the grants (tests/test_write_scope.py).
+    assert "may write files only in your folder, agents/<path>/" in SUBAGENT_INSTRUCTIONS
 
 
 def test_write_file_never_touches_process_umask(tmp_path, monkeypatch):

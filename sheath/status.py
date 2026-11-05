@@ -112,6 +112,34 @@ def bind_bus(bus: StatusBus) -> Iterator[None]:
         _current.set(prev)
 
 
+# A tool call's refusals (exception type names), when a caller is watching for them: a tool that
+# returns its refusal as text (``tools.registry``) notes it here, so activity status still says
+# "failed". A list, not a value: sync tools run in a worker thread on a copy of the context,
+# which shares the list but would not carry a new value back.
+_refusals: contextvars.ContextVar[list[str] | None] = contextvars.ContextVar(
+    "sheath_refusals", default=None)
+
+
+@contextmanager
+def watch_refusals() -> Iterator[list[str]]:
+    """Collect the refusals ``note_refusal`` records during this block (restores with ``set``,
+    like ``bind_agent``)."""
+    prev = _refusals.get()
+    seen: list[str] = []
+    _refusals.set(seen)
+    try:
+        yield seen
+    finally:
+        _refusals.set(prev)
+
+
+def note_refusal(kind: str) -> None:
+    """Record that the running tool call refused (``kind``: the exception type name)."""
+    seen = _refusals.get()
+    if seen is not None:
+        seen.append(kind)
+
+
 @contextmanager
 def bind_agent(name: str) -> Iterator[None]:
     """Tag status events emitted in this block with agent ``name``.

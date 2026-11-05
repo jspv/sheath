@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+from pathlib import Path
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -157,7 +158,7 @@ class AgentNode:
                  tool_objects: dict[str, Any] | None = None, can_spawn: bool = False,
                  limits: Limits | None = None, message_to: set[str] | None = None,
                  folder: str | None = None, declared: bool = False,
-                 client: Any = None) -> None:
+                 client: Any = None, write_to: set[str] | None = None) -> None:
         self.name = name
         self.path = path
         self.depth = depth
@@ -184,6 +185,9 @@ class AgentNode:
         # Spawns made by it and beneath it, the ones being built included (subtree_allowance).
         self.spawned_beneath = 0
         self.folder = folder
+        # Workspace-relative paths (files or folders) it may write besides its folder
+        # (``may_write``); fixed when it is created.
+        self.write_to: set[str] = set(write_to or ())
         self.declared = declared
         self.client = client           # its own chat client (never shared with another agent)
         self._delegation: Delegation | None = None   # set when registered
@@ -241,6 +245,39 @@ class AgentNode:
                     # Shielded: one wait cancelled while queued leaves the re-acquire to the
                     # others (or to the run's teardown, which drops it).
                     await asyncio.shield(run._reacquire)
+
+
+def current_node() -> AgentNode | None:
+    """The sub-agent whose run this code is in (its tool calls included), or None: the top
+    agent, or no agent at all."""
+    run = CURRENT_RUN.get()
+    return None if run is None else run.node
+
+
+def may_write(node: AgentNode | None, rel: str) -> bool:
+    """Whether ``node`` may write the workspace-relative path ``rel`` (already resolved by
+    ``safe_path``). The top agent, and code outside any agent, may write anywhere; a sub-agent
+    only inside its folder (its own sub-agents' folders included) and its grants."""
+    if node is None or node.depth == 0:
+        return True
+    if node.folder and rel.startswith(node.folder + "/"):   # beneath it, not the folder itself
+        return True
+    return any(g == "." or rel == g or rel.startswith(g + "/") for g in node.write_to)
+
+
+def scope_text(node: AgentNode) -> str:
+    """Where ``node`` may write, for a refusal: its folder (ending in ``/``), then its grants."""
+    shown = [f"{node.folder}/"] if node.folder else []
+    shown += sorted(node.write_to)
+    return ", ".join(shown) or "nowhere"
+
+
+def check_write(rel: str) -> None:
+    """Raise ``ValueError`` when the current agent may not write ``rel``."""
+    node = current_node()
+    if not may_write(node, rel):
+        raise ValueError(f"{rel!r} is outside where you may write ({scope_text(node)}); write "
+                         "there instead. You can read anywhere in the workspace.")
 
 
 class TaskRecord:
@@ -705,7 +742,11 @@ class Delegation:
             "background_agents_start_task by name. Its limits (timeout_s, max_round_trips, and "
             "with spawn_subagent handed down, max_subagents and max_depth) default to yours and "
             "may only be lower. It may message you with send_message; message_to lets it "
-            "message other agents too (only names you may message yourself).\n"
+            "message other agents too (only names you may message yourself). It may write "
+            "only in its own folder, agents/<its path>/; write_to grants it more workspace "
+            "files or folders (only paths you may write yourself), e.g. where you want its "
+            "output.\n"
+            + (f"You may write: {scope_text(owner)}.\n" if owner.depth else "") +
             f"Allowed models: {', '.join(policy.models)}. "
             f"Default model: {policy.effective_default}.\n"
             f"Sub-agent budget: {remaining} of {allowed} remaining in this conversation.\n"
@@ -721,7 +762,7 @@ class Delegation:
     def _check_spawn(self, owner: AgentNode, *, name: Any, instructions: Any, task: Any,
                      model: Any, tools: list[str], bundles: Any, message_to: Any,
                      timeout_s: Any, max_round_trips: Any, max_subagents: Any,
-                     max_depth: Any) -> Limits | str:
+                     max_depth: Any, write_to: Any = None) -> Limits | str:
         """The first rule the call breaks, in the spec table's order (allowances, then the
         total cap, last), as an ``Error: `` string; else the new sub-agent's limits."""
         from .subagents import _NAME_PATTERN, _NAME_RE   # local: subagents imports this module
@@ -768,6 +809,10 @@ class Delegation:
             refused = self._check_grants(owner, message_to, what="message_to")
             if refused is not None:
                 return refused
+        if write_to is not None:
+            granted = self.write_grants(owner, write_to)
+            if isinstance(granted, str):
+                return granted
         limits = effective_limits(owner, {
             "tools": tools, "timeout_s": timeout_s, "max_round_trips": max_round_trips,
             "max_subagents": max_subagents, "max_depth": max_depth})
@@ -792,7 +837,7 @@ class Delegation:
                     model: Any = None, tools: Any = None, bundles: Any = None,
                     message_to: Any = None, description: str = "", timeout_s: Any = None,
                     max_round_trips: Any = None, max_subagents: Any = None,
-                    max_depth: Any = None, origin: Any = None) -> str:
+                    max_depth: Any = None, origin: Any = None, write_to: Any = None) -> str:
         """Create a sub-agent of ``owner`` and start its first task: ``spawn_subagent``.
 
         Every refusal is an ``Error: `` string, and a refused call creates nothing: no node,
@@ -813,9 +858,13 @@ class Delegation:
         limits = self._check_spawn(
             owner, name=name, instructions=instructions, task=task, model=model, tools=tools,
             bundles=bundles, message_to=message_to, timeout_s=timeout_s,
-            max_round_trips=max_round_trips, max_subagents=max_subagents, max_depth=max_depth)
+            max_round_trips=max_round_trips, max_subagents=max_subagents, max_depth=max_depth,
+            write_to=write_to)
         if isinstance(limits, str):
             return limits
+        granted = [] if write_to is None else self.write_grants(owner, write_to)
+        if isinstance(granted, str):   # not reached: _check_spawn refused it above
+            return granted
         key = name.lower()
         chain = _chain(owner)
         self._pending.add(key)
@@ -829,7 +878,7 @@ class Delegation:
                 model=model if model is not None else self.policy.effective_default,
                 tools=tools, bundles=tuple(bundles) if bundles is not None else owner.bundles,
                 description=description if isinstance(description, str) else "",
-                limits=limits, mine=mine, built=built, origin=origin,
+                limits=limits, mine=mine, built=built, origin=origin, write_to=set(granted),
                 # Its creator may always be messaged: implicit, never listed.
                 message_to={m for m in message_to or () if m.lower() != owner.name.lower()})
         finally:
@@ -845,7 +894,8 @@ class Delegation:
                              task: str, model: str, tools: list[str], bundles: tuple[str, ...],
                              description: str, limits: Limits, mine: list[Any],
                              built: list[AgentNode], origin: Any,
-                             message_to: set[str] | None = None) -> str:
+                             message_to: set[str] | None = None,
+                             write_to: set[str] | None = None) -> str:
         from .bundles import subagent_instructions
         from .paths import safe_path
         from .subagents import ConfinedSubagent, _ToolActivity, client_reuse
@@ -870,11 +920,12 @@ class Delegation:
             name=name, path=path, depth=owner.depth + 1, creator=owner,
             description=description, bundles=bundles, tool_objects=handed,
             can_spawn=can_spawn, limits=limits, folder=folder, client=client,
-            message_to=message_to)
+            message_to=message_to, write_to=write_to)
         try:
             agent = await sess.create_agent(
                 client, agent_instructions=instructions, bundles=bundles, name=name,
-                _prebuilt_tools=list(handed.values()), _harness_extra=subagent_instructions(path),
+                _prebuilt_tools=list(handed.values()),
+                _harness_extra=subagent_instructions(path, sorted(node.write_to)),
                 _node=node if can_spawn else None, _message_node=node,
                 middleware=[_ToolActivity()])
             # Its own effective budget, on its own client only.
@@ -944,6 +995,27 @@ class Delegation:
                 return (f"Error: cannot grant {name!r}: you may grant only names you may "
                         f"message yourself. You may message: {self._permits(granter)}.")
         return None
+
+    def write_grants(self, granter: AgentNode, paths: Any) -> list[str] | str:
+        """``write_to`` normalized to workspace-relative paths, or the ``Error: `` refusal:
+        each must be a path inside the workspace that ``granter`` may write itself."""
+        from .paths import safe_path
+
+        if not isinstance(paths, list) or not all(isinstance(p, str) and p.strip()
+                                                  for p in paths):
+            return "Error: write_to must be a list of workspace paths (files or folders)."
+        root = Path(self._session.root).resolve()
+        out: list[str] = []
+        for path in paths:
+            try:
+                rel = safe_path(root, path).relative_to(root).as_posix()
+            except (ValueError, OSError):
+                return f"Error: write_to: {_short(path)} is not a path inside the workspace."
+            if not may_write(granter, rel):
+                return (f"Error: cannot grant write access to {rel!r}: you may grant only "
+                        f"paths you may write yourself ({scope_text(granter)}).")
+            out.append(rel)
+        return out
 
     def send_message(self, sender: AgentNode, to: Any, text: Any) -> str:
         """``send_message``: deliver ``text``, labelled with the sender's path, to the agent
@@ -1306,6 +1378,10 @@ class DelegationProvider(ContextProvider):
                                                               "message besides you (only "
                                                               "names you may message "
                                                               "yourself)")] = None,
+                write_to: Annotated[list[str] | None, Field(description="Workspace files or "
+                                                            "folders it may write besides "
+                                                            "its own folder (only paths you "
+                                                            "may write yourself)")] = None,
                 description: Annotated[str, Field(description="One line shown in task "
                                                   "listings")] = "",
                 timeout_s: float | None = None,
@@ -1318,7 +1394,7 @@ class DelegationProvider(ContextProvider):
                     tools=tools, bundles=bundles, message_to=message_to,
                     description=description, timeout_s=timeout_s,
                     max_round_trips=max_round_trips, max_subagents=max_subagents,
-                    max_depth=max_depth, origin=session)
+                    max_depth=max_depth, origin=session, write_to=write_to)
 
             spawn_tools.append(spawn_subagent)
         context.extend_instructions(

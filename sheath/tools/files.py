@@ -15,6 +15,7 @@ import stat
 from pathlib import Path
 
 from .. import status, workspace
+from ..delegation import check_write
 from ..paths import safe_path
 from ..session import Session
 
@@ -159,16 +160,18 @@ def write_file(session: Session, path: str, content: str) -> str:
     The file is replaced atomically (temp file + rename). A file another agent wrote last is
     refused until you have read its current content (files written by ``run_python`` are not
     tracked). Paths that resolve into a sheath-managed directory (handles/, inputs/, .scripts/,
-    .sheath/) are refused: those hold state the harness vouches for.
+    .sheath/) are refused: those hold state the harness vouches for. A sub-agent writes only
+    in its folder and the paths its creator granted (``delegation.may_write``).
     """
     with session.file_io():
         target = safe_path(session.root, path)
         if workspace.is_protected(session.root, target):
             raise ValueError(f"{path!r} is in a directory managed by sheath; write elsewhere "
                              "(e.g. under outputs/) and use save() in run_python for handles")
+        rel = target.relative_to(session.root).as_posix()
+        check_write(rel)                   # a sub-agent: its folder and grants only
         data = content.encode("utf-8")   # before truncating: a bad string must not empty it
         target.parent.mkdir(parents=True, exist_ok=True)
-        rel = target.relative_to(session.root).as_posix()
         agent = status.current_agent()
         try:                               # refuse links / non-regular targets as before
             fd = _open_checked(target, os.O_RDONLY, path)
@@ -277,6 +280,7 @@ def edit_file(session: Session, path: str, old: str, new: str,
             raise ValueError(f"{path!r} is in a directory managed by sheath; edit files "
                              "elsewhere (e.g. under outputs/)")
         rel = target.relative_to(session.root).as_posix()
+        check_write(rel)
         agent = status.current_agent()
         fd = _open_checked(target, os.O_RDONLY, path)
         try:

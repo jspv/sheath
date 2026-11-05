@@ -14,6 +14,7 @@ import tempfile
 from pathlib import Path
 
 from .. import workspace
+from ..delegation import check_write
 from ..handles import HandleTamperedError
 from ..paths import safe_filename
 from ..sandbox import SandboxQuarantinedError
@@ -75,6 +76,7 @@ def _publish_handle(session: Session, handle_id: str, format: str | None, name: 
             if not filename.lower().endswith(f".{fmt}"):
                 filename += f".{fmt}"
             session.store.verify(handle_id)        # digest check; the bytes are not loaded here
+            check_write(f"{_OUTPUTS}/{filename}")
             rel = _convert_in_sandbox(session, handle_id, fmt, filename)
         else:
             backing = session.store.verify(handle_id)
@@ -83,6 +85,7 @@ def _publish_handle(session: Session, handle_id: str, format: str | None, name: 
                 return {"error": f"a {handle.kind} handle is delivered as-is (.{ext}); "
                                  "format conversion applies to dataframe handles only"}
             filename = safe_filename(name, fallback=backing.name)
+            check_write(f"{_OUTPUTS}/{filename}")
             rel = _write_output(session, filename, lambda p: shutil.copyfile(backing, p))
     except (OSError, ValueError, ImportError, HandleTamperedError) as e:
         return {"error": f"could not write {handle_id} for publishing: {e}"}

@@ -624,6 +624,15 @@ class Session:
         if taken:
             raise ValueError(f"sub-agent names {taken} are already used in this session")
         depth_left = spawn.max_depth - 1 if spawn is not None else 0
+        # Host grants: normalized (and refused) before anything is built.
+        grants: dict[str, list[str]] = {}
+        for sub_name, spec in subagents.items():
+            raw = spec.write_to
+            got = delegation.write_grants(top, list(raw) if isinstance(raw, (list, tuple))
+                                          else raw)
+            if isinstance(got, str):
+                raise ValueError(f"sub-agent {sub_name!r}: {got.removeprefix('Error: ')}")
+            grants[sub_name] = got
         for sub_name, spec in subagents.items():
             sub_client = clients[sub_name]
             sub_bundles = spec.bundles or bundles
@@ -637,11 +646,12 @@ class Session:
                                            subtree_allowance=None,
                                            remaining_depth=depth_left if can_spawn else 0),
                              declared=True, client=sub_client, folder=f"agents/{sub_name}",
-                             message_to=set(spec.message_to))
+                             message_to=set(spec.message_to), write_to=set(grants[sub_name]))
             agent = await self.create_agent(
                 sub_client, agent_instructions=spec.instructions,
                 tools=expand_tools(spec.tools), bundles=sub_bundles,
-                name=sub_name, _mcp_agent=sub_name, _harness_extra=subagent_instructions(sub_name),
+                name=sub_name, _mcp_agent=sub_name,
+                _harness_extra=subagent_instructions(sub_name, grants[sub_name]),
                 _node=node if can_spawn else None, _message_node=node,
                 middleware=[_ToolActivity()])
             # The spec's budget, on the sub-agent's own client only.

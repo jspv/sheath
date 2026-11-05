@@ -96,15 +96,17 @@ def run_parent(tmp_path, script, subagents, *, cfg=None, events=None, tools=None
 
 def test_two_subagents_write_files_and_report(tmp_path):
     subs = {
-        "a": spec([tool_call("write_file", {"path": "a.txt", "content": "A"}), text("report-a")]),
-        "b": spec([tool_call("write_file", {"path": "b.txt", "content": "B"}), text("report-b")]),
+        "a": spec([tool_call("write_file", {"path": "agents/a/a.txt", "content": "A"}),
+                   text("report-a")]),
+        "b": spec([tool_call("write_file", {"path": "agents/b/b.txt", "content": "B"}),
+                   text("report-b")]),
     }
     script = [start("a", 1), start("b", 2), wait([1, 2], 1), wait([2], 2),
               results(1, 1), results(2, 2), echo_results]
     sess, response, _ = run_parent(tmp_path, script, subs)
     root = tmp_path / "r"
-    assert (root / "a.txt").read_text() == "A"
-    assert (root / "b.txt").read_text() == "B"
+    assert (root / "agents/a/a.txt").read_text() == "A"
+    assert (root / "agents/b/b.txt").read_text() == "B"
     assert "report-a" in response.text and "report-b" in response.text
     assert sess.subagent_names == ("a", "b")
 
@@ -143,7 +145,7 @@ def test_write_outside_root_fails(tmp_path):
     script = [start("a", 1), wait([1], 1), results(1, 1), text("ok")]
     run_parent(tmp_path, script, subs)
     assert not (tmp_path / "out.txt").exists()
-    assert "path escapes root" in str(seen[0][1])
+    assert "path escapes root" in seen[0][0]          # in the text the model reads
 
 
 def test_background_agents_still_refused(tmp_path):
@@ -184,7 +186,7 @@ def test_subagent_tool_status_carries_name(tmp_path):
 
 def test_every_subagent_tool_call_reports_activity(tmp_path):
     events: list = []
-    subs = {"a": spec([tool_call("write_file", {"path": "ok.txt", "content": "1"}, "1"),
+    subs = {"a": spec([tool_call("write_file", {"path": "agents/a/ok.txt", "content": "1"}, "1"),
                        tool_call("write_file", {"path": "../x", "content": "2"}, "2"),
                        text("report-a")])}
     script = [start("a", 1), wait([1], 1), results(1, 1), text("ok")]

@@ -20,7 +20,7 @@ from agent_framework import (AgentMiddleware, AgentResponse, FunctionMiddleware,
 from sheath.bundles import selected_bundles
 from sheath.config import SheathConfig
 from sheath.delegation import CURRENT_RUN, RunState, attach, detach
-from sheath.status import StatusEvent, bind_agent, report_progress
+from sheath.status import StatusEvent, bind_agent, report_progress, watch_refusals
 
 _NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
 _NAME_PATTERN = "^[A-Za-z][A-Za-z0-9_-]{0,63}$"
@@ -37,6 +37,7 @@ class SubagentSpec:
     max_round_trips: int | None = None       # per-task tool-loop budget
     can_spawn: bool = False                  # give it spawn_subagent (needs a SpawnPolicy)
     message_to: tuple[str, ...] = ()         # agents it may message besides its creator
+    write_to: tuple[str, ...] = ()           # workspace paths it may write besides its folder
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -185,20 +186,21 @@ def validate_subagents(
 class _ToolActivity(FunctionMiddleware):
     """Emit ``running`` before each sub-agent tool call and ``done`` or ``failed: <type>`` after.
 
-    The agent tag bound by ``ConfinedSubagent.run`` fills in ``agent``. The exception message is
-    left out on purpose: it can echo untrusted content, and the delegating agent already gets
-    the full error through the tool result.
+    ``failed`` covers an exception and a refusal a sheath tool returned as text
+    (``status.note_refusal``). The agent tag bound by ``ConfinedSubagent.run`` fills in
+    ``agent``. The message is left out on purpose: it can echo untrusted content.
     """
 
     async def process(self, context: Any, call_next: Callable[[], Any]) -> None:
         name = context.function.name
         report_progress("running", tool=name)
-        try:
-            await call_next()
-        except BaseException as e:
-            report_progress(f"failed: {type(e).__name__}", tool=name)
-            raise
-        report_progress("done", tool=name)
+        with watch_refusals() as refused:
+            try:
+                await call_next()
+            except BaseException as e:
+                report_progress(f"failed: {type(e).__name__}", tool=name)
+                raise
+        report_progress(f"failed: {refused[-1]}" if refused else "done", tool=name)
 
 
 class _DropLoopNudges(AgentMiddleware):
