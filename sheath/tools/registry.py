@@ -90,6 +90,7 @@ def build_tools(session: Session) -> list:
         """Fetch `url` and store its body as a handle; returns the handle summary."""
         return _fetch_url(session, url, max_bytes)
 
+    @_refusals
     def run_python(code: str | None = None, path: str | None = None,
                    args: list[str] | None = None) -> dict:
         """Run Python in the sandbox. Give `code` (inline) or `path` (a script file). Scripts
@@ -111,6 +112,7 @@ def build_tools(session: Session) -> list:
         """Fetch a URL's clean content via the search provider; returns a markdown handle."""
         return _web_extract(session, url)
 
+    @_refusals
     def read_document(source: str) -> dict:
         """Convert a document (PDF/Office/spreadsheet) at a workspace path or http(s) URL to a
         clean markdown handle with tables preserved; returns the handle summary."""

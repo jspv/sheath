@@ -256,3 +256,16 @@ def test_refusal_reaches_the_model(tmp_path):
     asyncio.run(asyncio.wait_for(main(), 5))
     assert got["w1"].startswith("Error: ") and "managed by sheath" in got["w1"]
     assert got["r1"].startswith("Error: ") and "escapes root" in got["r1"]
+
+
+def test_run_python_refusal_reaches_the_model(tmp_path):
+    got: dict = {}
+    script = [tool_call("run_python", {}, "p1"), record(got)]
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as s:
+            agent = await s.create_agent(Rec(script), bundles=("code",))
+            await agent.run("go", session=agent.create_session())
+
+    asyncio.run(asyncio.wait_for(main(), 5))
+    assert got["p1"] == "Error: run_python requires either code= or path="
