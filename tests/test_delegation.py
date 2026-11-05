@@ -48,6 +48,9 @@ def test_declared_subagents_run_on_sheath_provider(tmp_path):
         "background_agents_start_task", "background_agents_wait_for_first_completion",
         "background_agents_get_task_results", "background_agents_get_all_tasks",
         "background_agents_continue_task", "background_agents_clear_completed_task"])
+    # Every tool touches the shared task records: none may run in a worker thread.
+    assert all(getattr(t, "_invoke_sync_on_event_loop", False) for t in ctx.tools
+               if not asyncio.iscoroutinefunction(t.func))
     joined = "\n".join(ctx.instructions)
     assert "background_agents_start_task" in joined
     assert "Available background agents:\n- a: does things\n- b: other" in joined
@@ -165,3 +168,76 @@ def test_task_state_survives_new_agent_session(tmp_path):
     assert got["r1"] == "second"
     texts = [c.text for m in got["messages"] for c in m.contents if c.type == "text" and c.text]
     assert any("### Current background tasks\n- Task 1 [completed] (a): a" in t for t in texts)
+
+
+# --- review fixes: concurrent waits, fresh running state ----------------------------------------
+
+def _with_delegation(tmp_path, subs, body, script=None):
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            client = StubChatClient(script or [text("x")])
+            agent = await sess.create_agent(client, bundles=("files",), subagents=subs)
+            top = sess.delegation.top("data-integrator")
+            return await body(sess.delegation, top, agent, client)
+
+    return asyncio.run(main())
+
+
+def test_parallel_waits_on_one_task_both_report_finished(tmp_path):
+    async def body(d, top, agent, client):
+        d.start_task(top, "a", "go", "a")
+        return await asyncio.gather(d.wait_first(top, [1]), d.wait_first(top, [1]),
+                                    return_exceptions=True)
+
+    out = _with_delegation(tmp_path, {"a": spec([text("report-a")])}, body)
+    assert out == ["Task 1 finished with status: completed."] * 2
+
+
+def test_continue_swapping_future_mid_wait(tmp_path):
+    async def body(d, top, agent, client):
+        d.start_task(top, "a", "go", "a")
+        first = d._records[0].future
+        swapped = {}
+
+        def swap(_fut):
+            # Runs before the waiter wakes: read the result, then continue the task.
+            swapped["results"] = d.results(top, 1)
+            swapped["continue"] = d.continue_task(top, 1, "more")
+
+        first.add_done_callback(swap)
+        waited = await d.wait_first(top, [1])
+        still = [r.id for r in d.running_owned(top)] if d._records[0].future else []
+        again = await d.wait_first(top, [1])
+        return waited, swapped, still, again, d.results(top, 1)
+
+    waited, swapped, still, again, final = _with_delegation(
+        tmp_path, {"a": spec([text("first"), text("second")])}, body)
+    assert swapped == {"results": "first", "continue": "Task 1 continued with new input."}
+    assert waited == "Task 1 finished with status: completed."
+    assert still == [1]                     # the continued run was not finalized by the wait
+    assert again == "Task 1 finished with status: completed."
+    assert final == "second"
+
+
+def test_cancelled_tasks_are_not_running_and_next_turn_does_not_rerun(tmp_path):
+    async def slow() -> str:
+        """Slow."""
+        await asyncio.sleep(5)
+        return "late"
+
+    subs = {"a": spec([tool_call("slow"), text("never")], tools=[slow])}
+
+    async def body(d, top, agent, client):
+        d.start_task(top, "a", "go", "a")
+        await asyncio.sleep(0.05)
+        await d.cancel_all()
+        running = d.running_owned(top)
+        response = await agent.run("next", session=agent.create_session())
+        return running, d._records[0].status, response.text, client._turn
+
+    running, status, reply, turns = _with_delegation(
+        tmp_path, subs, body, script=[text("x"), text("rerun")])
+    assert running == []
+    assert status == "failed"
+    assert reply == "x"
+    assert turns == 1

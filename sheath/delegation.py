@@ -89,6 +89,11 @@ class TaskRecord:
         self.sub_session = sub_session
 
 
+def _outcome(fut: asyncio.Task) -> Literal["completed", "failed"]:
+    """How a finished future ended, as a task status."""
+    return "failed" if fut.cancelled() or fut.exception() is not None else "completed"
+
+
 def _finalize(record: TaskRecord) -> None:
     """Take a finished future's outcome into the record (MAF's ``_finalize_task``)."""
     fut = record.future
@@ -167,8 +172,8 @@ class Delegation:
         return next((r for r in self._refresh(owner) if r.id == task_id), None)
 
     def running_owned(self, owner: AgentNode) -> list[TaskRecord]:
-        """``owner``'s tasks recorded as running (not refreshed, as MAF's loop helper reads)."""
-        return [r for r in self._owned(owner) if r.status == "running"]
+        """``owner``'s tasks still running (refreshed first: a finished run is not counted)."""
+        return [r for r in self._refresh(owner) if r.status == "running"]
 
     def start_task(self, owner: AgentNode, agent_name: str, input: str,
                    description: str) -> str:
@@ -205,16 +210,19 @@ class Delegation:
                 return (f"Task {done_already.id} is not running; "
                         f"current status: {done_already.status}.")
             return "Error: None of the specified task IDs correspond to running tasks."
-        futures = {r.future for _, r in waitable}
-        done, _ = await asyncio.wait(futures, timeout=timeout_s,
+        # Keep each future: while this waits, a parallel wait or a refresh may finalize the
+        # record (future -> None), or continue_task may give it a new future.
+        triples = [(tid, r, r.future) for tid, r in waitable]
+        done, _ = await asyncio.wait({f for _, _, f in triples}, timeout=timeout_s,
                                      return_when=asyncio.FIRST_COMPLETED)
         if not done:
             return (f"No background task completed within {timeout_s} seconds. "
                     "The tasks are still running; call this tool again if you wish to "
                     "continue waiting.")
-        completed_id, record = next((tid, r) for tid, r in waitable if r.future in done)
-        _finalize(record)
-        return f"Task {completed_id} finished with status: {record.status}."
+        completed_id, record, fut = next(t for t in triples if t[2] in done)
+        if record.future is fut:
+            _finalize(record)
+        return f"Task {completed_id} finished with status: {_outcome(fut)}."
 
     def results(self, owner: AgentNode, task_id: int) -> str:
         record = self._find(owner, task_id)
@@ -287,6 +295,9 @@ class Delegation:
         if not tasks:
             return
         _, pending = await asyncio.wait(tasks, timeout=CANCEL_WAIT_S)
+        for record in self._records:     # cancelled runs now read failed, not running
+            if record.status == "running":
+                _finalize(record)
         if pending:
             for task in pending:
                 task.add_done_callback(_log_abandoned)
@@ -329,8 +340,6 @@ class DelegationProvider(ContextProvider):
             """Start a background task on a named agent. Returns a confirmation with the task ID."""
             return d.start_task(node, agent_name, input, description)
 
-        # Run on the event loop: creating the task needs the running loop.
-        background_agents_start_task._invoke_sync_on_event_loop = True
 
         @tool(name="background_agents_wait_for_first_completion", approval_mode="never_require")
         async def background_agents_wait_for_first_completion(task_ids: list[int]) -> str:
@@ -356,7 +365,6 @@ class DelegationProvider(ContextProvider):
             """Send follow-up input to a completed or failed task to resume its work."""
             return d.continue_task(node, task_id, text)
 
-        background_agents_continue_task._invoke_sync_on_event_loop = True
 
         @tool(name="background_agents_clear_completed_task", approval_mode="never_require")
         def background_agents_clear_completed_task(task_id: int) -> str:
@@ -365,6 +373,13 @@ class DelegationProvider(ContextProvider):
 
         context.extend_instructions(
             self.source_id, [_PROVIDER_NOTE + "\n\n" + _listing(d.reachable(node))])
+        sync_tools = [background_agents_start_task, background_agents_get_task_results,
+                      background_agents_get_all_tasks, background_agents_continue_task,
+                      background_agents_clear_completed_task]
+        # On the event loop, not a worker thread: they read and change the shared task records
+        # (and start/continue create tasks, which needs the running loop).
+        for t in sync_tools:
+            t._invoke_sync_on_event_loop = True
         context.extend_tools(self.source_id, [
             background_agents_start_task,
             background_agents_wait_for_first_completion,
@@ -381,7 +396,7 @@ class DelegationProvider(ContextProvider):
 
 
 def tasks_running(node: AgentNode) -> Callable[..., bool]:
-    """``should_continue`` for the parent loop: True while ``node`` has a task marked running."""
+    """``should_continue`` for the parent loop: True while ``node`` has a task still running."""
 
     def _should_continue(**kwargs: Any) -> bool:
         d = node._delegation
