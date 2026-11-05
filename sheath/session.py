@@ -220,6 +220,7 @@ class Session:
         Removing the root is best effort, as for ``Conversation.aclose``: an entry that cannot
         be removed is skipped, and a root left behind is logged as a warning, not raised."""
         try:
+            self.delegation.closed = True      # no new task starts once it closes
             await self.cancel_subagents()
         finally:
             for tool in self._mcp_connected:
@@ -587,7 +588,9 @@ class Session:
         """One policy and factory per session: its spawn budget is one per conversation.
         With ``check_only`` it raises on a conflict and sets nothing."""
         d = self.delegation
-        if d.policy is not None and (d.policy is not spawn
+        # The policy by value (a frozen dataclass: an equal one is the same policy); the
+        # factory by identity.
+        if d.policy is not None and (d.policy != spawn
                                      or d.client_factory is not client_factory):
             raise ValueError("this session already has a different SpawnPolicy or "
                              "client_factory; a session takes one, shared by every agent "
@@ -625,7 +628,8 @@ class Session:
             sub_bundles = spec.bundles or bundles
             can_spawn = bool(spec.can_spawn) and spawn is not None and depth_left >= 1
             node = AgentNode(name=sub_name, path=sub_name, depth=1, creator=top,
-                             description=spec.description, bundles=tuple(sub_bundles),
+                             description=spec.description,
+                             bundles=_bundles.selected_bundles(tuple(sub_bundles)),
                              can_spawn=can_spawn,
                              limits=Limits(timeout_s=self.config.subagent_task_timeout_s,
                                            max_round_trips=spec.max_round_trips,

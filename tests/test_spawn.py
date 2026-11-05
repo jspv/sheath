@@ -524,3 +524,71 @@ def test_second_policy_on_session_refused(tmp_path):
                                         client_factory=_factory)
 
     asyncio.run(main())
+
+
+# --- session-level policy, bundles and close ---------------------------------------------------
+
+def test_equal_policy_twice_accepted(tmp_path):
+    # SpawnPolicy is a frozen dataclass: an equal policy is the same policy.
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            await sess.create_agent(Rec([text("x")]), spawn=SpawnPolicy(models=("m",)),
+                                    client_factory=_factory)
+            await sess.create_agent(Rec([text("x")]), name="second",
+                                    spawn=SpawnPolicy(models=("m",)), client_factory=_factory)
+
+    asyncio.run(main())
+
+
+def test_different_policy_refused(tmp_path):
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            await sess.create_agent(Rec([text("x")]), spawn=SpawnPolicy(models=("m",)),
+                                    client_factory=_factory)
+            await sess.create_agent(Rec([text("x")]), name="second",
+                                    spawn=SpawnPolicy(models=("m", "n")),
+                                    client_factory=_factory)
+
+    with pytest.raises(ValueError, match="different SpawnPolicy"):
+        asyncio.run(main())
+
+
+def test_same_policy_different_factory_refused(tmp_path):
+    policy = SpawnPolicy(models=("m",))
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            await sess.create_agent(Rec([text("x")]), spawn=policy, client_factory=_factory)
+            await sess.create_agent(Rec([text("x")]), name="second", spawn=policy,
+                                    client_factory=lambda m: Rec([text("y")], model=m))
+
+    with pytest.raises(ValueError, match="client_factory"):
+        asyncio.run(main())
+
+
+def test_declared_node_bundles_normalized(tmp_path):
+    # bundles=() means every bundle, for a declared sub-agent's node as for the top agent's.
+    from sheath.bundles import selected_bundles
+    from tests.test_subagents import spec as declared
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            await sess.create_agent(Rec([text("x")]), bundles=(),
+                                    subagents={"a": declared([text("r")])},
+                                    spawn=SpawnPolicy(models=("m",)), client_factory=_factory)
+            return sess.delegation
+
+    d = asyncio.run(main())
+    assert d.node("a").bundles == selected_bundles(()) != ()
+    assert d.top("data-integrator").bundles == d.node("a").bundles
+
+
+def test_session_aclose_closes_delegation(tmp_path):
+    async def main():
+        sess = Session.create(SheathConfig(root_dir=tmp_path / "r"))
+        await sess.create_agent(Rec([text("x")]), spawn=SpawnPolicy(models=("m",)),
+                                client_factory=_factory)
+        await sess.aclose()
+        return sess.delegation
+
+    assert asyncio.run(main()).closed

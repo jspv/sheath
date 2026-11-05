@@ -494,7 +494,7 @@ The parent starts and collects tasks through MAF's `background_agents_*` tools (
 
 **Precedence.** `subagents=` is accepted by `Sheath(...)`, `aopen`, `asolve`, `solve` and the module-level `solve`. A per-call value that is not `None` replaces the `Sheath` default whole (as with `agent_instructions`); `{}` means no sub-agents.
 
-**Limits.** `SheathConfig.subagent_max_concurrent` (default `2`) bounds tasks running at once per session; `subagent_task_timeout_s` (default `600`, `None` for no bound) bounds one task, measured from when it gets a slot.
+**Limits.** `SheathConfig.subagent_max_concurrent` (default `2`) bounds sub-agents actively working at once per session; `subagent_task_timeout_s` (default `600`, `None` for no bound) bounds one task's own working time, measured from when it gets a slot. With runtime sub-agents, an agent waiting on its own sub-agents gives up its slot and its clock pauses (see below).
 
 **Waiting and cancelling.** A parent that tries to finish while tasks it started are still running is re-run by sheath (MAF's loop middleware, at most 10 runs; override with `loop_max_iterations` in `agent_kwargs`; a `loop_should_continue` you supply replaces sheath's loop). Any task still running when a turn ends is cancelled, and tasks are cancelled before a workspace is closed or reaped. Hosts with long sub-agent tasks should set generous parent limits: `SheathConfig.tool_loop_max_iterations` and `loop_max_iterations`, because each wait call is one model round-trip and blocks up to 300 s by default (MAF's `background_agents_wait_timeout_seconds`, also passable in `agent_kwargs`).
 
@@ -527,7 +527,7 @@ result = sheath.solve("Split this research into two leads, run them in parallel,
 
 **Shared workspace.** Every sub-agent, spawned or declared, has a folder `agents/<path>/`. `write_file` and `edit_file` refuse to overwrite a file another agent wrote unless the caller has read its current content; `write_file` is atomic. This guards against accidental lost updates, not against an adversary: files written by `run_python` are not tracked, and case or Unicode aliases and hard links are not normalized.
 
-**Limits to know.** MCP progress from a handed-down MCP server keeps the server's own tag rather than the sub-agent's path. `continue_task` works across AG-UI requests on one thread.
+**Limits to know.** A tool call running in parallel with a wait in the same run (for example `run_python` or a fetch) can run without a concurrency slot until the wait ends. MCP progress from a handed-down MCP server keeps the server's own tag rather than the sub-agent's path. `continue_task` works across AG-UI requests on one thread.
 
 ## Reference
 
@@ -646,8 +646,8 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 | `max_emit_bytes` | `1 MiB` | Cap on a sandbox emit payload, checked before parsing |
 | `max_control_bytes` | `8 MiB` | Read cap on the sandbox's new-handles control file |
 | `max_new_handles` | `256` | Handle records adopted per `run_python` call |
-| `subagent_max_concurrent` | `2` | Sub-agent tasks running at once per session; the rest queue |
-| `subagent_task_timeout_s` | `600.0` | Wall-clock bound on one sub-agent task, from when it gets a slot; `None` = no bound |
+| `subagent_max_concurrent` | `2` | Sub-agents actively working at once per session; the rest queue. An agent waiting on its own sub-agents gives up its slot |
+| `subagent_task_timeout_s` | `600.0` | Bound on each sub-agent task's own working time, from when it gets a slot; time spent waiting on its own sub-agents is excluded. `None` = no bound |
 | `spawn=` (not a config field) | `None` | `SpawnPolicy(models, default_model, max_subagents=8, max_depth=3, max_messages=200, max_message_chars=4000)`; none means no spawn or messaging tools |
 | `search` | `SearchConfig()` | Tavily provider, key, `max_results` |
 | `documents` | `DocumentConfig()` | Docling ingestion: `ocr` (off by default) |
