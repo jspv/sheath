@@ -239,8 +239,10 @@ def solve(problem: str, *, tools: list | None = None,
           on_status: _StatusSink | None = None, keep: bool = False,
           agent_instructions: str | None = None,
           subagents: Mapping[str, SubagentSpec] | None = None,
-          spawn: SpawnPolicy | None = None) -> Result:
+          spawn: SpawnPolicy | None = None,
+          client_factory: Callable[[str], Any] | None = None) -> Result:
     """One-shot convenience: build a Sheath and solve a single problem (ephemeral unless keep)."""
     return Sheath(config, client=client, tools=tools, on_status=on_status,
                   agent_instructions=agent_instructions,
-                  subagents=subagents, spawn=spawn).solve(problem, keep=keep)
+                  subagents=subagents, spawn=spawn,
+                  client_factory=client_factory).solve(problem, keep=keep)

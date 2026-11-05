@@ -126,11 +126,9 @@ def test_module_solve_passes_spawn(tmp_path, monkeypatch):
     from sheath import solve
 
     seen = _spy(monkeypatch)
-    # module solve() has no client_factory; an injected client yields none, so supply one
-    monkeypatch.setattr(Sheath, "_subagent_client_factory", lambda self: _factory)
     pol = _policy()
     solve("hi", config=_cfg(tmp_path), client=StubChatClient([text("ok")]),
-          spawn=pol)
+          spawn=pol, client_factory=_factory)
     assert seen == [pol]
 
 
