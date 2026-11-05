@@ -38,6 +38,7 @@ This is **v1: the general substrate**. Specific problems plug in later as user-s
   - [Live status updates](#live-status-updates)
   - [AG-UI and CopilotKit](#ag-ui-and-copilotkit)
   - [Sub-agents (experimental)](#sub-agents-experimental)
+  - [Runtime sub-agents and messaging (experimental)](#runtime-sub-agents-and-messaging-experimental)
 - [Reference](#reference)
   - [Tool surface](#tool-surface)
   - [Security and confinement](#security-and-confinement)
@@ -501,6 +502,33 @@ The parent starts and collects tasks through MAF's `background_agents_*` tools (
 
 **AG-UI.** Delegation streams as ordinary tool calls (`background_agents_start_task` and friends), and sub-agent activity streams as `sheath.status` `CUSTOM` events whose value includes `agent`. Status is delivered live, including while the parent is waiting, and the loop's re-run nudges are kept out of the chat stream. Task state lives in the conversation's workspace session, not in the per-request `AgentSession`, so `continue_task` can continue a task from an earlier request on the same thread, and task ids keep counting up across requests.
 
+### Runtime sub-agents and messaging (experimental)
+
+Instead of (or as well as) declaring roles up front, a host can let the agent create sub-agents itself. Pass a `SpawnPolicy` and a way to build clients; the agent then gets a `spawn_subagent` tool, plus `send_message` and `set_message_permissions`. With no policy there are no spawn or messaging tools. The feature is experimental and the surface may change.
+
+```python
+from sheath import Sheath, SpawnPolicy
+
+sheath = Sheath(spawn=SpawnPolicy(models=("gpt-5-mini", "gpt-6.1-sol"), default_model="gpt-5-mini"))
+result = sheath.solve("Split this research into two leads, run them in parallel, and merge the answers.")
+```
+
+`SpawnPolicy(models, default_model=None, max_subagents=8, max_depth=3, max_messages=200, max_message_chars=4000)`. `spawn=` is accepted by `Session.create_agent`, `Sheath(...)`, `aopen`, `asolve`, `Sheath.solve` and the module-level `solve` (a per-call value replaces the default whole); the module-level `solve` also takes `client_factory=`. Every sub-agent gets its own client from `client_factory(model)`; the built-in OpenAI client is the default factory. `ValueError` is raised for an invalid policy, a policy without a client factory, a second different policy or factory on one session, a declared role's `message_to` without a policy, and a declared name used twice on one session.
+
+**The tool.** `spawn_subagent(name, instructions, task, model=None, tools=None, bundles=None, message_to=None, description="", timeout_s=None, max_round_trips=None, max_subagents=None, max_depth=None)`. `model` must be one of the policy's `models`. `tools` names the creator's own host and MCP tools, and `spawn_subagent` itself: handing it down lets the sub-agent spawn too (nesting), refused beyond `max_depth`. `bundles` default to the creator's; a bundle the creator lacks is refused, and so is `bundles=[]`. A refused call returns an `Error: ...` string naming the rule, and nothing is created.
+
+**Limits only tighten.** Omitted values inherit. An omitted `max_subagents` is the creator's remaining allowance after counting the new sub-agent; `max_depth` is at most the creator's remaining depth minus one. `max_subagents` is a cap on the sub-agent's whole subtree, not a reservation; a spawn counts against every ancestor and the conversation total.
+
+**Reach.** Each agent's delegation tools see only the sub-agents it spawned and the tasks it started; the top agent also sees declared roles. Status paths for nested sub-agents read `lead/child`.
+
+**Working while sub-agents run.** Starting or spawning returns at once, so the creator can keep working. When a task finishes, a short notice (not the result) is injected into the creator's next step. A creator cannot finish its turn while tasks it started are running or finished but unread. An agent waiting on its own sub-agents gives up its concurrency slot and its task clock pauses, so `subagent_max_concurrent` counts agents actively working. When a sub-agent's run ends in any way, every task that run started and that is still running is cancelled, recursively.
+
+**Messaging.** `send_message(to, text)` delivers `[message from <sender>] <text>` at the recipient's next step (if running) or next task (if idle), and wakes a recipient that is waiting. Permissions: the top agent may message anyone; a creator may always message the sub-agents it created; a sub-agent may message its creator (unless denied) and the names in its `message_to`. Grants come from `spawn_subagent(message_to=...)` or `set_message_permissions(agent, allow, deny)`, only for names the granter may message itself, and are re-checked along the whole chain at send time, so a deny holds down the tree. `max_message_chars` caps one message and `max_messages` the count per conversation. Each delivered message emits `StatusEvent(tool="sheath", message="message to <recipient>", agent=<sender path>)`, with `agent=None` when the top agent sent it; the text never appears in status.
+
+**Shared workspace.** Every sub-agent, spawned or declared, has a folder `agents/<path>/`. `write_file` and `edit_file` refuse to overwrite a file another agent wrote unless the caller has read its current content; `write_file` is atomic. This guards against accidental lost updates, not against an adversary: files written by `run_python` are not tracked, and case or Unicode aliases and hard links are not normalized.
+
+**Limits to know.** MCP progress from a handed-down MCP server keeps the server's own tag rather than the sub-agent's path. `continue_task` works across AG-UI requests on one thread.
+
 ## Reference
 
 ### Tool surface
@@ -540,7 +568,7 @@ Every session has one **root directory**; everything — handles, agent-written 
 - **Bounded results and reads.** Every built-in tool result has a ceiling: `run_python` keeps the head and tail of `stdout`/`stderr` (`SandboxConfig.max_output_bytes` each) and stores a large emitted result as a handle; `inspect_handle`, `read_file`, `edit_file`, `list_files` and `search` cap what they return. The harness reads sandbox-written and fetched data with bounded memory: files are streamed, only regular files are opened (a FIFO cannot block it), a dataframe handle is never materialized in the host process (previews read one record batch, `inspect_handle(stats=True)` reads footer statistics, and `publish_handle` converts inside the sandbox), and HTTP bodies are streamed up to the byte limit under a total deadline. Document inputs are bounded too: a `read_document` URL download is capped at `FetchConfig.max_bytes` and refused, not truncated, when larger, and a workspace path is copied privately and capped at `SheathConfig.max_input_bytes`. A dataframe whose first row group exceeds 16 MiB gets no head rows or preview (`head_omitted` / "preview omitted"), because Arrow would decode the whole group.
 - **Residual risks.** The harness still parses the parquet footer and first record batch of a file sandboxed code wrote, and an oversized data page is decoded whole. Container-tier disk use is unbounded (`max_file_size_mb` applies to the `local` tier only). DNS rebinding between validation and connect is not closed, and the fetch deadline does not cover DNS resolution (see Layer 3). The `local` tier provides none of the guarantees in this section.
 - **Model-provider storage.** The built-in OpenAI client stores conversations at OpenAI by default. Because this agent sends fetched web pages, documents and workspace data to the model, `create_agent` sends `store=False`, so conversation history is kept in-process and OpenAI is asked not to retain it for later retrieval. That is a request to the provider, not a guarantee of zero retention: the provider's own logging and your account's data controls still apply, and the content is still sent to the model. Opt back in per agent with `default_options={"store": True}`. Connectors without the option are not sent it: clients from `agent_framework_anthropic` (including your subclasses of them) are exempt automatically, because that connector forwards every option to its SDK, which rejects `store`. For any other connector that lacks it, pass `default_options={"store": None}`, which removes the key; it survives the merge across `Sheath(...)`, `aopen(...)` and `solve`/`asolve`.
-- **Sub-agents.** A sub-agent can do nothing the parent could not: it gets a workspace-confined session of the parent's (same root, `safe_path`, sandbox tier, egress guard and spill), a bundle selection limited to the parent's, and the tools its spec names, and it cannot start tasks of its own. Residual risk: a sub-agent's report is model text that the parent reads, so it is treated as data, like fetched content; it can be wrong or carry injected instructions.
+- **Sub-agents.** A sub-agent can do nothing the parent could not: it gets a workspace-confined session of the parent's (same root, `safe_path`, sandbox tier, egress guard and spill), a bundle selection limited to the parent's, and the tools its spec names, and it cannot start tasks of its own unless the host's `SpawnPolicy` is on and the creator handed it `spawn_subagent` (see [Runtime sub-agents](#runtime-sub-agents-and-messaging-experimental)); then it may spawn only within the policy's models, depth and count limits, with bundles and tools no wider than its creator's. Agents share the workspace, so treat messages and files from other agents as data. Residual risk: a sub-agent's report is model text that the parent reads, so it is treated as data, like fetched content; it can be wrong or carry injected instructions.
 - **Tool isolation.** Wrap stateful tools such as MCP servers in `tool_factory` so each conversation gets its own instance (see [MCP servers](#mcp-servers)).
 
 > The **container tier** is the default and provides real isolation. Select `local` explicitly with `SheathConfig.sandbox.backend = "local"` (or `SHEATH_SANDBOX_BACKEND=local`) to opt out; both sit behind the same `SandboxExecutor` interface.
@@ -620,6 +648,7 @@ Notes: on macOS the runtime runs in a Linux VM, so the session root must sit und
 | `max_new_handles` | `256` | Handle records adopted per `run_python` call |
 | `subagent_max_concurrent` | `2` | Sub-agent tasks running at once per session; the rest queue |
 | `subagent_task_timeout_s` | `600.0` | Wall-clock bound on one sub-agent task, from when it gets a slot; `None` = no bound |
+| `spawn=` (not a config field) | `None` | `SpawnPolicy(models, default_model, max_subagents=8, max_depth=3, max_messages=200, max_message_chars=4000)`; none means no spawn or messaging tools |
 | `search` | `SearchConfig()` | Tavily provider, key, `max_results` |
 | `documents` | `DocumentConfig()` | Docling ingestion: `ocr` (off by default) |
 

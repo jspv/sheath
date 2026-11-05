@@ -8,10 +8,25 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 
 ## Unreleased
 
+### Runtime sub-agents and messaging (experimental)
+- **New:** `SpawnPolicy(models, default_model, max_subagents=8, max_depth=3, max_messages=200,
+  max_message_chars=4000)` and `spawn=` on `Session.create_agent`, `Sheath`, `aopen`, `asolve`,
+  `solve` and the module `solve` (which also gains `client_factory=`). The agent gets
+  `spawn_subagent`, `send_message` and `set_message_permissions`; without a policy none exist.
+- Limits only tighten and nesting is bounded by `max_depth`; each agent sees only its own
+  sub-agents and tasks. Creators keep working while sub-agents run and get completion notices; a
+  waiting agent frees its concurrency slot; ending a run cancels the tasks it started.
+- Messaging with chain-checked permissions; delivered messages emit a status event with the
+  sender's path and never the text.
+- Shared workspace: per-agent `agents/<path>/` folders, and `write_file`/`edit_file` refuse to
+  overwrite another agent's file unless it was read first (`write_file` is now atomic).
+- `continue_task` works across AG-UI requests. sheath owns the provider, so MAF's experimental
+  warning no longer appears.
+
 ### Sub-agents (experimental)
 - **New:** `subagents={name: SubagentSpec(...)}` on `Sheath`, `aopen`, `asolve` and `solve` gives the
-  parent named sub-agents that run as background tasks (MAF's background-agents provider, which
-  MAF marks experimental). Each has its own client (`SubagentSpec.client`, or
+  parent named sub-agents that run as background tasks (delegated through sheath's own provider).
+  Each has its own client (`SubagentSpec.client`, or
   `client_factory(spec.model or config.model)`), instructions, bundles and tools, and is confined
   to the parent's workspace and capabilities. `Sheath(client_factory=...)` is new.
 - Parents wait for their running tasks (re-run, cap 10, `loop_max_iterations`); tasks still
