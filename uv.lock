@@ -2764,7 +2764,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "agent-framework-ag-ui", marker = "extra == 'agui'", specifier = ">=1.6.0" },
-    { name = "agent-framework-core", specifier = ">=1.22.0" },
+    { name = "agent-framework-core", specifier = ">=1.22.0,<1.25" },
     { name = "agent-framework-openai", specifier = ">=1.17.0" },
     { name = "docling", marker = "extra == 'docling'", specifier = ">=2.0" },
     { name = "httpx", specifier = ">=0.27" },

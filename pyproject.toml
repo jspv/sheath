@@ -30,7 +30,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "agent-framework-core>=1.22.0",
+    "agent-framework-core>=1.22.0,<1.25",  # sheath imports private names from core; raise after testing a new minor
     "agent-framework-openai>=1.17.0",
     "mcp>=1.27",            # MAF's MCPStdioTool/MCPStreamableHTTPTool need the MCP SDK at runtime
     "pandas>=2.0",

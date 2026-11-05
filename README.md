@@ -80,7 +80,7 @@ To work on sheath itself, clone the repository and use [`uv`](https://docs.astra
 uv sync
 ```
 
-Built on Microsoft Agent Framework `agent-framework-core>=1.22.0` and `agent-framework-openai>=1.17.0` (and `agent-framework-ag-ui>=1.6.0` for the AG-UI extra); these are the versions the test suite and live tests run against. The lock includes a few prerelease transitive dependencies, so `pyproject.toml` sets `prerelease = "allow"` for `uv` — no flag is needed.
+Built on Microsoft Agent Framework `agent-framework-core>=1.22.0,<1.25` and `agent-framework-openai>=1.17.0` (and `agent-framework-ag-ui>=1.6.0` for the AG-UI extra); the test suite and live tests pass on core 1.22 through 1.24. sheath imports a few private names from `agent-framework-core`, so the upper bound is raised only after a new minor has been tested. The lock includes a few prerelease transitive dependencies, so `pyproject.toml` sets `prerelease = "allow"` for `uv` — no flag is needed.
 
 In a checkout, the optional extras are:
 

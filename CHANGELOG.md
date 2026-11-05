@@ -6,7 +6,16 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 
 0.3.0 breaks one call: `read_file` takes a 1-based `start_line` in place of the 0-based `offset`.
 
-## Unreleased
+0.4.0 adds sub-agents, runtime sub-agents and messaging (all experimental) and caps
+`agent-framework-core` below 1.25.
+
+## 0.4.0 — 2026-11-05
+
+### `agent-framework-core` is capped below 1.25
+- **Packaging:** the requirement is now `agent-framework-core>=1.22.0,<1.25`. sheath imports
+  private names from core (the message-injection lock and queue helpers, `Content`), which a new
+  minor may move or change. The suite and live tests pass on 1.22, 1.23 and 1.24; the bound is
+  raised after each new minor is tested.
 
 ### Runtime sub-agents and messaging (experimental)
 - **New:** `SpawnPolicy(models, default_model, max_subagents=8, max_depth=3, max_messages=200,
