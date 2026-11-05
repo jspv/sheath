@@ -21,13 +21,13 @@ def test_live_delegates_word_count_to_subagent(tmp_path):
 
     h = Sheath(
         SheathConfig(root_dir=tmp_path / "r"),
-        on_status=spy,
         subagents={"counter": SubagentSpec(description="counts words in a workspace file",
                                            bundles=("files", "code"))},
     )
 
     async def run():
         conv = await h.aopen("subagents-live")
+        conv.session.subscribe(spy)   # Sheath(on_status=...) reaches one-shot runs only
         try:
             return await conv.aask(
                 "Write the sentence 'the quick brown fox jumps over the lazy dog' to words.txt, "
