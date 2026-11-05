@@ -399,6 +399,93 @@ def test_reap_does_not_follow_symlinked_directory(tmp_path):
         inner.chmod(0o755)
 
 
+def _quarantine(monkeypatch, sandbox):
+    monkeypatch.setattr(sandbox, "check_quarantine", _quarantined, raising=False)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_session_cleanup_passes_quarantine_check(tmp_path, caplog, monkeypatch):
+    holder: dict = {}
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r", cleanup=True)) as sess:
+            holder["locked"], holder["siblings"] = _lock_out(sess.root)
+            _quarantine(monkeypatch, sess.sandbox)
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="sheath"):
+            asyncio.run(main())
+        assert all(d.exists() for d in holder["locked"])   # no reset: the check was consulted
+        assert any("quarantine" in r.getMessage() for r in caplog.records)
+    finally:
+        _unlock(holder.get("locked"))
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_conversation_reap_passes_quarantine_check(tmp_path, caplog, monkeypatch):
+    holder: dict = {}
+
+    async def main():
+        conv = await Conversation.acreate(
+            id="c1", config=SheathConfig(root_dir=tmp_path / "r"),
+            client=StubChatClient([text("ok")]), bundles=("files",))
+        holder["locked"], holder["siblings"] = _lock_out(conv.session.root)
+        _quarantine(monkeypatch, conv.session.sandbox)
+        await conv.aclose()
+
+    try:
+        with caplog.at_level(logging.WARNING, logger="sheath"):
+            asyncio.run(main())
+        assert all(d.exists() for d in holder["locked"])
+        assert any("quarantine" in r.getMessage() for r in caplog.records)
+    finally:
+        _unlock(holder.get("locked"))
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_reap_treats_unexpected_check_failure_as_quarantined(tmp_path, caplog):
+    from sheath.session import _remove_root_locked
+
+    def broken():
+        raise RuntimeError("runtime gone")
+
+    root = tmp_path / "r"
+    root.mkdir()
+    locked, siblings = _lock_out(root)
+    try:
+        with caplog.at_level(logging.WARNING, logger="sheath"):
+            _remove_root_locked(root, threading.RLock(), broken)   # must not raise
+        assert not [p for p in siblings if p.exists()]
+        assert all(d.exists() for d in locked)     # fail safe: no permission reset
+        assert any("RuntimeError" in r.getMessage() for r in caplog.records)
+    finally:
+        _unlock(locked)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_reap_removes_nested_chmod_000_directories(tmp_path):
+    from sheath.session import _remove_root_locked
+
+    root = tmp_path / "r"
+    inner = root / "outer" / "mid" / "inner"
+    inner.mkdir(parents=True)
+    (inner / "f").write_text("x")
+    dirs = [inner, inner.parent, inner.parent.parent]   # innermost first
+    for d in dirs:
+        d.chmod(0)
+    try:
+        _remove_root_locked(root, threading.RLock())
+        assert not root.exists()
+    finally:
+        for d in reversed(dirs):
+            if os.path.lexists(d):
+                d.chmod(0o755)
+
+
 def test_session_close_cancels_task_not_yet_started(tmp_path):
     """A task MAF's start tool created but that has not taken a step yet is cancelled too."""
     from agent_framework import SessionContext
@@ -432,3 +519,22 @@ def test_session_close_cancels_task_not_yet_started(tmp_path):
     registered = asyncio.run(main())
     assert registered == 0          # not yet registered when the close began
     assert "tool" not in ran
+
+
+def test_best_effort_reset_ignores_non_directory_top(tmp_path):
+    from sheath.session import _make_tree_writable
+
+    target = tmp_path / "target"
+    (target / "sub").mkdir(parents=True)
+    (target / "sub").chmod(0o555)
+    target.chmod(0o555)
+    link = tmp_path / "link"
+    link.symlink_to(target, target_is_directory=True)
+    try:
+        _make_tree_writable(link, best_effort=True)
+        _make_tree_writable(tmp_path / "missing", best_effort=True)   # no error
+        assert (target.stat().st_mode & 0o777) == 0o555
+        assert ((target / "sub").stat().st_mode & 0o777) == 0o555
+    finally:
+        target.chmod(0o755)
+        (target / "sub").chmod(0o755)

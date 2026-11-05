@@ -61,7 +61,8 @@ def _remove_root_locked(root: Path, lock: Any,
     before ``chmod``, which is safe only while nothing else writes in the root; the lock and
     the cancelled sub-agent tasks ensure that, except under a quarantined sandbox (a
     timed-out container that may still be running). ``check_quarantine`` (the sandbox's,
-    called with the lock held) detects that case, and the permission reset is then skipped.
+    called with the lock held) detects that case, and the permission reset is then skipped;
+    a check that fails any other way is treated the same (logged, never raised).
     An entry that still cannot be removed does not stop the walk; everything else goes, and
     a root left behind is logged as a warning rather than raised.
     """
@@ -81,6 +82,11 @@ def _remove_root_locked(root: Path, lock: Any,
                 quarantined = True
                 _log.warning("removing %s: the sandbox is quarantined (a container may still "
                              "be writing); permissions not reset", root)
+            except Exception as e:  # noqa: BLE001 - fail safe: a close path must not raise
+                quarantined = True
+                _log.warning("removing %s: the quarantine check failed (%s); treating the "
+                             "sandbox as quarantined, permissions not reset", root,
+                             type(e).__name__)
         if not quarantined:
             _make_tree_writable(root, best_effort=True)
         shutil.rmtree(root, onexc=_record)
@@ -725,6 +731,9 @@ def _make_tree_writable(top: Path, *, best_effort: bool = False) -> None:
         try:
             if not stat.S_ISDIR(os.lstat(top).st_mode):
                 return
+        except OSError:
+            return
+        try:
             os.chmod(top, 0o700)   # lstat just proved it is a real directory
         except OSError:
             pass
