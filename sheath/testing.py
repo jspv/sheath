@@ -13,6 +13,7 @@ from typing import Any, Union
 
 from agent_framework import (
     BaseChatClient,
+    ChatMiddlewareLayer,
     ChatResponse,
     ChatResponseUpdate,
     FunctionInvocationLayer,
@@ -29,8 +30,11 @@ def text(value: str) -> Content:
     return Content("text", text=value)
 
 
-class StubChatClient(FunctionInvocationLayer, BaseChatClient):
-    """Returns scripted responses, one per model turn."""
+class StubChatClient(FunctionInvocationLayer, ChatMiddlewareLayer, BaseChatClient):
+    """Returns scripted responses, one per model turn.
+
+    Layered like the framework's real clients (function invocation over chat middleware), so
+    chat middleware an agent wires (message injection among it) runs around each model call."""
 
     def __init__(self, script: list[Union[Content, Callable[[list[Message]], Content]]]) -> None:
         super().__init__()

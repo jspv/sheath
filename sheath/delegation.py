@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from agent_framework import ContextProvider, Message, tool
+from agent_framework._sessions import (
+    _MESSAGE_INJECTION_LOCK,
+    MESSAGE_INJECTION_PENDING_MESSAGES_STATE_KEY,
+    enqueue_messages,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -27,6 +32,8 @@ CANCEL_WAIT_S = 30.0
 CANCEL_ROUNDS = 3
 
 _SOURCE_ID = "sheath_delegation"
+# Marks a message ``deliver`` queued on an AgentSession, so an undrained one can be taken back.
+_DELIVERY_KEY = "sheath_delivery"
 
 _PROVIDER_NOTE = (
     "Sub-agents work in this workspace under the same limits as you. Delegate a self-contained "
@@ -87,6 +94,12 @@ class TaskRecord:
         self.error_text: str | None = None
         self.future = future
         self.sub_session = sub_session
+        # Set when a run ends (completed or failed); cleared when the owner reads the result.
+        self.unread = False
+        # Set when the host cancelled the run (Delegation.cancel_all): no notice, not unread.
+        self.host_cancelled = False
+        self._run: asyncio.Task | None = None    # the current run's future, kept once finalized
+        self._read: asyncio.Task | None = None   # the run whose result the owner read
 
 
 def _outcome(fut: asyncio.Task) -> Literal["completed", "failed"]:
@@ -94,11 +107,13 @@ def _outcome(fut: asyncio.Task) -> Literal["completed", "failed"]:
     return "failed" if fut.cancelled() or fut.exception() is not None else "completed"
 
 
-def _finalize(record: TaskRecord) -> None:
-    """Take a finished future's outcome into the record (MAF's ``_finalize_task``)."""
+def _finalize(record: TaskRecord) -> bool:
+    """Take a finished future's outcome into the record (MAF's ``_finalize_task``).
+
+    Returns True when it did (once per run: the future is dropped), else False."""
     fut = record.future
     if fut is None or not fut.done():
-        return
+        return False
     if fut.cancelled():
         record.status, record.error_text = "failed", "Task was canceled."
     elif (exc := fut.exception()) is not None:
@@ -106,6 +121,62 @@ def _finalize(record: TaskRecord) -> None:
     else:
         record.status, record.result_text = "completed", fut.result().text
     record.future = None
+    return True
+
+
+def _notice(record: TaskRecord, outcome: str) -> str:
+    return (f"[task {record.id} ({record.agent.path}) {outcome} — read it with "
+            "background_agents_get_task_results]")
+
+
+def deliver(node: AgentNode, text: str) -> None:
+    """Get ``text`` to ``node``'s model: into its next model call if a run of it is in
+    progress (MAF's message injection drains the queue, mid-run included), else into its inbox,
+    which is delivered when its next run starts."""
+    session = node.current_session
+    if session is None:
+        node.inbox.append(text)
+        return
+    enqueue_messages(session, [Message(role="user", contents=[text],
+                                       additional_properties={_DELIVERY_KEY: True})])
+
+
+def _reclaim(node: AgentNode, session: Any) -> None:
+    """Move deliveries still queued, undrained, on ``session`` back to ``node``'s inbox."""
+    state = getattr(session, "state", None)
+    if not isinstance(state, dict):
+        return
+    with _MESSAGE_INJECTION_LOCK:
+        queue = state.get(MESSAGE_INJECTION_PENDING_MESSAGES_STATE_KEY)
+        if not queue:
+            return
+        ours = [m for m in queue if m.additional_properties.get(_DELIVERY_KEY)]
+        if not ours:
+            return
+        queue[:] = [m for m in queue if not m.additional_properties.get(_DELIVERY_KEY)]
+    node.inbox.extend(m.text for m in ours)
+
+
+def attach(node: AgentNode, session: Any) -> None:
+    """A run of ``node`` starts on ``session``: deliveries go there, the inbox first.
+
+    A previous session not detached (its run raised before ``after_run``) gives back what it
+    still holds undelivered, so nothing is stranded on a session that will not run again."""
+    previous = node.current_session
+    if previous is not None and previous is not session:
+        _reclaim(node, previous)
+    node.current_session = session
+    if node.inbox:
+        pending, node.inbox[:] = list(node.inbox), []
+        for text in pending:
+            deliver(node, text)
+
+
+def detach(node: AgentNode, session: Any) -> None:
+    """A run of ``node`` on ``session`` ended: later deliveries wait in the inbox."""
+    if node.current_session is session:
+        _reclaim(node, session)
+        node.current_session = None
 
 
 def _log_abandoned(task: asyncio.Task) -> None:
@@ -153,13 +224,41 @@ class Delegation:
         return self._nodes.get(name.lower())
 
     def reachable(self, owner: AgentNode) -> list[AgentNode]:
-        """The nodes ``owner`` may start tasks on: those it created, in creation order."""
+        """The nodes ``owner`` may start tasks on, in creation order: those it created. For the
+        top agent that is the host-declared roles plus the sub-agents it spawned; for a
+        sub-agent, only the sub-agents it spawned (never a declared role or a sibling)."""
         return [n for n in self._nodes.values() if n.creator is owner]
 
     # --- tasks ------------------------------------------------------------------------------
 
     def _owned(self, owner: AgentNode) -> list[TaskRecord]:
         return [r for r in self._records if r.owner is owner]
+
+    def _notify(self, record: TaskRecord, outcome: str | None = None) -> None:
+        """Tell the owner its task ended (``outcome``, else the record's status), not what it
+        returned: the result stays out of the owner's context until it reads it."""
+        deliver(record.owner, _notice(record, outcome or record.status))
+
+    def _watch(self, record: TaskRecord) -> None:
+        """When ``record``'s current run ends, mark it unread and notify the owner, unless the
+        host cancelled it or the owner already read its result.
+
+        The record itself is still finalized lazily, as MAF's provider does, so the wait tool
+        reports a run that ended since the last look as finished, in MAF's words."""
+        fut = record.future
+        if fut is None:
+            return
+        record._run = fut
+
+        def _done(f: asyncio.Task) -> None:
+            if record._run is not f or record._read is f or record.host_cancelled:
+                return
+            if record not in self._records:
+                return   # cleared
+            record.unread = True
+            self._notify(record, _outcome(f))
+
+        fut.add_done_callback(_done)
 
     def _refresh(self, owner: AgentNode) -> list[TaskRecord]:
         records = self._owned(owner)
@@ -174,6 +273,10 @@ class Delegation:
     def running_owned(self, owner: AgentNode) -> list[TaskRecord]:
         """``owner``'s tasks still running (refreshed first: a finished run is not counted)."""
         return [r for r in self._refresh(owner) if r.status == "running"]
+
+    def unread_owned(self, owner: AgentNode) -> list[TaskRecord]:
+        """``owner``'s finished tasks whose result it has not read since they finished."""
+        return [r for r in self._refresh(owner) if r.status != "running" and r.unread]
 
     def start_task(self, owner: AgentNode, agent_name: str, input: str,
                    description: str) -> str:
@@ -191,6 +294,7 @@ class Delegation:
                             description=description, future=future, sub_session=sub_session)
         self._next_id += 1
         self._records.append(record)
+        self._watch(record)
         return f"Background task {record.id} started on agent '{agent_name}'."
 
     async def wait_first(self, owner: AgentNode, task_ids: list[int], *,
@@ -228,6 +332,8 @@ class Delegation:
         record = self._find(owner, task_id)
         if record is None:
             return f"Error: No task found with ID {task_id}."
+        if record.status != "running":
+            record.unread, record._read = False, record._run
         if record.status == "completed":
             return record.result_text or "(no output)"
         if record.status == "failed":
@@ -256,6 +362,8 @@ class Delegation:
         record.future = asyncio.create_task(
             record.agent.agent.run(text, session=record.sub_session))
         record.status, record.result_text, record.error_text = "running", None, None
+        record.unread = record.host_cancelled = False
+        self._watch(record)
         return f"Task {task_id} continued with new input."
 
     def clear(self, owner: AgentNode, task_id: int) -> str:
@@ -267,6 +375,7 @@ class Delegation:
         if record.status == "running":
             return (f"Error: Task {task_id} is still running. "
                     "Wait for it to complete before clearing.")
+        record.unread = False
         self._records.remove(record)
         return f"Task {task_id} cleared."
 
@@ -286,6 +395,9 @@ class Delegation:
             seen += list(self._session._subagent_tasks)
             new = [t for t in dict.fromkeys(seen)
                    if t is not me and not t.done() and t not in tasks]
+            for record in self._records:
+                if record.future is not None and record.future in new:
+                    record.host_cancelled = True
             for task in new:
                 task.cancel()
             tasks.extend(new)
@@ -333,7 +445,7 @@ class DelegationProvider(ContextProvider):
     async def before_run(self, *, agent: Any, session: Any, context: Any,
                          state: dict[str, Any]) -> None:
         d, node, wait_s = self._delegation, self._node, self._wait_timeout_s
-        node.current_session = session
+        attach(node, session)
 
         @tool(name="background_agents_start_task", approval_mode="never_require")
         def background_agents_start_task(agent_name: str, input: str, description: str) -> str:
@@ -394,31 +506,50 @@ class DelegationProvider(ContextProvider):
             context.extend_messages(self.source_id,
                                     [Message(role="user", contents=["\n".join(lines)])])
 
+    async def after_run(self, *, agent: Any, session: Any, context: Any,
+                        state: dict[str, Any]) -> None:
+        detach(self._node, session)
+
 
 def tasks_running(node: AgentNode) -> Callable[..., bool]:
-    """``should_continue`` for the parent loop: True while ``node`` has a task still running."""
+    """``should_continue`` for the parent loop: True while ``node`` has a task still running,
+    or a finished one whose result it has not read since it finished (so a result that lands
+    during the last pass is not dropped). Bounded by the loop's ``max_iterations``."""
 
     def _should_continue(**kwargs: Any) -> bool:
         d = node._delegation
-        return d is not None and bool(d.running_owned(node))
+        return d is not None and bool(d.running_owned(node) or d.unread_owned(node))
 
     return _should_continue
 
 
 def tasks_running_message(node: AgentNode) -> Callable[..., str | None]:
-    """``next_message`` for the parent loop: MAF's reminder listing ``node``'s running tasks."""
+    """``next_message`` for the parent loop: MAF's reminder listing ``node``'s running tasks,
+    and a reminder to read its finished tasks' unread results."""
 
     def _next_message(**kwargs: Any) -> str | None:
         d = node._delegation
         running = d.running_owned(node) if d is not None else []
-        if not running:
-            return None
-        lines = "\n".join(f"- #{r.id} ({r.agent.path}): {r.description}" for r in running)
-        return (
-            f"You still have {len(running)} background task(s) running that must finish "
-            f"before you can complete the work:\n{lines}\n\n"
-            "Wait for these tasks to complete, retrieve their results, and incorporate them. "
-            "Only stop once every background task has finished."
-        )
+        unread = d.unread_owned(node) if d is not None else []
+        parts = []
+        if running:
+            parts.append(
+                f"You still have {len(running)} background task(s) running that must finish "
+                f"before you can complete the work:\n{_brief(running)}\n\n"
+                "Wait for these tasks to complete, retrieve their results, and incorporate them. "
+                "Only stop once every background task has finished."
+            )
+        if unread:
+            parts.append(
+                f"You have {len(unread)} finished background task(s) whose results you have "
+                f"not read:\n{_brief(unread)}\n\n"
+                "Read each with background_agents_get_task_results and incorporate it before "
+                "you finish."
+            )
+        return "\n\n".join(parts) or None
 
     return _next_message
+
+
+def _brief(records: list[TaskRecord]) -> str:
+    return "\n".join(f"- #{r.id} ({r.agent.path}): {r.description}" for r in records)

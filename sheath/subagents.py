@@ -19,6 +19,7 @@ from agent_framework import (AgentMiddleware, AgentResponse, FunctionMiddleware,
 
 from sheath.bundles import selected_bundles
 from sheath.config import SheathConfig
+from sheath.delegation import attach, detach
 from sheath.status import StatusEvent, bind_agent, report_progress
 
 _NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
@@ -211,6 +212,8 @@ class ConfinedSubagent:
         task = asyncio.current_task()
         if task is not None:
             sess._subagent_tasks.add(task)
+        # Messages for this sub-agent go into this run's model calls; its inbox first.
+        attach(self._node, session)
         try:
             # Yield once right after registering, so Session.cancel_subagents (which yields
             # before it looks again) sees a run started outside the delegation's own records
@@ -223,6 +226,7 @@ class ConfinedSubagent:
                 with bind_agent(self.name):
                     return await self._run_tagged(messages, session, kwargs, _maybe_spill)
         finally:
+            detach(self._node, session)
             if task is not None:
                 sess._subagent_tasks.discard(task)
 

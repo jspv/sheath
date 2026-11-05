@@ -7,7 +7,12 @@ import asyncio
 from agent_framework import BackgroundAgentsProvider
 
 from sheath import SheathConfig, Session
-from sheath.delegation import DelegationProvider
+from sheath.delegation import (
+    AgentNode,
+    DelegationProvider,
+    tasks_running,
+    tasks_running_message,
+)
 from sheath.testing import StubChatClient, text, tool_call
 from tests.test_subagents import cont, record, results, spec, start, wait
 
@@ -153,21 +158,25 @@ def test_wait_timeout_string_matches_maf(tmp_path):
 def test_task_state_survives_new_agent_session(tmp_path):
     got: dict = {}
     subs = {"a": spec([text("first"), text("second")])}
-    script = [start("a", 1), wait([1], 1), text("turn-1"),
-              cont(1, "more", 1), wait([1], 2), results(1, 1), record(got)]
+    # Turn 1 reads its result: an unread finished task would keep the parent loop going.
+    turn2_first: list = []
+    script = [start("a", 1), wait([1], 1), results(1, 0), text("turn-1"),
+              _snap(turn2_first, cont(1, "more", 1)), wait([1], 2), results(1, 1), record(got)]
 
     async def main():
         async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
             agent = await sess.create_agent(StubChatClient(script), bundles=("files",),
                                             subagents=subs)
-            await agent.run("go", session=agent.create_session())
+            first = await agent.run("go", session=agent.create_session())
             await agent.run("more", session=agent.create_session())
+            return first.text
 
-    asyncio.run(main())
+    assert asyncio.run(main()) == "turn-1"
     assert got["c1"] == "Task 1 continued with new input."
     assert got["r1"] == "second"
-    texts = [c.text for m in got["messages"] for c in m.contents if c.type == "text" and c.text]
-    assert any("### Current background tasks\n- Task 1 [completed] (a): a" in t for t in texts)
+    # The listing is context for the run's first model call (as with the framework's clients).
+    assert any("### Current background tasks\n- Task 1 [completed] (a): a" in t
+               for t in turn2_first[0])
 
 
 # --- review fixes: concurrent waits, fresh running state ----------------------------------------
@@ -241,3 +250,236 @@ def test_cancelled_tasks_are_not_running_and_next_turn_does_not_rerun(tmp_path):
     assert status == "failed"
     assert reply == "x"
     assert turns == 1
+
+
+# --- reach and completion notices ---------------------------------------------------------------
+
+def _notice(tid, path, outcome):
+    return f"[task {tid} ({path}) {outcome} — read it with background_agents_get_task_results]"
+
+
+def _texts(messages):
+    return [c.text for m in messages for c in m.contents if c.type == "text" and c.text]
+
+
+def _snap(calls, then):
+    """A script step that records the messages of its model call, then answers ``then``."""
+    def step(messages):
+        calls.append(_texts(messages) + [str(getattr(c, "result", "")) for m in messages
+                                         for c in m.contents if c.type == "function_result"])
+        return then
+    return step
+
+
+def _kid(d, name, creator):
+    node = AgentNode(name=name, path=name if creator.depth == 0 else f"{creator.path}/{name}",
+                     depth=creator.depth + 1, creator=creator)
+    d.add_node(node)
+    return node
+
+
+def test_tools_see_only_own_tasks(tmp_path):
+    async def body(d, top, agent, client):
+        d.start_task(top, "a", "go", "a")
+        await d._records[0].future
+        kid = _kid(d, "kid", top)
+        return {"results": d.results(kid, 1), "clear": d.clear(kid, 1),
+                "continue": d.continue_task(kid, 1, "more"), "all": d.all_tasks(kid),
+                "wait": await d.wait_first(kid, [1]), "top_all": d.all_tasks(top)}
+
+    out = _with_delegation(tmp_path, {"a": spec([text("report-a")])}, body)
+    assert out["results"] == "Error: No task found with ID 1."
+    assert out["clear"] == "Error: No task found with ID 1."
+    assert out["continue"] == "Error: No task found with ID 1."
+    assert out["all"] == "No tasks."
+    assert out["wait"] == "Error: None of the specified task IDs correspond to running tasks."
+    assert out["top_all"] == "Tasks:\n- Task 1 [completed] (a): a"
+
+
+def test_cannot_start_unreachable_agent(tmp_path):
+    async def body(d, top, agent, client):
+        kid = _kid(d, "kid", top)
+        _kid(d, "sib", top)
+        _kid(d, "grandkid", kid)
+        return (d.start_task(kid, "a", "go", "x"), d.start_task(kid, "SIB", "go", "x"),
+                [n.name for n in d.reachable(top)], [n.name for n in d.reachable(kid)],
+                d._records)
+
+    role, sib, top_reach, kid_reach, records = _with_delegation(
+        tmp_path, {"a": spec([text("r")])}, body)
+    assert role == ("Error: No background agent found with name 'a'. "
+                    "Available agents: grandkid")
+    assert sib == ("Error: No background agent found with name 'SIB'. "
+                   "Available agents: grandkid")
+    assert top_reach == ["a", "kid", "sib"]
+    assert kid_reach == ["grandkid"]
+    assert records == []
+
+
+def test_completion_notice_injected_not_result(tmp_path):
+    gate: dict = {}
+    calls: list = []
+
+    async def block() -> str:
+        """Wait until the parent releases it."""
+        await gate.setdefault("event", asyncio.Event()).wait()
+        return "unblocked"
+
+    async def tick() -> str:
+        """The parent's own work."""
+        gate.setdefault("event", asyncio.Event()).set()
+        await asyncio.sleep(0.05)
+        return "ticked"
+
+    subs = {"a": spec([tool_call("block"), text("SECRET-RESULT")], tools=[block])}
+    script = [_snap(calls, start("a", 1)),
+              _snap(calls, tool_call("tick", call_id="t1")),
+              _snap(calls, tool_call("tick", call_id="t2")),
+              _snap(calls, tool_call("tick", call_id="t3")),
+              _snap(calls, results(1, 1)),
+              _snap(calls, text("done"))]
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            agent = await sess.create_agent(StubChatClient(script), tools=[tick],
+                                            bundles=("files",), subagents=subs)
+            await agent.run("go", session=agent.create_session())
+
+    asyncio.run(main())
+    notice = _notice(1, "a", "completed")
+    before_read, after_read = calls[:5], calls[5:]
+    # The notice reaches a model call while the parent is still doing its own work...
+    assert any(notice in t for c in calls[1:5] for t in c)
+    # ...exactly once, and the result itself stays out of every call until it is read.
+    assert all(sum(t == notice for t in c) <= 1 for c in calls)
+    assert not any("SECRET-RESULT" in t for c in before_read for t in c)
+    assert any("SECRET-RESULT" in t for c in after_read for t in c)
+
+
+def _run_until_done(tmp_path, subs, cfg=None):
+    async def body(d, top, agent, client):
+        d.start_task(top, "a", "go", "a")
+        try:
+            await d._records[0].future
+        except BaseException:
+            pass
+        await asyncio.sleep(0)     # let the done callback run
+        return list(top.inbox)
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r", **(cfg or {}))) as sess:
+            await sess.create_agent(StubChatClient([text("x")]), bundles=("files",),
+                                    subagents=subs)
+            top = sess.delegation.top("data-integrator")
+            return await body(sess.delegation, top, None, None)
+
+    return asyncio.run(main())
+
+
+def test_notice_for_failed_and_timed_out_tasks(tmp_path):
+    def boom(messages):
+        raise RuntimeError("model down")
+
+    async def slow() -> str:
+        """Slow."""
+        await asyncio.sleep(5)
+        return "late"
+
+    failed = _run_until_done(tmp_path / "f", {"a": spec([boom])})
+    timed_out = _run_until_done(tmp_path / "t", {"a": spec([tool_call("slow"), text("never")],
+                                                           tools=[slow])},
+                                cfg={"subagent_task_timeout_s": 0.05})
+    assert failed == [_notice(1, "a", "failed")]
+    assert timed_out == [_notice(1, "a", "failed")]
+
+
+def test_inbox_delivered_when_idle_node_starts(tmp_path):
+    calls: list = []
+    sub_calls: list = []
+    subs = {"a": spec([_snap(sub_calls, text("report-a"))])}
+
+    async def body(d, top, agent, client):
+        d.start_task(top, "a", "go", "a")
+        await d._records[0].future
+        await asyncio.sleep(0)
+        queued = list(top.inbox)
+        await agent.run("next", session=agent.create_session())
+        # A sub-agent's inbox is delivered when its next task starts.
+        d.node("a").inbox.append("hello from the host")
+        d.continue_task(top, 1, "more")
+        await d._records[0].future
+        return queued, list(top.inbox)
+
+    queued, left = _with_delegation(tmp_path, subs, body,
+                                    script=[_snap(calls, results(1, 1)), text("done")])
+    notice = _notice(1, "a", "completed")
+    assert queued == [notice]
+    assert any(notice in t for t in calls[0])
+    assert left == [notice]          # the first was delivered; this is the continued run's
+    assert any("hello from the host" in t for t in sub_calls[-1])
+
+
+# --- unread finished tasks keep the parent loop going -------------------------------------------
+
+def test_task_finishing_during_final_pass_gets_one_more_pass(tmp_path):
+    got: dict = {}
+    gate: dict = {}
+    client_box: dict = {}
+
+    async def block() -> str:
+        """Wait until the parent releases it."""
+        await gate.setdefault("event", asyncio.Event()).wait()
+        return "unblocked"
+
+    async def release() -> str:
+        """Release the sub-agent and let it finish."""
+        gate.setdefault("event", asyncio.Event()).set()
+        await gate["delegation"]._records[0].future
+        await asyncio.sleep(0)
+        return "released"
+
+    subs = {"a": spec([tool_call("block"), text("report-a")], tools=[block])}
+    script = [start("a", 1), tool_call("release", call_id="g1"),
+              text("final-without-reading"),          # the last pass ends unread
+              results(1, 1), record(got)]
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            client = StubChatClient(script)
+            client_box["client"] = client
+            agent = await sess.create_agent(client, tools=[release], bundles=("files",),
+                                            subagents=subs)
+            gate["delegation"] = sess.delegation
+            await agent.run("go", session=agent.create_session())
+            return sess.delegation._records[0].unread
+
+    unread = asyncio.run(main())
+    assert got["r1"] == "report-a"
+    assert unread is False
+    # One more pass read it, then the loop ended (no repeats of the last step).
+    assert client_box["client"]._turn == len(script)
+    nudge = [t for t in _texts(got["messages"]) if "not read" in t]
+    assert nudge and "#1 (a)" in nudge[0] and "background_agents_get_task_results" in nudge[0]
+
+
+def test_reading_results_clears_unread(tmp_path):
+    async def body(d, top, agent, client):
+        d.start_task(top, "a", "go", "a")
+        await d._records[0].future
+        await asyncio.sleep(0)
+        before = (tasks_running(top)(), tasks_running_message(top)())
+        d.results(top, 1)
+        after = (tasks_running(top)(), tasks_running_message(top)())
+        d.continue_task(top, 1, "more")
+        await d._records[0].future
+        await asyncio.sleep(0)
+        unread_again = d._records[0].unread
+        d.clear(top, 1)
+        return before, after, unread_again, tasks_running(top)()
+
+    before, after, unread_again, after_clear = _with_delegation(
+        tmp_path, {"a": spec([text("first"), text("second")])}, body)
+    assert before[0] is True and "#1 (a)" in before[1]
+    assert after == (False, None)
+    assert unread_again is True
+    assert after_clear is False
