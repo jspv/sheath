@@ -11,9 +11,10 @@ import os
 import re
 import stat
 import tempfile
+import hashlib
 from pathlib import Path
 
-from .. import workspace
+from .. import status, workspace
 from ..paths import safe_path
 from ..session import Session
 
@@ -45,6 +46,42 @@ def _open_checked(target, flags: int, shown: str) -> int:
     return fd
 
 
+def _sha(data: bytes) -> bytes:
+    return hashlib.sha256(data).digest()
+
+
+def _check_overwrite(session: Session, rel: str, agent: str | None) -> None:
+    """Refuse to overwrite a file another agent wrote last unless ``agent`` has read (or
+    written) its current content. Call inside ``session.file_io()``. Only files written
+    through ``write_file`` / ``edit_file`` are tracked; ``run_python`` output is not."""
+    last = session._file_writers.get(rel)
+    if last is None or last[0] == agent:
+        return
+    writer, written = last
+    if session._file_seen.get((agent, rel)) == written:
+        return
+    who = f"agent {writer!r}" if writer is not None else "the top agent"
+    raise ValueError(f"{rel!r} was last written by {who} and you have not read its current "
+                     "content; read_file it first, or write to your own file elsewhere "
+                     "(e.g. under your agents/ folder)")
+
+
+def _record(session: Session, rel: str, agent: str | None, digest: bytes,
+            *, wrote: bool) -> None:
+    if wrote:
+        session._file_writers[rel] = (agent, digest)
+    session._file_seen[(agent, rel)] = digest
+
+
+def _hash_fd(fd: int) -> bytes:
+    h = hashlib.sha256()
+    os.lseek(fd, 0, os.SEEK_SET)
+    while chunk := os.read(fd, 1 << 20):
+        h.update(chunk)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return h.digest()
+
+
 def read_file(session: Session, path: str, start_line: int = 1, limit: int = _DEFAULT_LIMIT,
               max_chars: int = _MAX_READ_CHARS, line_numbers: bool = False) -> str:
     """Read up to ``limit`` lines starting at 1-based line ``start_line`` from a file under
@@ -67,7 +104,7 @@ def read_file(session: Session, path: str, start_line: int = 1, limit: int = _DE
             if b"\0" in os.read(fd, _BINARY_PROBE_BYTES):
                 raise ValueError(f"{path!r} is a binary file; open it inside run_python "
                                  "instead of reading it as text")
-            os.lseek(fd, 0, os.SEEK_SET)
+            digest = _hash_fd(fd)   # the whole file, whatever range is returned
             f = open(fd, encoding="utf-8", errors="replace", newline="")  # noqa: SIM115
         except BaseException:
             os.close(fd)
@@ -89,6 +126,8 @@ def read_file(session: Session, path: str, start_line: int = 1, limit: int = _DE
                 if size > max_chars:
                     truncated = True
                     break
+        _record(session, target.relative_to(session.root).as_posix(),
+                status.current_agent(), digest, wrote=False)
     text = "".join(pieces)
     if truncated:
         text = (text[:max_chars]
@@ -100,7 +139,9 @@ def read_file(session: Session, path: str, start_line: int = 1, limit: int = _DE
 def write_file(session: Session, path: str, content: str) -> str:
     """Write ``content`` to a file under the root, creating parent dirs. Returns a confirmation.
 
-    Paths that resolve into a sheath-managed directory (handles/, inputs/, .scripts/,
+    The file is replaced atomically (temp file + rename). A file another agent wrote last is
+    refused until you have read its current content (files written by ``run_python`` are not
+    tracked). Paths that resolve into a sheath-managed directory (handles/, inputs/, .scripts/,
     .sheath/) are refused: those hold state the harness vouches for.
     """
     with session.file_io():
@@ -110,15 +151,20 @@ def write_file(session: Session, path: str, content: str) -> str:
                              "(e.g. under outputs/) and use save() in run_python for handles")
         data = content.encode("utf-8")   # before truncating: a bad string must not empty it
         target.parent.mkdir(parents=True, exist_ok=True)
-        fd = _open_checked(target, os.O_WRONLY | os.O_CREAT, path)
-        try:
-            os.ftruncate(fd, 0)
-            view = memoryview(data)
-            while view:
-                view = view[os.write(fd, view):]
-        finally:
-            os.close(fd)
         rel = target.relative_to(session.root).as_posix()
+        agent = status.current_agent()
+        try:                               # refuse links / non-regular targets as before
+            fd = _open_checked(target, os.O_RDONLY, path)
+        except FileNotFoundError:
+            mode = 0o644
+        else:
+            try:
+                mode = os.fstat(fd).st_mode
+            finally:
+                os.close(fd)
+        _check_overwrite(session, rel, agent)
+        _replace_atomically(target, data, mode)
+        _record(session, rel, agent, _sha(data), wrote=True)
     return f"wrote {len(data)} bytes to {rel}"
 
 
@@ -212,6 +258,9 @@ def edit_file(session: Session, path: str, old: str, new: str,
         if workspace.is_protected(session.root, target):
             raise ValueError(f"{path!r} is in a directory managed by sheath; edit files "
                              "elsewhere (e.g. under outputs/)")
+        rel = target.relative_to(session.root).as_posix()
+        agent = status.current_agent()
+        _check_overwrite(session, rel, agent)
         fd = _open_checked(target, os.O_RDONLY, path)
         try:
             st = os.fstat(fd)
@@ -243,8 +292,9 @@ def edit_file(session: Session, path: str, old: str, new: str,
                              "surrounding text to make it unique, or set replace_all=True")
         first = text.index(old)
         updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
-        _replace_atomically(target, updated.encode("utf-8"), st.st_mode)
-        rel = target.relative_to(session.root).as_posix()
+        out = updated.encode("utf-8")
+        _replace_atomically(target, out, st.st_mode)
+        _record(session, rel, agent, _sha(out), wrote=True)
     return (f"replaced {count if replace_all else 1} occurrence(s) in {rel}\n"
             + _edit_preview(updated, first, len(new)))
 

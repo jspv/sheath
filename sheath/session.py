@@ -110,6 +110,10 @@ class Session:
     subagent_names: tuple[str, ...] = field(default=(), init=False)
     # Sub-agent runs registered by ConfinedSubagent, queued or running.
     _subagent_tasks: set[asyncio.Task] = field(default_factory=set, init=False, repr=False)
+    # Shared-workspace tracking (sheath.tools.files), guarded by io_lock: root-relative path ->
+    # (last writer, sha256); and (agent, path) -> sha256 that agent last read or wrote.
+    _file_writers: dict = field(default_factory=dict, init=False, repr=False)
+    _file_seen: dict = field(default_factory=dict, init=False, repr=False)
     # The agent tree and its tasks (sheath.delegation), created on first use.
     _delegation: Any = field(default=None, init=False, repr=False)
     # The subagent_max_concurrent semaphore, created lazily inside the running loop.
@@ -587,7 +591,7 @@ class Session:
         ``top``. A spec with ``can_spawn`` gets ``spawn_subagent`` when there is a policy whose
         ``max_depth`` leaves a level beneath it."""
         from .api import expand_tools  # local: api imports session
-        from .bundles import SUBAGENT_INSTRUCTIONS
+        from .bundles import subagent_instructions
         from .delegation import AgentNode, Limits
         from .subagents import ConfinedSubagent, _ToolActivity, validate_subagents
 
@@ -613,7 +617,7 @@ class Session:
             agent = await self.create_agent(
                 sub_client, agent_instructions=spec.instructions,
                 tools=expand_tools(spec.tools), bundles=sub_bundles,
-                name=sub_name, _mcp_agent=sub_name, _harness_extra=SUBAGENT_INSTRUCTIONS,
+                name=sub_name, _mcp_agent=sub_name, _harness_extra=subagent_instructions(sub_name),
                 _node=node if can_spawn else None, middleware=[_ToolActivity()])
             # The spec's budget, on the sub-agent's own client only.
             _apply_tool_loop_limits(sub_client, dataclasses.replace(

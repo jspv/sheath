@@ -750,7 +750,7 @@ class Delegation:
                              task: str, model: str, tools: list[str], bundles: tuple[str, ...],
                              description: str, limits: Limits, mine: list[Any],
                              built: list[AgentNode], origin: Any) -> str:
-        from .bundles import SUBAGENT_INSTRUCTIONS
+        from .bundles import subagent_instructions
         from .paths import safe_path
         from .subagents import ConfinedSubagent, _ToolActivity, client_reuse
 
@@ -777,7 +777,7 @@ class Delegation:
         try:
             agent = await sess.create_agent(
                 client, agent_instructions=instructions, bundles=bundles, name=name,
-                _prebuilt_tools=list(handed.values()), _harness_extra=SUBAGENT_INSTRUCTIONS,
+                _prebuilt_tools=list(handed.values()), _harness_extra=subagent_instructions(path),
                 _node=node if can_spawn else None, middleware=[_ToolActivity()])
             # Its own effective budget, on its own client only.
             _inherit_round_trips(client, limits.max_round_trips)
