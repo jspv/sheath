@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 from .config import SheathConfig
 from .publish import OnPublish
 from .status import StatusEvent
-from .subagents import SubagentSpec
+from .subagents import SpawnPolicy, SubagentSpec
 
 if TYPE_CHECKING:
     from .conversation import Conversation
@@ -77,6 +77,7 @@ class Sheath:
                  on_publish: OnPublish | None = None,
                  agent_kwargs: dict[str, Any] | None = None,
                  subagents: Mapping[str, SubagentSpec] | None = None,
+                 spawn: SpawnPolicy | None = None,
                  client_factory: Callable[[str], Any] | None = None) -> None:
         cfg = config or SheathConfig()
         if cfg.search.api_key is None:
@@ -91,6 +92,7 @@ class Sheath:
         self._on_publish = on_publish
         self._agent_kwargs = dict(agent_kwargs or {})
         self._subagents = None if subagents is None else dict(subagents)
+        self._spawn = spawn
         self._client_factory = client_factory
         self._client = client
         self._tools = tools or []
@@ -137,6 +139,7 @@ class Sheath:
                     on_publish: OnPublish | None = None,
                     agent_kwargs: dict[str, Any] | None = None,
                     subagents: Mapping[str, SubagentSpec] | None = None,
+                    spawn: SpawnPolicy | None = None,
                     keep: bool | None = None) -> Conversation:
         """Open (or resume) a persistent continuous Conversation by id.
 
@@ -145,7 +148,7 @@ class Sheath:
         one loop, the v1 contract for both AG-UI and the async terminal loop.
 
         ``agent_instructions``, ``on_publish``, ``agent_kwargs`` and ``subagents`` (``{}`` means
-        none) override the Sheath-level
+        none) and ``spawn`` override the Sheath-level
         defaults for this conversation. ``keep`` overrides
         ``SheathConfig.keep_conversation_workspaces``: when true, closing the conversation (or its
         idle expiry) releases it but leaves its workspace directory on disk.
@@ -153,7 +156,7 @@ class Sheath:
         return await self._sessions().aopen(session_id, tools=tools,
                                             agent_instructions=agent_instructions,
                                             on_publish=on_publish, agent_kwargs=agent_kwargs,
-                                            subagents=subagents, keep=keep)
+                                            subagents=subagents, spawn=spawn, keep=keep)
 
     async def aclose_sessions(self) -> None:
         """Close every live continuous Conversation (host shutdown)."""
@@ -169,7 +172,8 @@ class Sheath:
                      on_status: _StatusSink | None = None, keep: bool = False,
                      agent_instructions: str | None = None,
                      agent_kwargs: dict[str, Any] | None = None,
-                     subagents: Mapping[str, SubagentSpec] | None = None) -> Result:
+                     subagents: Mapping[str, SubagentSpec] | None = None,
+                     spawn: SpawnPolicy | None = None) -> Result:
         """Run one ephemeral one-shot: open a Conversation, ask, reap the workspace (unless ``keep``).
 
         The one-shot uses ``config.root_dir`` verbatim. With ``root_dir=None`` each call gets its own
@@ -190,6 +194,7 @@ class Sheath:
             on_publish=self._on_publish,
             agent_kwargs=self._merged_agent_kwargs(agent_kwargs),
             subagents=subagents if subagents is not None else self._subagents,
+            spawn=spawn if spawn is not None else self._spawn,
             client_factory=self._subagent_client_factory())
         if sink is not None:
             conv.session.subscribe(sink)
@@ -221,18 +226,21 @@ class Sheath:
               on_status: _StatusSink | None = None, keep: bool = False,
               agent_instructions: str | None = None,
               agent_kwargs: dict[str, Any] | None = None,
-              subagents: Mapping[str, SubagentSpec] | None = None) -> Result:
+              subagents: Mapping[str, SubagentSpec] | None = None,
+              spawn: SpawnPolicy | None = None) -> Result:
         return asyncio.run(self.asolve(problem, tools=tools, on_status=on_status, keep=keep,
                                        agent_instructions=agent_instructions,
-                                       agent_kwargs=agent_kwargs, subagents=subagents))
+                                       agent_kwargs=agent_kwargs, subagents=subagents,
+                                       spawn=spawn))
 
 
 def solve(problem: str, *, tools: list | None = None,
           config: SheathConfig | None = None, client: Any | None = None,
           on_status: _StatusSink | None = None, keep: bool = False,
           agent_instructions: str | None = None,
-          subagents: Mapping[str, SubagentSpec] | None = None) -> Result:
+          subagents: Mapping[str, SubagentSpec] | None = None,
+          spawn: SpawnPolicy | None = None) -> Result:
     """One-shot convenience: build a Sheath and solve a single problem (ephemeral unless keep)."""
     return Sheath(config, client=client, tools=tools, on_status=on_status,
                   agent_instructions=agent_instructions,
-                  subagents=subagents).solve(problem, keep=keep)
+                  subagents=subagents, spawn=spawn).solve(problem, keep=keep)

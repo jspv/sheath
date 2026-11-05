@@ -55,17 +55,20 @@ class Conversation:
                       on_publish: OnPublish | None = None,
                       agent_kwargs: dict[str, Any] | None = None,
                       subagents: Any | None = None,
+                      spawn: Any | None = None,
                       client_factory: Any | None = None) -> "Conversation":
         """Open the workspace, build the agent once, start a MAF conversation thread.
 
         ``agent_instructions`` (the host's domain system prompt) is appended after sheath's
         operating manual by MAF: ``<core + bundle instructions>\\n\\n<agent_instructions>``.
-        ``agent_kwargs`` are forwarded to ``Session.create_agent``; ``subagents`` and
+        ``agent_kwargs`` are forwarded to ``Session.create_agent``; ``subagents``, ``spawn`` and
         ``client_factory`` likewise, and win over the same keys in ``agent_kwargs`` when given.
         """
         extra = dict(agent_kwargs or {})
         if subagents is not None:
             extra["subagents"] = subagents
+        if spawn is not None:
+            extra["spawn"] = spawn
         if client_factory is not None:
             extra["client_factory"] = client_factory
         session = Session.create(config, on_publish=on_publish, bundles=bundles)
