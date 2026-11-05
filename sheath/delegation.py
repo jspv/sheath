@@ -57,18 +57,26 @@ class RunState:
     """One ``ConfinedSubagent`` run of ``node``: the slot it holds and the clock bounding it.
 
     Set as the current run (``CURRENT_RUN``) for the run's whole context, so its tool calls see
-    it; ``AgentNode.waiting`` hands the slot back and pauses the clock while the run waits."""
+    it; ``AgentNode.waiting`` hands the slot back and pauses the clock while the run waits.
+
+    A waiting interval runs from the first wait entering until the slot is taken back, so a
+    pending re-acquire is still part of it: a wait entering meanwhile neither restarts the
+    interval nor releases, and every wait leaving shares the one re-acquire."""
 
     node: AgentNode
     slots: asyncio.Semaphore | None = None
     held: bool = False                       # True while this run holds one of ``slots``
     bound: asyncio.Timeout | None = None     # the run's subagent_task_timeout_s bound
-    _waiters: int = field(default=0, repr=False)          # waits in progress in this run
-    _wait_began: float = field(default=0.0, repr=False)    # loop time the first one began
-    _wait_deadline: float | None = field(default=None, repr=False)  # the paused deadline
+    _waiters: int = field(default=0, repr=False)           # waits in progress in this run
+    _paused: bool = field(default=False, repr=False)       # in a waiting interval
+    _began: float = field(default=0.0, repr=False)         # loop time the interval began
+    _deadline: float | None = field(default=None, repr=False)   # the paused deadline
+    _reacquire: asyncio.Task | None = field(default=None, repr=False)  # pending re-acquire
+    _closed: bool = field(default=False, repr=False)
 
     async def acquire(self) -> None:
-        assert self.slots is not None and not self.held
+        if self.held or self.slots is None:
+            raise RuntimeError("run already holds a slot, or has no slots")
         await self.slots.acquire()
         self.held = True
 
@@ -76,6 +84,51 @@ class RunState:
         if self.held:
             self.held = False
             self.slots.release()   # type: ignore[union-attr]
+
+    def close(self) -> None:
+        """The run ended: give back its slot and drop a pending re-acquire, so nothing is held
+        afterwards and a straggling wait takes nothing back."""
+        self._closed = True
+        if self._reacquire is not None:
+            self._reacquire.cancel()   # Semaphore.acquire is cancellation-safe
+        self.release()
+        self.slots = self.bound = None
+
+    def _begin(self, now: float) -> None:
+        """Start a waiting interval: pause the clock and give the slot back."""
+        self._paused, self._began = True, now
+        bound = self.bound
+        if bound is not None and bound.when() is not None and not bound.expired():
+            self._deadline = bound.when()
+            bound.reschedule(None)        # paused: waiting is not working time
+        self.release()
+
+    def _end(self, now: float) -> None:
+        """End the interval: move the paused deadline later by its whole length. Never in the
+        past (the deadline was ahead of ``_began``), so it cannot fire as a false timeout."""
+        self._paused = False
+        deadline, self._deadline = self._deadline, None
+        if deadline is not None and self.bound is not None:
+            try:
+                self.bound.reschedule(deadline + (now - self._began))
+            except RuntimeError:
+                pass   # the bound already exited (the run is over): nothing left to bound
+
+    async def _take_back(self, slots: asyncio.Semaphore) -> None:
+        """The interval's one re-acquire, shared by every wait leaving it."""
+        loop = asyncio.get_running_loop()
+        try:
+            await slots.acquire()
+            if self._closed:
+                slots.release()           # the run ended while this queued
+                return
+            if self._waiters:
+                slots.release()           # a wait entered meanwhile: the interval goes on
+                return
+            self.held = True
+            self._end(loop.time())
+        finally:
+            self._reacquire = None
 
 
 CURRENT_RUN: ContextVar[RunState | None] = ContextVar("sheath_current_run", default=None)
@@ -116,25 +169,22 @@ class AgentNode:
 
         In a ``ConfinedSubagent`` run of this node, entering gives back the run's concurrency
         slot and pauses its ``subagent_task_timeout_s`` clock; leaving takes a slot again
-        (queueing if none is free) and moves the deadline later by the time spent waiting. For
-        the top agent, or outside a run of this node, it does nothing. Nested or parallel waits
-        in one run release once and re-acquire when the last one leaves.
+        (queueing if none is free) and moves the deadline later by the whole time spent
+        waiting, queueing included. For the top agent, or outside a run of this node, it does
+        nothing. Nested or parallel waits in one run share one interval: the first in releases,
+        and the last out takes the slot back once, for all of them.
 
-        On cancellation the slot is not taken back (the run is ending; its own teardown
-        releases only a slot it holds), so a cancelled wait never leaks or over-releases one."""
+        On cancellation the slot is not taken back (the run is ending; its teardown releases
+        only a slot it holds and drops a pending re-acquire), so nothing leaks or is released
+        twice."""
         run = CURRENT_RUN.get()
-        if run is None or run.node is not self:
+        if run is None or run.node is not self or run._closed:
             yield
             return
         loop = asyncio.get_running_loop()
         run._waiters += 1
-        if run._waiters == 1:
-            run._wait_began = loop.time()
-            bound = run.bound
-            if bound is not None and bound.when() is not None and not bound.expired():
-                run._wait_deadline = bound.when()
-                bound.reschedule(None)        # paused: waiting is not working time
-            run.release()
+        if not run._paused:
+            run._begin(loop.time())
         cancelled = False
         try:
             yield
@@ -143,16 +193,18 @@ class AgentNode:
             raise
         finally:
             run._waiters -= 1
-            if run._waiters == 0:
-                try:
-                    if not cancelled and run.slots is not None and not run.held:
-                        await run.acquire()
-                finally:
-                    deadline, run._wait_deadline = run._wait_deadline, None
-                    if deadline is not None and run.bound is not None:
-                        # Restored even on cancellation, so a run that survives it stays
-                        # bounded; never in the past, so it cannot fire as a false timeout.
-                        run.bound.reschedule(deadline + (loop.time() - run._wait_began))
+            if run._waiters == 0 and run._paused and not run._closed:
+                if cancelled:
+                    if run._reacquire is None:
+                        run._end(loop.time())   # no slot back; the clock runs again
+                elif run.slots is None:
+                    run._end(loop.time())       # no slots to take back (not a slotted run)
+                else:
+                    if run._reacquire is None:
+                        run._reacquire = asyncio.create_task(run._take_back(run.slots))
+                    # Shielded: one wait cancelled while queued leaves the re-acquire to the
+                    # others (or to the run's teardown, which drops it).
+                    await asyncio.shield(run._reacquire)
 
 
 class TaskRecord:

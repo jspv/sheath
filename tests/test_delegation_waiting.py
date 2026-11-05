@@ -280,3 +280,113 @@ def test_cancelled_wait_does_not_queue_for_slot(tmp_path):
             return ended_while_b_held, run.cancelled(), sess._subagent_slots._value
 
     assert asyncio.run(main()) == (True, True, 1)
+
+
+# --- parallel waits in one run (MAF may run a run's tool calls concurrently) --------------------
+
+def _bare_run(slots):
+    """A run of a fresh node holding one of ``slots``, set as the current run."""
+    from sheath.delegation import CURRENT_RUN, RunState
+
+    node = AgentNode(name="a", path="a", depth=1)
+    run = RunState(node=node, slots=slots)
+    CURRENT_RUN.set(run)
+    return node, run
+
+
+async def _wait_on(node, ev):
+    async with node.waiting():
+        await ev.wait()
+
+
+def test_parallel_wait_entering_during_reacquire_shares_it():
+    """Wait 1 leaves and queues to take the slot back; wait 2 enters and leaves meanwhile. They
+    share one re-acquire: after teardown the semaphore is back to N, not one short."""
+
+    async def main():
+        sem = asyncio.Semaphore(2)
+        node, run = _bare_run(sem)
+        await run.acquire()
+        e1, e2 = asyncio.Event(), asyncio.Event()
+        t1 = asyncio.create_task(_wait_on(node, e1))
+        await asyncio.sleep(0)
+        await sem.acquire()
+        await sem.acquire()                      # two other runs fill both slots
+        e1.set()
+        await asyncio.sleep(0.01)                # t1 queued to re-acquire
+        t2 = asyncio.create_task(_wait_on(node, e2))
+        await asyncio.sleep(0)
+        e2.set()
+        await asyncio.sleep(0.01)                # t2 left too
+        sem.release()
+        sem.release()                            # the other runs end
+        await asyncio.wait_for(asyncio.gather(t1, t2), GUARD_S)
+        assert run.held
+        run.release()                            # the run ends
+        await asyncio.sleep(0.01)
+        return sem._value
+
+    assert asyncio.run(main()) == 2
+
+
+def test_parallel_wait_during_reacquire_keeps_clock_paused():
+    """A wait entering while another queues to re-acquire does not restart the paused interval:
+    a 0.2 s bound is not hit after 1.0 s paused plus a parallel wait."""
+
+    async def main():
+        sem = asyncio.Semaphore(1)
+        node, run = _bare_run(sem)
+        await run.acquire()
+        async with asyncio.timeout(0.2) as bound:
+            run.bound = bound
+            e1, e2 = asyncio.Event(), asyncio.Event()
+            t1 = asyncio.create_task(_wait_on(node, e1))
+            await asyncio.sleep(0)
+            await sem.acquire()                  # another run takes the slot
+            await asyncio.sleep(1.0)             # paused far past the bound
+            e1.set()
+            await asyncio.sleep(0.01)            # t1 queued to re-acquire
+            t2 = asyncio.create_task(_wait_on(node, e2))
+            await asyncio.sleep(0.01)            # t2 waiting
+            sem.release()                        # the other run ends
+            await asyncio.sleep(0.01)
+            assert not run.held                  # t2 still waits: slot handed back
+            e2.set()
+            await asyncio.wait_for(asyncio.gather(t1, t2), GUARD_S)
+            assert run.held
+            remaining = bound.when() - asyncio.get_running_loop().time()
+        run.release()
+        return remaining, sem._value
+
+    remaining, free = asyncio.run(main())
+    assert 0.1 < remaining <= 0.2
+    assert free == 1
+
+
+def test_run_acquire_twice_is_refused():
+    async def main():
+        _, run = _bare_run(asyncio.Semaphore(2))
+        await run.acquire()
+        with pytest.raises(RuntimeError):
+            await run.acquire()
+
+    asyncio.run(main())
+
+
+def test_wait_outliving_its_bound_does_not_raise():
+    """A wait still open when the run's bound exits leaves it without touching the finished
+    Timeout (rescheduling one raises)."""
+
+    async def main():
+        node, run = _bare_run(asyncio.Semaphore(1))
+        await run.acquire()
+        ev = asyncio.Event()
+        async with asyncio.timeout(5) as bound:
+            run.bound = bound
+            t = asyncio.create_task(_wait_on(node, ev))
+            await asyncio.sleep(0.01)
+        ev.set()
+        await asyncio.wait_for(t, GUARD_S)
+        run.close()
+
+    asyncio.run(main())

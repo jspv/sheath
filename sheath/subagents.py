@@ -232,8 +232,7 @@ class ConfinedSubagent:
             with bind_agent(self.name):
                 return await self._run_tagged(messages, session, kwargs, _maybe_spill, run)
         finally:
-            run.release()          # only if held: a wait cancelled mid-queue holds none
-            run.slots = run.bound = None   # ended: a straggling wait takes nothing back
+            run.close()            # releases only a slot it holds; drops a pending re-acquire
             CURRENT_RUN.reset(token)
             detach(self._node, session)
             if task is not None:
