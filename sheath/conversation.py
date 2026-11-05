@@ -225,8 +225,9 @@ class Conversation:
                 if self.reap_on_close:
                     # In a worker thread, under io_lock: a sync file tool still in flight
                     # finishes before the directory goes.
-                    await asyncio.to_thread(_remove_root_locked, self.session.root,
-                                            self.session.io_lock)
+                    await asyncio.to_thread(
+                        _remove_root_locked, self.session.root, self.session.io_lock,
+                        getattr(self.session.sandbox, "check_quarantine", None))
             except OSError:
                 _log.warning("conversation %s: could not remove %s", self.id,
                              self.session.root, exc_info=True)

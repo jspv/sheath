@@ -47,16 +47,23 @@ _SUBAGENT_CANCEL_ROUNDS = 3
 _log = logging.getLogger(__name__)
 
 
-def _remove_root_locked(root: Path, lock: Any) -> None:
+def _remove_root_locked(root: Path, lock: Any,
+                        check_quarantine: Callable[[], None] | None = None) -> None:
     """Remove ``root`` while holding ``lock`` (the session's ``io_lock``).
 
     Sync on purpose, and run with ``asyncio.to_thread``: a sync file tool still in flight on a
     worker thread (its task already cancelled) holds the lock, and the directory must not go
     until it has finished. Taking the lock on the event loop would stall the loop instead.
 
-    Best effort: an entry that cannot be removed (sandboxed code can ``chmod 000`` a directory
-    in the root) does not stop the walk; everything else still goes, and a root left behind is
-    logged as a warning rather than raised.
+    Best effort: sandboxed code can ``chmod 000`` a directory in the root, so every real
+    directory under it is first made listable and writable (everything in the root is owned by
+    the host user, so the reset can always succeed). That walk checks each entry with ``lstat``
+    before ``chmod``, which is safe only while nothing else writes in the root; the lock and
+    the cancelled sub-agent tasks ensure that, except under a quarantined sandbox (a
+    timed-out container that may still be running). ``check_quarantine`` (the sandbox's,
+    called with the lock held) detects that case, and the permission reset is then skipped.
+    An entry that still cannot be removed does not stop the walk; everything else goes, and
+    a root left behind is logged as a warning rather than raised.
     """
     failures: list[str] = []
 
@@ -66,6 +73,16 @@ def _remove_root_locked(root: Path, lock: Any) -> None:
     with lock:
         if not root.exists():
             return
+        quarantined = False
+        if check_quarantine is not None:
+            try:
+                check_quarantine()
+            except SandboxQuarantinedError:
+                quarantined = True
+                _log.warning("removing %s: the sandbox is quarantined (a container may still "
+                             "be writing); permissions not reset", root)
+        if not quarantined:
+            _make_tree_writable(root, best_effort=True)
         shutil.rmtree(root, onexc=_record)
     if root.exists():
         _log.warning("could not fully remove %s (%d entr%s left: %s)", root, len(failures),
@@ -216,7 +233,8 @@ class Session:
                     pass
             self._mcp_connected.clear()
             if self.config.cleanup:
-                await asyncio.to_thread(_remove_root_locked, self.root, self.io_lock)
+                await asyncio.to_thread(_remove_root_locked, self.root, self.io_lock,
+                                        getattr(self.sandbox, "check_quarantine", None))
 
     def _unavailable_bundles(self) -> tuple[str, ...]:
         """Bundles that are selected-but-inert: ``deliver`` needs a host publish callback."""
@@ -694,19 +712,33 @@ def _clear_squatter(target: Path) -> None:
         shutil.rmtree(target)      # rmtree does not follow symlinks
 
 
-def _make_tree_writable(top: Path) -> None:
+def _make_tree_writable(top: Path, *, best_effort: bool = False) -> None:
     """Make every real directory under ``top`` listable and writable so rmtree can empty it.
 
     Walks top-down without following links (``os.walk`` default), chmods each directory
     before descending into it, and touches nothing that ``lstat`` doesn't show to be a real
-    directory.
+    directory. Strict by default: the caller has already ``lstat``-ed ``top``, and any error
+    propagates. With ``best_effort``, ``top`` is ``lstat``-checked here too, and an ``OSError``
+    on any one entry is skipped (the rmtree that follows reports what is then left).
     """
-    os.chmod(top, 0o700)       # the caller's lstat proved it is a real directory
+    if best_effort:
+        try:
+            if not stat.S_ISDIR(os.lstat(top).st_mode):
+                return
+            os.chmod(top, 0o700)   # lstat just proved it is a real directory
+        except OSError:
+            pass
+    else:
+        os.chmod(top, 0o700)       # the caller's lstat proved it is a real directory
     for dirpath, dirnames, _ in os.walk(top):
         for d in dirnames:
             child = os.path.join(dirpath, d)
-            if stat.S_ISDIR(os.lstat(child).st_mode):
-                os.chmod(child, 0o700)
+            try:
+                if stat.S_ISDIR(os.lstat(child).st_mode):
+                    os.chmod(child, 0o700)
+            except OSError:
+                if not best_effort:
+                    raise
 
 
 def _sha256_file(path: Path | str) -> bytes:

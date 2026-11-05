@@ -197,9 +197,9 @@ def test_cleanup_root_uses_locked_removal(tmp_path, monkeypatch):
     calls: list = []
     real = session_mod._remove_root_locked
 
-    def spy(root, lock):
+    def spy(root, lock, check_quarantine=None):
         calls.append((root, lock, threading.current_thread() is threading.main_thread()))
-        return real(root, lock)
+        return real(root, lock, check_quarantine)
 
     monkeypatch.setattr(session_mod, "_remove_root_locked", spy)
 
@@ -295,9 +295,8 @@ def test_conversation_reap_continues_past_unremovable_entry(tmp_path, caplog):
     try:
         with caplog.at_level(logging.WARNING, logger="sheath"):
             asyncio.run(main())
-        assert not [p for p in holder["siblings"] if p.exists()]
-        assert all(d.exists() for d in holder["locked"])
-        assert any("could not" in r.getMessage() for r in caplog.records)
+        assert not (tmp_path / "r").exists()     # chmod-000 directories go too
+        assert not any("could not" in r.getMessage() for r in caplog.records)
     finally:
         _unlock(holder.get("locked"))
 
@@ -314,11 +313,90 @@ def test_session_cleanup_continues_past_unremovable_entry(tmp_path, caplog):
     try:
         with caplog.at_level(logging.WARNING, logger="sheath"):
             asyncio.run(main())   # a partial reap is logged, not raised
-        assert not [p for p in holder["siblings"] if p.exists()]
-        assert all(d.exists() for d in holder["locked"])
-        assert any("could not" in r.getMessage() for r in caplog.records)
+        assert not (tmp_path / "r").exists()     # chmod-000 directories go too
+        assert not any("could not" in r.getMessage() for r in caplog.records)
     finally:
         _unlock(holder.get("locked"))
+
+
+def _quarantined():
+    from sheath.sandbox import SandboxQuarantinedError
+    raise SandboxQuarantinedError("orphaned container")
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_reap_skips_permission_reset_when_quarantined(tmp_path, caplog):
+    from sheath.session import _remove_root_locked
+
+    root = tmp_path / "r"
+    root.mkdir()
+    locked, siblings = _lock_out(root)
+    try:
+        with caplog.at_level(logging.WARNING, logger="sheath"):
+            _remove_root_locked(root, threading.RLock(), _quarantined)   # must not raise
+        assert not [p for p in siblings if p.exists()]
+        assert all(d.exists() for d in locked)     # no permission reset under quarantine
+        assert any("quarantine" in r.getMessage() for r in caplog.records)
+    finally:
+        _unlock(locked)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
+                    reason="root ignores directory permissions")
+def test_reap_permission_reset_failure_does_not_stop_removal(tmp_path, caplog, monkeypatch):
+    import sheath.session as session_mod
+
+    root = tmp_path / "r"
+    root.mkdir()
+    locked, siblings = _lock_out(root)
+    stuck = str(locked[0])
+    real_chmod = os.chmod
+
+    def chmod(path, mode, *a, **kw):
+        if os.fspath(path) == stuck:
+            raise PermissionError(1, "denied", stuck)
+        return real_chmod(path, mode, *a, **kw)
+
+    monkeypatch.setattr(session_mod.os, "chmod", chmod)
+    try:
+        with caplog.at_level(logging.WARNING, logger="sheath"):
+            session_mod._remove_root_locked(root, threading.RLock())   # must not raise
+        assert not [p for p in siblings if p.exists()]
+        assert locked[0].exists()
+        assert not [d for d in locked[1:] if d.exists()]
+        assert any("could not" in r.getMessage() for r in caplog.records)
+    finally:
+        monkeypatch.undo()
+        _unlock(locked)
+
+
+def test_reap_does_not_follow_symlinked_directory(tmp_path):
+    from sheath.session import _remove_root_locked
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep")
+    inner = outside / "inner"
+    inner.mkdir()
+    (inner / "deep.txt").write_text("deep")
+    inner.chmod(0o555)
+    outside.chmod(0o555)
+    root = tmp_path / "r"
+    root.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+    (root / "sub").mkdir()
+    (root / "sub" / "link").symlink_to(outside, target_is_directory=True)
+    try:
+        _remove_root_locked(root, threading.RLock())
+        assert not root.exists()
+        assert (outside.stat().st_mode & 0o777) == 0o555
+        assert (inner.stat().st_mode & 0o777) == 0o555
+        assert (outside / "keep.txt").read_text() == "keep"
+        assert (inner / "deep.txt").read_text() == "deep"
+    finally:
+        outside.chmod(0o755)
+        inner.chmod(0o755)
 
 
 def test_session_close_cancels_task_not_yet_started(tmp_path):

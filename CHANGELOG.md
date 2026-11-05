@@ -23,9 +23,11 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 - AG-UI streams sub-agent status live, including during waits, and keeps the loop's re-run
   nudges out of the chat.
 - **Behavior change:** removing a workspace root (`SheathConfig.cleanup`, or reaping a
-  conversation) is best effort and runs under the workspace lock: an entry that cannot be
-  removed (sandboxed code can `chmod 000` a directory) no longer stops the walk, and a root left
-  behind is logged as a warning. `Session.aclose` used to raise on the first error.
+  conversation) runs under the workspace lock and first resets directory permissions, so a
+  directory sandboxed code made unreadable (`chmod 000`) is removed too (the reset is skipped
+  while the sandbox is quarantined, as a container may still be writing). An entry that still
+  cannot be removed no longer stops the walk, and a root left behind is logged as a warning.
+  `Session.aclose` used to raise on the first error.
 - A `client_factory` that returns the parent's client, or one client for two sub-agents, raises
   `ValueError`.
 
