@@ -149,8 +149,21 @@ def test_status_event_without_text(tmp_path):
     setup(tmp_path, script, Queue([text("a-done")]), events=events)
     assert got["m1"] == "Message sent to a."
     sent = [e for e in events if e.tool == "sheath" and e.message.startswith("message to")]
-    assert [(e.message, e.agent) for e in sent] == [("message to a", TOP)]
+    # The main agent is None on status events (StatusEvent's contract).
+    assert [(e.message, e.agent) for e in sent] == [("message to a", None)]
     assert not any("TOP-SECRET-PAYLOAD" in (e.message or "") for e in events)
+
+
+def test_status_event_sub_agent_sender_carries_path(tmp_path):
+    events: list = []
+    child = [send("lead", "hi", 1), text("child-done")]
+    lead = [spawn("child", 1), probe("child"), results(2, 1), text("lead-done")]
+    script = [spawn("lead", 1, tools=["probe", "spawn_subagent"]), probe("lead"), results(1, 1),
+              text("done")]
+    setup(tmp_path, script, Queue(lead, child), events=events)
+    sent = [(e.message, e.agent) for e in events
+            if e.tool == "sheath" and e.message.startswith("message to")]
+    assert sent == [("message to lead", "lead/child")]
 
 
 # --- permission --------------------------------------------------------------------------------
@@ -238,6 +251,60 @@ def test_cannot_grant_unmessageable_name(tmp_path):
     assert d.spawned_total == 2
 
 
+def test_deny_holds_down_the_tree(tmp_path):
+    # top lets b message x; b gives its child c the same; top denies x for b: c is refused too,
+    # and re-allowing b restores c.
+    got: dict = {}
+    c_got: dict = {}
+    c = [send("x", "one", 1), sig("c1", 1), until("denied", 1), send("x", "two", 2),
+         sig("c2", 2), until("allowed", 1), send("x", "three", 3),
+         record(c_got, lambda m: text("c-done"))]
+    b = [spawn("c", 1, tools=GATES, message_to=["x"]), wait([3], 1), results(3, 1),
+         text("b-done")]
+    script = [spawn("x", 1, tools=GATES), spawn("b", 2, tools=["spawn_subagent", *GATES],
+                                                 message_to=["x"]),
+              until("c1", 1), perms("b", 1, deny=["x"]), sig("denied", 1),
+              until("c2", 2), perms("b", 2, allow=["x"]), sig("allowed", 2),
+              probe("x", "b"), results(1, 1), results(2, 2), record(got)]
+    x = [until("allowed", 9), text("x-done")]
+    sess, _ = setup(tmp_path, script, Queue(x, b, c))
+    assert c_got["m1"] == "Message sent to x."
+    assert c_got["m2"].startswith("Error: ") and "may not message 'x'" in c_got["m2"]
+    assert c_got["m3"] == "Message sent to x."
+    assert sess.delegation.messages_sent == 2
+
+
+def test_deny_cannot_be_relayed_through_a_child(tmp_path):
+    got: dict = {}
+    c_got: dict = {}
+    c = [text("c-first"), send("x", "relay", 1), record(c_got, lambda m: text("c-second"))]
+    b = [spawn("c", 1, message_to=["x"]), wait([3], 1), results(3, 1), sig("c-made", 1),
+         until("denied", 1), start("c", 2), wait([4], 2), results(4, 2), text("b-done")]
+    script = [spawn("x", 1), spawn("b", 2, tools=["spawn_subagent", *GATES], message_to=["x"]),
+              until("c-made", 1), perms("b", 1, deny=["x"]), sig("denied", 1),
+              probe("x", "b"), results(1, 1), results(2, 2), record(got)]
+    sess, _ = setup(tmp_path, script, Queue([text("x-done")], b, c))
+    assert got["p1"].startswith("Message permissions of b updated")
+    assert c_got["m1"].startswith("Error: ") and "may not message 'x'" in c_got["m1"]
+    assert sess.delegation.messages_sent == 0
+    assert not any("relay" in t for t in sess.delegation.node("x").inbox)
+
+
+def test_creator_may_message_its_running_child(tmp_path):
+    lead_got: dict = {}
+    kid_calls: list = []
+    kid = [snap(kid_calls, sig("kid-in", 1)), snap(kid_calls, until("kid-go", 1)),
+           snap(kid_calls, text("kid-done"))]
+    lead = [spawn("kid", 1, tools=GATES), until("kid-in", 1), send("kid", "change course", 1),
+            sig("kid-go", 1), wait([2], 1), results(2, 1),
+            record(lead_got, lambda m: text("lead-done"))]
+    script = [spawn("lead", 1, tools=["spawn_subagent", *GATES]), probe("lead"), results(1, 1),
+              text("done")]
+    setup(tmp_path, script, Queue(lead, kid))
+    assert lead_got["m1"] == "Message sent to lead/kid."
+    assert sum(t == label("lead", "change course") for t in kid_calls[2]) == 1
+
+
 def test_permissions_only_on_reachable_agents(tmp_path):
     lead_got: dict = {}
     lead = [perms("sibling", 1, allow=[TOP]), record(lead_got, lambda m: text("lead-done"))]
@@ -284,13 +351,26 @@ def test_declared_role_message_to(tmp_path):
     assert SubagentSpec(description="d").message_to == ()
 
 
+def test_declared_role_message_to_needs_policy(tmp_path):
+    subs = {"a": SubagentSpec(description="a", client=Rec([text("x")]), message_to=("b",)),
+            "b": SubagentSpec(description="b", client=Rec([text("x")]))}
+
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            await sess.create_agent(Rec([text("x")]), bundles=("files",), subagents=subs)
+
+    with pytest.raises(ValueError, match="message_to.*SpawnPolicy"):
+        asyncio.run(main())
+
+
 def test_declared_role_message_to_validated(tmp_path):
     subs = {"a": SubagentSpec(description="a", client=Rec([text("x")]),
                               message_to=("not a name!",))}
 
     async def main():
         async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
-            await sess.create_agent(Rec([text("x")]), bundles=("files",), subagents=subs)
+            await sess.create_agent(Rec([text("x")]), bundles=("files",), subagents=subs,
+                                    spawn=SpawnPolicy(models=("m",)), client_factory=Queue())
 
     with pytest.raises(ValueError, match="message_to"):
         asyncio.run(main())
@@ -359,20 +439,40 @@ def test_message_wakes_waiting_parent(tmp_path):
 
 
 def test_message_wakes_waiting_subagent_slot_balanced(tmp_path):
-    # With one slot: the lead gives it up while waiting, the child messages it and finishes,
-    # the lead wakes, takes the slot back, and everything is returned at the end.
+    # The lead gives its slot up while waiting; the child messages it once it is blocked in
+    # the wait, then holds until the lead (woken, slot taken back) releases it.
     lead_got: dict = {}
-    child = [send("lead", "heads up", 1), text("child-done")]
-    lead = [spawn("child", 1), wait([2], 1), wait([2], 2), results(2, 1),
-            record(lead_got, lambda m: text("lead-done"))]
-    script = [spawn("lead", 1, tools=["spawn_subagent"]), probe("lead"), results(1, 1),
-              text("done")]
     box: dict = {}
-    sess, _, _ = run_tree(tmp_path, script, Queue(lead, child), tools=[tools_for(box)],
-                          box=box, cfg={"subagent_max_concurrent": 1})
-    assert lead_got["w1"] in (ARRIVED, "Task 2 finished with status: completed.")
+    gates: dict = {}
+    seen: dict = {}
+
+    async def until_lead_waits() -> str:
+        """Wait until the lead is blocked in the wait tool."""
+        lead = box["sess"].delegation.node("lead")
+
+        async def blocked():
+            while not lead._waits:
+                await asyncio.sleep(0.005)
+
+        await asyncio.wait_for(blocked(), 5)
+        seen["free_while_waiting"] = box["sess"]._subagent_slots._value
+        return "lead waiting"
+
+    child = [tool_call("until_lead_waits", {}, "ulw"), send("lead", "heads up", 1),
+             until("release", 1), text("child-done")]
+    lead = [spawn("child", 1, tools=["until_lead_waits", *GATES]), wait([2], 1),
+            sig("release", 1), wait([2], 2), results(2, 1),
+            record(lead_got, lambda m: text("lead-done"))]
+    script = [spawn("lead", 1, tools=["until_lead_waits", "spawn_subagent", *GATES]),
+              probe("lead"), results(1, 1), text("done")]
+    sess, _, _ = run_tree(tmp_path, script, Queue(lead, child),
+                          tools=[tools_for(box), until_lead_waits, *gate_tools(gates)],
+                          box=box, cfg={"subagent_max_concurrent": 2})
+    assert lead_got["w1"] == ARRIVED                        # woken by the message
+    assert lead_got["w2"] == "Task 2 finished with status: completed."
     assert lead_got["r1"] == "child-done"
-    assert sess._subagent_slots._value == 1
+    assert seen["free_while_waiting"] == 1                  # the lead's slot was given back
+    assert sess._subagent_slots._value == 2                 # and everything returned
     assert sess.delegation.node("lead")._waits == []
 
 

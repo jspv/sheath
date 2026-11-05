@@ -868,24 +868,36 @@ class Delegation:
     # --- messaging --------------------------------------------------------------------------
 
     def may_message(self, sender: AgentNode, recipient_name: str) -> bool:
-        """Whether ``sender`` may message the agent called ``recipient_name`` (which need not
-        exist yet): the top agent may message any agent; a sub-agent a name in its
-        ``message_to``, or its creator unless the creator denied it."""
+        """Whether ``sender`` may message the agent called ``recipient_name`` now (a granted
+        name need not exist yet).
+
+        The top agent may message any agent. A sub-agent may message: its creator, unless the
+        creator denied it (a direct check); a sub-agent it created itself; a name in its own
+        ``message_to``, but only while every ancestor below the top may message that name too
+        (checked at each send, so a deny holds down the tree and cannot be relayed through a
+        child the ancestor granted it to earlier)."""
         if sender.depth == 0:
             return True
         key = recipient_name.lower()
-        if any(m.lower() == key for m in sender.message_to):
-            return True
         creator = sender.creator
-        return creator is not None and not sender.creator_denied and creator.name.lower() == key
+        if creator is not None and not sender.creator_denied and creator.name.lower() == key:
+            return True
+        target = self._nodes.get(key)
+        if target is not None and target.creator is sender:
+            return True
+        if not any(m.lower() == key for m in sender.message_to):
+            return False
+        return creator is None or self.may_message(creator, recipient_name)
 
     def _permits(self, node: AgentNode) -> str:
         """Who ``node`` may message, for a refusal or a confirmation."""
         if node.depth == 0:
             return "any agent in this conversation"
-        names = sorted(node.message_to, key=str.lower)
+        names = sorted((m for m in node.message_to if self.may_message(node, m)), key=str.lower)
         if node.creator is not None and not node.creator_denied:
             names.append(f"{node.creator.name} (its creator)")
+        if self.reachable(node):
+            names.append("the sub-agents it created")
         return ", ".join(names) or "no one"
 
     def _check_grants(self, granter: AgentNode, names: Any, *, what: str) -> str | None:
@@ -944,7 +956,8 @@ class Delegation:
         self.messages_sent += 1
         from .status import StatusEvent   # local: keep this module's imports light
         self._session.status_bus.emit(StatusEvent(
-            tool="sheath", message=f"message to {recipient.path}", agent=sender.path))
+            tool="sheath", message=f"message to {recipient.path}",
+            agent=None if sender.depth == 0 else sender.path))   # None: the main agent
         return f"Message sent to {recipient.path}."
 
     def set_message_permissions(self, caller: AgentNode, agent: Any, allow: Any = None,

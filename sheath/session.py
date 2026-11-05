@@ -488,6 +488,14 @@ class Session:
             raise TypeError(
                 f"{', '.join(refused)}: refused, would give the model shell, file or agent access "
                 "outside the sandbox, safe_path and egress checks")
+        policy_known = spawn is not None or (
+            self._delegation is not None and self._delegation.policy is not None)
+        granted = [n for n, sp in (subagents or {}).items() if getattr(sp, "message_to", ())]
+        if granted and not policy_known:
+            raise ValueError(
+                f"sub-agent(s) {granted} set message_to, but messaging needs a SpawnPolicy: "
+                "pass spawn=SpawnPolicy(...) (and a client_factory) to create_agent, or drop "
+                "message_to")
         if spawn is not None:
             from .subagents import validate_spawn_policy
             validate_spawn_policy(spawn, client_factory)
