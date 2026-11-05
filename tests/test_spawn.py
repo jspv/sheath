@@ -403,3 +403,125 @@ def test_refuse_factory_returning_declared_client(tmp_path):
                               factory=lambda m: declared_client)
     assert "client" in reply
     assert snap == {**NOTHING, "nodes": ["lead"]}
+
+
+# --- failures after the reservation release it ---------------------------------------------------
+
+def _retry_then(got, before=None):
+    """A model step that runs ``before`` (e.g. to clear a fault), then spawns ``a`` again."""
+    def step(messages):
+        if before is not None:
+            before()
+        return spawn("a", 2)
+    return step
+
+
+def _assert_released(sess, snap, got):
+    assert got["sp1"].startswith("Error: "), got["sp1"]
+    assert got["sp2"] == "Background task 1 started on agent 'a'.", got["sp2"]
+    assert snap == {"nodes": ["a"], "records": 1, "total": 1, "folders": ["a"]}
+    assert sess.delegation._pending == set()
+
+
+def _retry_script(got, before=None):
+    first: dict = {}
+
+    def check_first(messages):
+        record(first)(messages)
+        got["sp1"] = first["sp1"]
+        return _retry_then(got, before)(messages)
+
+    return [spawn("a", 1), check_first, wait([1], 1), results(1, 1), record(got)]
+
+
+def test_factory_raising_releases_reservation(tmp_path):
+    got: dict = {}
+    calls = []
+
+    def factory(model):
+        calls.append(model)
+        if len(calls) == 1:
+            raise RuntimeError("secret detail")
+        return Rec([text("ok")])
+
+    sess, snap, _, _ = run_spawn(tmp_path, _retry_script(got), factory=factory)
+    assert "secret detail" not in got["sp1"]
+    _assert_released(sess, snap, got)
+
+
+def test_create_agent_raising_releases_reservation(tmp_path, monkeypatch):
+    got: dict = {}
+    original = Session.create_agent
+    failed = []
+
+    async def flaky(self, client, **kw):
+        if kw.get("name") == "a" and not failed:
+            failed.append(1)
+            raise RuntimeError("boom")
+        return await original(self, client, **kw)
+
+    monkeypatch.setattr(Session, "create_agent", flaky)
+    sess, snap, _, _ = run_spawn(tmp_path, _retry_script(got))
+    assert failed == [1]
+    _assert_released(sess, snap, got)
+
+
+def test_folder_failure_releases_reservation(tmp_path):
+    got: dict = {}
+    squatter = tmp_path / "r" / "agents" / "a"
+    squatter.parent.mkdir(parents=True)
+    squatter.write_text("not a folder")
+    seen = []
+
+    def clear():
+        seen.append(squatter.is_file())   # the refused spawn left the file alone
+        squatter.unlink()
+
+    sess, snap, _, _ = run_spawn(tmp_path, _retry_script(got, clear))
+    assert seen == [True]
+    _assert_released(sess, snap, got)
+
+
+def test_round_trips_fail_closed(tmp_path):
+    class NoSettings(Rec):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.function_invocation_configuration = None
+
+    reply, snap, _ = _refused(tmp_path, spawn("a", 1), factory=lambda m: NoSettings([text("x")]))
+    assert snap == NOTHING
+
+
+def test_pending_client_counts_for_identity(tmp_path, monkeypatch):
+    """Two parallel spawns whose builds interleave must not share one client."""
+    original = Session.create_agent
+
+    async def yielding(self, client, **kw):
+        if kw.get("name") in ("a", "b"):
+            await asyncio.sleep(0.01)
+        return await original(self, client, **kw)
+
+    monkeypatch.setattr(Session, "create_agent", yielding)
+    shared = Rec([text("x")])
+    got: dict = {}
+    script = [[spawn("a", 1), spawn("b", 2)], wait([1], 1), results(1, 1), record(got)]
+    sess, snap, _, _ = run_spawn(tmp_path, script, factory=lambda m: shared)
+    replies = sorted([got["sp1"], got["sp2"]])
+    assert replies[0].startswith("Background task 1") and replies[1].startswith("Error: ")
+    assert "client" in replies[1]
+    assert snap["total"] == 1 and sess.delegation._pending_clients == []
+
+
+def test_second_policy_on_session_refused(tmp_path):
+    async def main():
+        async with Session.create(SheathConfig(root_dir=tmp_path / "r")) as sess:
+            await sess.create_agent(Rec([text("x")]), name="one", spawn=POLICY,
+                                    client_factory=_factory)
+            await sess.create_agent(Rec([text("x")]), name="two", spawn=POLICY,
+                                    client_factory=_factory)   # same policy object: fine
+            with pytest.raises(ValueError, match="SpawnPolicy"):
+                await sess.create_agent(Rec([text("x")]), name="three",
+                                        spawn=SpawnPolicy(models=("m",)),
+                                        client_factory=_factory)
+
+    asyncio.run(main())

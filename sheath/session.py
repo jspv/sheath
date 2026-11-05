@@ -477,6 +477,7 @@ class Session:
         if spawn is not None:
             from .subagents import validate_spawn_policy
             validate_spawn_policy(spawn, client_factory)
+            self._set_spawn_policy(spawn, client_factory, check_only=True)   # before building
         wait_timeout = maf_kwargs.pop("background_agents_wait_timeout_seconds", None)
         providers: list = []
         top = None
@@ -488,8 +489,7 @@ class Session:
                 await self._build_subagents(client, subagents, top=top, bundles=bundles,
                                             client_factory=client_factory)
             if spawn is not None:
-                self.delegation.policy = spawn
-                self.delegation.client_factory = client_factory
+                self._set_spawn_policy(spawn, client_factory)
                 top.can_spawn = True
             providers.append(self._delegation_provider(top, wait_timeout))
             _add_parent_loop(maf_kwargs, top)
@@ -547,6 +547,20 @@ class Session:
             disable_web_search=True,
             **maf_kwargs,
         )
+
+    def _set_spawn_policy(self, spawn: "SpawnPolicy",
+                          client_factory: Callable[[str], Any] | None, *,
+                          check_only: bool = False) -> None:
+        """One policy and factory per session: its spawn budget is one per conversation.
+        With ``check_only`` it raises on a conflict and sets nothing."""
+        d = self.delegation
+        if d.policy is not None and (d.policy is not spawn
+                                     or d.client_factory is not client_factory):
+            raise ValueError("this session already has a different SpawnPolicy or "
+                             "client_factory; a session takes one, shared by every agent "
+                             "built on it")
+        if not check_only:
+            d.policy, d.client_factory = spawn, client_factory
 
     def _delegation_provider(self, top: Any, wait_timeout: Any) -> Any:
         from .delegation import DelegationProvider

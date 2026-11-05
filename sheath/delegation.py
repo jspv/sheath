@@ -334,6 +334,7 @@ class Delegation:
         self.client_factory: Callable[[str], Any] | None = None
         self.spawned_total = 0                   # spawned in this conversation, at any depth
         self._pending: set[str] = set()          # case-folded names of spawns being built
+        self._pending_clients: list[Any] = []    # clients of spawns being built
 
     # --- nodes ------------------------------------------------------------------------------
 
@@ -519,7 +520,7 @@ class Delegation:
 
     def _clients(self) -> list[Any]:
         nodes = [*self._tops.values(), *self._nodes.values()]
-        return [n.client for n in nodes if n.client is not None]
+        return [*(n.client for n in nodes if n.client is not None), *self._pending_clients]
 
     def spawn_budget(self) -> tuple[int, int]:
         """(remaining, allowed) spawns in this conversation."""
@@ -625,18 +626,23 @@ class Delegation:
             return refusal
         key = name.lower()
         self._pending.add(key)
+        mine: list[Any] = []   # the client this call's build got, while it is pending
         try:
             return await self._build_spawned(
                 owner, name=name, instructions=instructions, task=task,
                 model=model if model is not None else self.policy.effective_default,
                 tools=tools, bundles=tuple(bundles) if bundles is not None else owner.bundles,
-                description=description if isinstance(description, str) else "")
+                description=description if isinstance(description, str) else "", mine=mine)
         finally:
             self._pending.discard(key)
+            # Registered on its node or dropped: either way no longer pending.
+            self._pending_clients[:] = [c for c in self._pending_clients
+                                        if not any(c is m for m in mine)]
+
 
     async def _build_spawned(self, owner: AgentNode, *, name: str, instructions: str,
                              task: str, model: str, tools: list[str], bundles: tuple[str, ...],
-                             description: str) -> str:
+                             description: str, mine: list[Any]) -> str:
         from .bundles import SUBAGENT_INSTRUCTIONS
         from .paths import safe_path
         from .subagents import ConfinedSubagent, _ToolActivity, client_reuse
@@ -650,6 +656,9 @@ class Delegation:
         if reused is not None:
             return (f"Error: the host's client_factory returned {reused} for model {model!r}; "
                     "every sub-agent needs a client of its own, so none was created.")
+        # Pending until registered, so a concurrent spawn's identity check sees it.
+        mine.append(client)
+        self._pending_clients.append(client)
         handed = {t: owner.tool_objects[t] for t in tools}
         try:
             agent = await sess.create_agent(
@@ -726,10 +735,16 @@ def _short(value: Any, limit: int = 80) -> str:
 
 
 def _inherit_round_trips(client: Any, max_round_trips: int | None) -> None:
-    """Give a spawned sub-agent's own client its creator's round-trip budget."""
+    """Give a spawned sub-agent's own client its creator's round-trip budget. Fails closed: a
+    client the budget cannot be set on raises (``spawn`` refuses it) rather than run unbounded
+    by its creator's budget."""
+    if max_round_trips is None:
+        return
     settings = getattr(client, "function_invocation_configuration", None)
-    if max_round_trips is not None and isinstance(settings, dict):
-        settings["max_iterations"] = max_round_trips
+    if not isinstance(settings, dict):
+        raise ValueError(f"{type(client).__name__} has no function_invocation_configuration, "
+                         "so the creator's round-trip budget cannot be applied to it")
+    settings["max_iterations"] = max_round_trips
 
 
 def _task_line(r: TaskRecord) -> str:
