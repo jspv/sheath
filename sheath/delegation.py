@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from agent_framework import ContextProvider, Message, tool
@@ -50,6 +52,35 @@ class Limits:
     remaining_depth: int
 
 
+@dataclass
+class RunState:
+    """One ``ConfinedSubagent`` run of ``node``: the slot it holds and the clock bounding it.
+
+    Set as the current run (``CURRENT_RUN``) for the run's whole context, so its tool calls see
+    it; ``AgentNode.waiting`` hands the slot back and pauses the clock while the run waits."""
+
+    node: AgentNode
+    slots: asyncio.Semaphore | None = None
+    held: bool = False                       # True while this run holds one of ``slots``
+    bound: asyncio.Timeout | None = None     # the run's subagent_task_timeout_s bound
+    _waiters: int = field(default=0, repr=False)          # waits in progress in this run
+    _wait_began: float = field(default=0.0, repr=False)    # loop time the first one began
+    _wait_deadline: float | None = field(default=None, repr=False)  # the paused deadline
+
+    async def acquire(self) -> None:
+        assert self.slots is not None and not self.held
+        await self.slots.acquire()
+        self.held = True
+
+    def release(self) -> None:
+        if self.held:
+            self.held = False
+            self.slots.release()   # type: ignore[union-attr]
+
+
+CURRENT_RUN: ContextVar[RunState | None] = ContextVar("sheath_current_run", default=None)
+
+
 class AgentNode:
     """One agent in a conversation's tree: the top agent (depth 0) or a sub-agent."""
 
@@ -78,6 +109,50 @@ class AgentNode:
 
     def __repr__(self) -> str:
         return f"AgentNode(path={self.path!r}, depth={self.depth})"
+
+    @asynccontextmanager
+    async def waiting(self) -> AsyncIterator[None]:
+        """Wrap time this agent spends blocked on its own sub-agents.
+
+        In a ``ConfinedSubagent`` run of this node, entering gives back the run's concurrency
+        slot and pauses its ``subagent_task_timeout_s`` clock; leaving takes a slot again
+        (queueing if none is free) and moves the deadline later by the time spent waiting. For
+        the top agent, or outside a run of this node, it does nothing. Nested or parallel waits
+        in one run release once and re-acquire when the last one leaves.
+
+        On cancellation the slot is not taken back (the run is ending; its own teardown
+        releases only a slot it holds), so a cancelled wait never leaks or over-releases one."""
+        run = CURRENT_RUN.get()
+        if run is None or run.node is not self:
+            yield
+            return
+        loop = asyncio.get_running_loop()
+        run._waiters += 1
+        if run._waiters == 1:
+            run._wait_began = loop.time()
+            bound = run.bound
+            if bound is not None and bound.when() is not None and not bound.expired():
+                run._wait_deadline = bound.when()
+                bound.reschedule(None)        # paused: waiting is not working time
+            run.release()
+        cancelled = False
+        try:
+            yield
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            run._waiters -= 1
+            if run._waiters == 0:
+                try:
+                    if not cancelled and run.slots is not None and not run.held:
+                        await run.acquire()
+                finally:
+                    deadline, run._wait_deadline = run._wait_deadline, None
+                    if deadline is not None and run.bound is not None:
+                        # Restored even on cancellation, so a run that survives it stays
+                        # bounded; never in the past, so it cannot fire as a false timeout.
+                        run.bound.reschedule(deadline + (loop.time() - run._wait_began))
 
 
 class TaskRecord:
@@ -317,8 +392,9 @@ class Delegation:
         # Keep each future: while this waits, a parallel wait or a refresh may finalize the
         # record (future -> None), or continue_task may give it a new future.
         triples = [(tid, r, r.future) for tid, r in waitable]
-        done, _ = await asyncio.wait({f for _, _, f in triples}, timeout=timeout_s,
-                                     return_when=asyncio.FIRST_COMPLETED)
+        async with owner.waiting():   # a blocked sub-agent frees its slot and pauses its clock
+            done, _ = await asyncio.wait({f for _, _, f in triples}, timeout=timeout_s,
+                                         return_when=asyncio.FIRST_COMPLETED)
         if not done:
             return (f"No background task completed within {timeout_s} seconds. "
                     "The tasks are still running; call this tool again if you wish to "

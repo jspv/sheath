@@ -19,7 +19,7 @@ from agent_framework import (AgentMiddleware, AgentResponse, FunctionMiddleware,
 
 from sheath.bundles import selected_bundles
 from sheath.config import SheathConfig
-from sheath.delegation import attach, detach
+from sheath.delegation import CURRENT_RUN, RunState, attach, detach
 from sheath.status import StatusEvent, bind_agent, report_progress
 
 _NAME_RE = re.compile(r"[A-Za-z][A-Za-z0-9_-]{0,63}")
@@ -182,7 +182,8 @@ class ConfinedSubagent:
     Each run is registered with the session (so it can be cancelled, queued or running), waits
     for one of the session's ``subagent_max_concurrent`` slots, is tagged with the sub-agent's
     name for status, is bounded by ``subagent_task_timeout_s``, and has its report spilled to a
-    handle when it is large.
+    handle when it is large. While it waits on its own sub-agents (``AgentNode.waiting``) it
+    gives its slot back and its clock stops.
     """
 
     def __init__(self, inner: Any, *, node: Any, session: Any) -> None:
@@ -214,6 +215,9 @@ class ConfinedSubagent:
             sess._subagent_tasks.add(task)
         # Messages for this sub-agent go into this run's model calls; its inbox first.
         attach(self._node, session)
+        # This run, for AgentNode.waiting in its tool calls: the slot it holds, its clock.
+        run = RunState(node=self._node)
+        token = CURRENT_RUN.set(run)
         try:
             # Yield once right after registering, so Session.cancel_subagents (which yields
             # before it looks again) sees a run started outside the delegation's own records
@@ -222,24 +226,33 @@ class ConfinedSubagent:
             if sess._subagent_slots is None:
                 # Created here, not with the session: it must belong to the running loop.
                 sess._subagent_slots = asyncio.Semaphore(sess.config.subagent_max_concurrent)
-            async with sess._subagent_slots:
-                with bind_agent(self.name):
-                    return await self._run_tagged(messages, session, kwargs, _maybe_spill)
+            # Held by the run, not an ``async with``: waiting() hands it back and takes it again.
+            run.slots = sess._subagent_slots
+            await run.acquire()
+            with bind_agent(self.name):
+                return await self._run_tagged(messages, session, kwargs, _maybe_spill, run)
         finally:
+            run.release()          # only if held: a wait cancelled mid-queue holds none
+            run.slots = run.bound = None   # ended: a straggling wait takes nothing back
+            CURRENT_RUN.reset(token)
             detach(self._node, session)
             if task is not None:
                 sess._subagent_tasks.discard(task)
 
     async def _run_tagged(self, messages: Any, session: Any, kwargs: dict[str, Any],
-                          maybe_spill: Callable[..., Any]) -> AgentResponse:
+                          maybe_spill: Callable[..., Any], run: RunState) -> AgentResponse:
         sess = self._session
         sess.status_bus.emit(StatusEvent(tool="sheath", message="started", agent=self.name))
         try:
             timeout = sess.config.subagent_task_timeout_s
             bound = asyncio.timeout(timeout)   # None: no bound
+            run.bound = bound                  # waiting() pauses it
             try:
-                async with bound:
-                    response = await self._inner.run(messages, session=session, **kwargs)
+                try:
+                    async with bound:
+                        response = await self._inner.run(messages, session=session, **kwargs)
+                finally:
+                    run.bound = None           # exited: no longer reschedulable
             except TimeoutError:
                 if not bound.expired():
                     raise   # the agent's own TimeoutError, not our bound
