@@ -56,13 +56,15 @@ class Conversation:
                       agent_kwargs: dict[str, Any] | None = None,
                       subagents: Any | None = None,
                       spawn: Any | None = None,
-                      client_factory: Any | None = None) -> "Conversation":
+                      client_factory: Any | None = None,
+                      subagent_middleware: Any | None = None) -> "Conversation":
         """Open the workspace, build the agent once, start a MAF conversation thread.
 
         ``agent_instructions`` (the host's domain system prompt) is appended after sheath's
         operating manual by MAF: ``<core + bundle instructions>\\n\\n<agent_instructions>``.
-        ``agent_kwargs`` are forwarded to ``Session.create_agent``; ``subagents``, ``spawn`` and
-        ``client_factory`` likewise, and win over the same keys in ``agent_kwargs`` when given.
+        ``agent_kwargs`` are forwarded to ``Session.create_agent``; ``subagents``, ``spawn``,
+        ``client_factory`` and ``subagent_middleware`` likewise, and win over the same keys in
+        ``agent_kwargs`` when given.
         """
         extra = dict(agent_kwargs or {})
         if subagents is not None:
@@ -71,6 +73,8 @@ class Conversation:
             extra["spawn"] = spawn
         if client_factory is not None:
             extra["client_factory"] = client_factory
+        if subagent_middleware is not None:
+            extra["subagent_middleware"] = subagent_middleware
         session = Session.create(config, on_publish=on_publish, bundles=bundles)
         await session.__aenter__()
         try:

@@ -448,6 +448,7 @@ class Session:
         subagents: Mapping[str, "SubagentSpec"] | None = None,
         client_factory: Callable[[str], Any] | None = None,
         spawn: "SpawnPolicy | None" = None,
+        subagent_middleware: Callable[[str], Any] | None = None,
         _mcp_agent: str | None = None,
         _harness_extra: str | None = None,
         _prebuilt_tools: list | None = None,
@@ -469,6 +470,10 @@ class Session:
         of its own at runtime within the policy's bounds; each gets a client of its own from
         ``client_factory(model)``, so a policy needs a factory. ``None``: no such tool.
 
+        ``subagent_middleware`` is called with each sub-agent's path (declared and spawned, at
+        every depth) and returns that sub-agent's own middleware; the caller's ``middleware``
+        applies to this agent only. One per session.
+
         ``_prebuilt_tools`` are tool objects another agent already built (spill-wrapped, or
         connected MCP functions), handed down as they are.
 
@@ -489,6 +494,22 @@ class Session:
             raise TypeError(
                 f"{', '.join(refused)}: refused, would give the model shell, file or agent access "
                 "outside the sandbox, safe_path and egress checks")
+        if subagent_middleware is not None and not callable(subagent_middleware):
+            raise TypeError("subagent_middleware must be a callable taking a sub-agent's path "
+                            "and returning a list of middleware")
+        if (subagents or spawn is not None) and maf_kwargs.get("middleware") \
+                and subagent_middleware is None and self.delegation.subagent_middleware is None:
+            warnings.warn(
+                "middleware passed to create_agent applies to this agent only, not to its "
+                "sub-agents; pass subagent_middleware=<path -> list> to give each sub-agent its "
+                "own", UserWarning, stacklevel=2)
+        if subagent_middleware is not None and (subagents or spawn is not None):
+            d = self.delegation
+            if d.subagent_middleware is not None and d.subagent_middleware is not \
+                    subagent_middleware:
+                raise ValueError("this session already has a different subagent_middleware; "
+                                 "a session takes one, shared by every agent in it")
+            d.subagent_middleware = subagent_middleware
         policy_known = spawn is not None or (
             self._delegation is not None and self._delegation.policy is not None)
         granted = [n for n, sp in (subagents or {}).items() if getattr(sp, "message_to", ())]
@@ -614,7 +635,7 @@ class Session:
         ``max_depth`` leaves a level beneath it."""
         from .api import expand_tools  # local: api imports session
         from .bundles import subagent_instructions
-        from .delegation import AgentNode, Limits
+        from .delegation import AgentNode, Limits, middleware_for
         from .subagents import ConfinedSubagent, _ToolActivity, validate_subagents
 
         clients = validate_subagents(subagents, parent_bundles=bundles, parent_client=client,
@@ -633,6 +654,8 @@ class Session:
             if isinstance(got, str):
                 raise ValueError(f"sub-agent {sub_name!r}: {got.removeprefix('Error: ')}")
             grants[sub_name] = got
+        mws = {sub_name: middleware_for(delegation.subagent_middleware, sub_name)
+               for sub_name in subagents}
         for sub_name, spec in subagents.items():
             sub_client = clients[sub_name]
             sub_bundles = spec.bundles or bundles
@@ -653,7 +676,7 @@ class Session:
                 name=sub_name, _mcp_agent=sub_name,
                 _harness_extra=subagent_instructions(sub_name, grants[sub_name]),
                 _node=node if can_spawn else None, _message_node=node,
-                middleware=[_ToolActivity()])
+                middleware=[_ToolActivity(), *mws[sub_name]])
             # The spec's budget, on the sub-agent's own client only.
             _apply_tool_loop_limits(sub_client, dataclasses.replace(
                 self.config, tool_loop_max_iterations=spec.max_round_trips,

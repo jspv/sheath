@@ -21,6 +21,30 @@ changed, and the minimum framework versions rose. Entries marked **Breaking** or
 - `send_message` to an agent that is not running, and has no task starting, now replies
   `Message sent to <path>. <path> is not running: it will see the message when it next runs.`
 
+### Sub-agents write only to their folder and granted paths
+- **Behavior change:** a sub-agent, declared or spawned, writes only under `agents/<path>/`
+  (its own sub-agents' folders included) and the paths in its new `write_to`
+  (`spawn_subagent(write_to=[...])`, within what its creator may write; `SubagentSpec.write_to`
+  from the host). `write_file`, `edit_file` and `publish_handle` enforce it on the resolved
+  path; reads are unchanged, and so is the top agent. Sub-agents that wrote elsewhere need a
+  grant.
+- **Known issue:** `run_python` is not confined: the sandbox mounts the whole workspace
+  read-write, so code a sub-agent runs can still write anywhere in it.
+
+### `subagent_middleware`
+- **New:** `subagent_middleware=` on `Sheath(...)`, the module `solve` and
+  `Session.create_agent`: called with each sub-agent's path (declared and spawned, at every
+  depth), it returns that sub-agent's own middleware. Before, a host's middleware applied to the
+  parent only, so a spawned sub-agent could do what it forbade. `create_agent` warns when the
+  parent has middleware, there are sub-agents or a spawn policy, and no factory.
+
+### Tool refusals reach the model
+- **Fix:** sheath's own tools raised their refusals, and MAF showed the model only
+  `Error: Function failed.`, so messages such as "read_file it first" or "binary file; open it
+  in run_python" never arrived. `read_file`, `write_file`, `edit_file`, `list_files`, `search`,
+  `run_python` and `read_document` now return them as `Error: <message>`; activity status still
+  reports such a call as `failed: <type>`. Other exceptions stay opaque.
+
 ## 0.4.0 — 2026-11-05
 
 ### `agent-framework-core` is capped below 1.25

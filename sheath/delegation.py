@@ -247,6 +247,19 @@ class AgentNode:
                     await asyncio.shield(run._reacquire)
 
 
+def middleware_for(factory: Callable[[str], Any] | None, path: str) -> list[Any]:
+    """The host's middleware for the sub-agent at ``path``: ``factory(path)``, called once per
+    sub-agent so each gets instances of its own. ``TypeError`` unless it returns a list or
+    tuple."""
+    if factory is None:
+        return []
+    got = factory(path)
+    if not isinstance(got, (list, tuple)):
+        raise TypeError(f"subagent_middleware must return a list of middleware, got "
+                        f"{type(got).__name__}")
+    return list(got)
+
+
 def current_node() -> AgentNode | None:
     """The sub-agent whose run this code is in (its tool calls included), or None: the top
     agent, or no agent at all."""
@@ -450,6 +463,8 @@ class Delegation:
         # Runtime spawning (Session.create_agent(spawn=...)): the host's policy and factory.
         self.policy: Any = None                  # sheath.subagents.SpawnPolicy
         self.client_factory: Callable[[str], Any] | None = None
+        # The host's middleware for every sub-agent (``subagent_middleware``): path -> list.
+        self.subagent_middleware: Callable[[str], Any] | None = None
         self.spawned_total = 0                   # spawned in this conversation, at any depth
         self._pending: set[str] = set()          # case-folded names of spawns being built
         self._pending_clients: list[Any] = []    # clients of spawns being built
@@ -927,7 +942,7 @@ class Delegation:
                 _prebuilt_tools=list(handed.values()),
                 _harness_extra=subagent_instructions(path, sorted(node.write_to)),
                 _node=node if can_spawn else None, _message_node=node,
-                middleware=[_ToolActivity()])
+                middleware=[_ToolActivity(), *middleware_for(self.subagent_middleware, path)])
             # Its own effective budget, on its own client only.
             _inherit_round_trips(client, limits.max_round_trips)
         except Exception as e:  # noqa: BLE001 - a tool error the agent can read; no message

@@ -78,7 +78,8 @@ class Sheath:
                  agent_kwargs: dict[str, Any] | None = None,
                  subagents: Mapping[str, SubagentSpec] | None = None,
                  spawn: SpawnPolicy | None = None,
-                 client_factory: Callable[[str], Any] | None = None) -> None:
+                 client_factory: Callable[[str], Any] | None = None,
+                 subagent_middleware: Callable[[str], Any] | None = None) -> None:
         cfg = config or SheathConfig()
         if cfg.search.api_key is None:
             key = os.environ.get("TAVILY_API_KEY") or _dotenv_value("TAVILY_API_KEY")
@@ -94,6 +95,7 @@ class Sheath:
         self._subagents = None if subagents is None else dict(subagents)
         self._spawn = spawn
         self._client_factory = client_factory
+        self._subagent_middleware = subagent_middleware
         self._client = client
         self._tools = tools or []
         self._bundles = bundles
@@ -195,7 +197,8 @@ class Sheath:
             agent_kwargs=self._merged_agent_kwargs(agent_kwargs),
             subagents=subagents if subagents is not None else self._subagents,
             spawn=spawn if spawn is not None else self._spawn,
-            client_factory=self._subagent_client_factory())
+            client_factory=self._subagent_client_factory(),
+            subagent_middleware=self._subagent_middleware)
         if sink is not None:
             conv.session.subscribe(sink)
         try:
@@ -240,9 +243,10 @@ def solve(problem: str, *, tools: list | None = None,
           agent_instructions: str | None = None,
           subagents: Mapping[str, SubagentSpec] | None = None,
           spawn: SpawnPolicy | None = None,
-          client_factory: Callable[[str], Any] | None = None) -> Result:
+          client_factory: Callable[[str], Any] | None = None,
+          subagent_middleware: Callable[[str], Any] | None = None) -> Result:
     """One-shot convenience: build a Sheath and solve a single problem (ephemeral unless keep)."""
     return Sheath(config, client=client, tools=tools, on_status=on_status,
                   agent_instructions=agent_instructions,
-                  subagents=subagents, spawn=spawn,
-                  client_factory=client_factory).solve(problem, keep=keep)
+                  subagents=subagents, spawn=spawn, client_factory=client_factory,
+                  subagent_middleware=subagent_middleware).solve(problem, keep=keep)

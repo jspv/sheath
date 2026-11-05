@@ -143,6 +143,7 @@ class SessionManager:
             subagents=(subagents if subagents is not None else self._sheath._subagents),
             spawn=(spawn if spawn is not None else self._sheath._spawn),
             client_factory=self._sheath._subagent_client_factory(),
+            subagent_middleware=self._sheath._subagent_middleware,
         )
         # Subscribed once per conversation, here at creation: resuming an id must not add it again.
         if self._sheath._on_status is not None:
