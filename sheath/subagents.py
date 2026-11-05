@@ -37,6 +37,58 @@ class SubagentSpec:
     max_round_trips: int | None = None       # per-task tool-loop budget
 
 
+@dataclass(frozen=True, kw_only=True)
+class SpawnPolicy:
+    """The host's bounds on sub-agents the model creates at runtime with ``spawn_subagent``."""
+
+    models: tuple[str, ...]          # allowlist; required, non-empty
+    default_model: str | None = None # used when the agent names none; None = models[0]
+    max_subagents: int = 8           # spawned per conversation, at every depth, ever
+    max_depth: int = 3               # backstop on nesting: depth of the deepest sub-agent
+    max_messages: int = 200          # send_message calls per conversation
+    max_message_chars: int = 4000    # per message
+
+    @property
+    def effective_default(self) -> str:
+        return self.default_model if self.default_model is not None else self.models[0]
+
+
+def validate_spawn_policy(policy: SpawnPolicy, client_factory: Callable[[str], Any] | None
+                          ) -> None:
+    """Raise ``ValueError`` for a policy sheath cannot honour, or one without a factory."""
+    if not isinstance(policy, SpawnPolicy):
+        raise TypeError(f"spawn must be a SpawnPolicy, got {type(policy).__name__}")
+    models = policy.models
+    if not isinstance(models, tuple) or not models:
+        raise ValueError("SpawnPolicy.models must be a non-empty tuple of model names")
+    for m in models:
+        if not isinstance(m, str) or not m.strip():
+            raise ValueError(f"SpawnPolicy.models: every model must be a non-empty string, "
+                             f"got {m!r}")
+    if policy.default_model is not None and policy.default_model not in models:
+        raise ValueError(f"SpawnPolicy.default_model {policy.default_model!r} is not in "
+                         f"models {list(models)}")
+    for field_name in ("max_subagents", "max_depth", "max_messages", "max_message_chars"):
+        value = getattr(policy, field_name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"SpawnPolicy.{field_name} must be an integer >= 1, got {value!r}")
+    if client_factory is None:
+        raise ValueError("a SpawnPolicy needs a client_factory: each spawned sub-agent gets a "
+                         "client of its own from client_factory(model)")
+
+
+def client_reuse(client: Any, *, parent_client: Any, others: list[Any]) -> str | None:
+    """Why ``client`` cannot be a new sub-agent's own client, or None when it can.
+
+    A client shared with another agent shares its tool-loop budget: the last budget applied to
+    it would govern them all, the parent's included."""
+    if client is parent_client:
+        return "the parent's client"
+    if any(client is c for c in others):
+        return "a client already given to another sub-agent"
+    return None
+
+
 def validate_subagents(
     specs: Mapping[str, SubagentSpec],
     *,
@@ -87,11 +139,12 @@ def validate_subagents(
         if spec.model is not None and spec.client is not None:
             raise ValueError(f"sub-agent {name!r}: set model or client, not both")
         if spec.client is not None:
-            if spec.client is parent_client:
+            reused = client_reuse(spec.client, parent_client=parent_client, others=seen_clients)
+            if reused == "the parent's client":
                 raise ValueError(
                     f"sub-agent {name!r}: client is the parent's client; give it one of its own"
                 )
-            if any(spec.client is c for c in seen_clients):
+            if reused is not None:
                 raise ValueError(
                     f"sub-agent {name!r}: client is shared with another sub-agent; "
                     "each needs its own"
@@ -108,17 +161,12 @@ def validate_subagents(
             resolved[name] = spec.client
             continue
         made = client_factory(spec.model or config.model)  # type: ignore[misc]
-        # A caching factory would hand one client to several agents; the last budget applied
-        # to it would then govern them all, the parent's included.
-        if made is parent_client:
+        # A caching factory would hand one client to several agents.
+        reused = client_reuse(made, parent_client=parent_client, others=seen_clients)
+        if reused is not None:
             raise ValueError(
-                f"sub-agent {name!r}: client_factory returned the parent's client; "
+                f"sub-agent {name!r}: client_factory returned {reused}; "
                 "it must return a new client for each sub-agent"
-            )
-        if any(made is c for c in seen_clients):
-            raise ValueError(
-                f"sub-agent {name!r}: client_factory returned a client already given to "
-                "another sub-agent; it must return a new client for each sub-agent"
             )
         seen_clients.append(made)
         resolved[name] = made

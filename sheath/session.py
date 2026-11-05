@@ -33,7 +33,7 @@ from .status import StatusBus, StatusEvent, bind_bus
 
 if TYPE_CHECKING:
     from .delegation import Delegation
-    from .subagents import SubagentSpec
+    from .subagents import SpawnPolicy, SubagentSpec
 
 _DELIVER = "deliver"
 _INPUTS = "inputs"
@@ -442,8 +442,10 @@ class Session:
         name: str = "data-integrator",
         subagents: Mapping[str, "SubagentSpec"] | None = None,
         client_factory: Callable[[str], Any] | None = None,
+        spawn: "SpawnPolicy | None" = None,
         _mcp_agent: str | None = None,
         _harness_extra: str | None = None,
+        _prebuilt_tools: list | None = None,
         **maf_kwargs: Any,
     ):
         """Build a MAF agent over the selected bundles plus developer tools/MCP.
@@ -455,6 +457,13 @@ class Session:
         same session, so it can do nothing this agent could not; each gets a client of its own,
         ``spec.client`` or ``client_factory(spec.model or config.model)``. While a delegated
         task is still running, the agent is re-run rather than allowed to finish.
+
+        ``spawn`` (a ``SpawnPolicy``) gives the agent ``spawn_subagent``, to create sub-agents
+        of its own at runtime within the policy's bounds; each gets a client of its own from
+        ``client_factory(model)``, so a policy needs a factory. ``None``: no such tool.
+
+        ``_prebuilt_tools`` are tool objects another agent already built (spill-wrapped, or
+        connected MCP functions), handed down as they are.
         """
         from agent_framework import create_harness_agent  # local: heavy dep, imported at call time
 
@@ -465,13 +474,24 @@ class Session:
             raise TypeError(
                 f"{', '.join(refused)}: refused, would give the model shell, file or agent access "
                 "outside the sandbox, safe_path and egress checks")
+        if spawn is not None:
+            from .subagents import validate_spawn_policy
+            validate_spawn_policy(spawn, client_factory)
         wait_timeout = maf_kwargs.pop("background_agents_wait_timeout_seconds", None)
         providers: list = []
-        if subagents:
+        top = None
+        if subagents or spawn is not None:
             top = self.delegation.top(name)
-            providers.append(await self._build_subagents(
-                client, subagents, top=top, bundles=bundles, client_factory=client_factory,
-                wait_timeout=wait_timeout))
+            top.client = client
+            top.bundles = _bundles.selected_bundles(bundles)
+            if subagents:
+                await self._build_subagents(client, subagents, top=top, bundles=bundles,
+                                            client_factory=client_factory)
+            if spawn is not None:
+                self.delegation.policy = spawn
+                self.delegation.client_factory = client_factory
+                top.can_spawn = True
+            providers.append(self._delegation_provider(top, wait_timeout))
             _add_parent_loop(maf_kwargs, top)
         builtin = self.tools(*bundles)
         external: list = []
@@ -480,8 +500,18 @@ class Session:
                 external.extend(await self._attach_mcp(tool, agent=_mcp_agent))
             else:
                 external.append(spill_tool(self, tool))
+        external.extend(_prebuilt_tools or [])
 
         _apply_tool_loop_limits(client, self.config)
+        if top is not None:
+            # The tools this agent may hand down, by name: the objects it was itself given.
+            top.tool_objects = {t.name: t for t in external}
+            if spawn is not None:
+                from .delegation import Limits
+                top.limits = Limits(timeout_s=self.config.subagent_task_timeout_s,
+                                    max_round_trips=_round_trips(client),
+                                    subtree_allowance=spawn.max_subagents,
+                                    remaining_depth=spawn.max_depth)
         # Announce staged input trees on every run (a tree staged between turns included).
         maf_kwargs["context_providers"] = [*(maf_kwargs.get("context_providers") or []),
                                            _input_trees.context_provider(self), *providers]
@@ -518,15 +548,20 @@ class Session:
             **maf_kwargs,
         )
 
+    def _delegation_provider(self, top: Any, wait_timeout: Any) -> Any:
+        from .delegation import DelegationProvider
+
+        provider_kw = {} if wait_timeout is None else {"wait_timeout_s": wait_timeout}
+        return DelegationProvider(self.delegation, top, **provider_kw)
+
     async def _build_subagents(self, client: Any, subagents: Mapping[str, "SubagentSpec"], *,
                                top: Any, bundles: tuple[str, ...],
-                               client_factory: Callable[[str], Any] | None,
-                               wait_timeout: Any) -> Any:
-        """Validate the specs, build each sub-agent over this session as a node under ``top``,
-        and return ``top``'s delegation provider."""
+                               client_factory: Callable[[str], Any] | None) -> None:
+        """Validate the specs and build each sub-agent over this session as a node under
+        ``top``."""
         from .api import expand_tools  # local: api imports session
         from .bundles import SUBAGENT_INSTRUCTIONS
-        from .delegation import AgentNode, DelegationProvider, Limits
+        from .delegation import AgentNode, Limits
         from .subagents import ConfinedSubagent, _ToolActivity, validate_subagents
 
         clients = validate_subagents(subagents, parent_bundles=bundles, parent_client=client,
@@ -543,7 +578,7 @@ class Session:
                              limits=Limits(timeout_s=self.config.subagent_task_timeout_s,
                                            max_round_trips=spec.max_round_trips,
                                            subtree_allowance=None, remaining_depth=0),
-                             declared=True)
+                             declared=True, client=sub_client)
             agent = await self.create_agent(
                 sub_client, agent_instructions=spec.instructions,
                 tools=expand_tools(spec.tools), bundles=sub_bundles,
@@ -556,8 +591,6 @@ class Session:
             node.agent = ConfinedSubagent(agent, node=node, session=self)
             delegation.add_node(node)
         self.subagent_names = tuple(subagents)
-        provider_kw = {} if wait_timeout is None else {"wait_timeout_s": wait_timeout}
-        return DelegationProvider(delegation, top, **provider_kw)
 
     async def _attach_mcp(self, tool: Any, *, agent: str | None = None) -> list:
         """Connect an MCP server, attach the spill parser, capture its status, own its lifecycle.
@@ -846,6 +879,17 @@ def _add_parent_loop(maf_kwargs: dict[str, Any], node: Any) -> None:
                                return_final_only=True, inject_progress=False, **loop_kw)
     # The nudge filter sits outside the loop, so it sees every pass's updates.
     maf_kwargs["middleware"] = [_DropLoopNudges(), loop, *(maf_kwargs.get("middleware") or [])]
+
+
+# MAF's tool-loop round-trip cap when neither the host nor the client sets one.
+_MAF_DEFAULT_ROUND_TRIPS = 40
+
+
+def _round_trips(client: Any) -> int:
+    """The round-trip budget ``client`` runs with (after ``_apply_tool_loop_limits``)."""
+    settings = getattr(client, "function_invocation_configuration", None)
+    value = settings.get("max_iterations") if isinstance(settings, dict) else None
+    return value if isinstance(value, int) else _MAF_DEFAULT_ROUND_TRIPS
 
 
 def _apply_tool_loop_limits(client: Any, config: SheathConfig) -> None:

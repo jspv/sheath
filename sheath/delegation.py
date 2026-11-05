@@ -16,9 +16,10 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from agent_framework import ContextProvider, Message, tool
+from pydantic import Field
 from agent_framework._sessions import (
     _MESSAGE_INJECTION_LOCK,
     MESSAGE_INJECTION_PENDING_MESSAGES_STATE_KEY,
@@ -141,7 +142,8 @@ class AgentNode:
                  agent: Any = None, description: str = "", bundles: tuple[str, ...] = (),
                  tool_objects: dict[str, Any] | None = None, can_spawn: bool = False,
                  limits: Limits | None = None, message_to: set[str] | None = None,
-                 folder: str | None = None, declared: bool = False) -> None:
+                 folder: str | None = None, declared: bool = False,
+                 client: Any = None) -> None:
         self.name = name
         self.path = path
         self.depth = depth
@@ -158,6 +160,7 @@ class AgentNode:
         self.current_session: Any = None
         self.folder = folder
         self.declared = declared
+        self.client = client           # its own chat client (never shared with another agent)
         self._delegation: Delegation | None = None   # set when registered
 
     def __repr__(self) -> str:
@@ -326,6 +329,11 @@ class Delegation:
         self._records: list[TaskRecord] = []
         self._next_id = 1
         self.closed = False
+        # Runtime spawning (Session.create_agent(spawn=...)): the host's policy and factory.
+        self.policy: Any = None                  # sheath.subagents.SpawnPolicy
+        self.client_factory: Callable[[str], Any] | None = None
+        self.spawned_total = 0                   # spawned in this conversation, at any depth
+        self._pending: set[str] = set()          # case-folded names of spawns being built
 
     # --- nodes ------------------------------------------------------------------------------
 
@@ -507,6 +515,171 @@ class Delegation:
         self._records.remove(record)
         return f"Task {task_id} cleared."
 
+    # --- spawning ---------------------------------------------------------------------------
+
+    def _clients(self) -> list[Any]:
+        nodes = [*self._tops.values(), *self._nodes.values()]
+        return [n.client for n in nodes if n.client is not None]
+
+    def spawn_budget(self) -> tuple[int, int]:
+        """(remaining, allowed) spawns in this conversation."""
+        allowed = self.policy.max_subagents
+        return max(allowed - self.spawned_total - len(self._pending), 0), allowed
+
+    def spawn_description(self, owner: AgentNode) -> str:
+        """``spawn_subagent``'s description for ``owner``: models, default and budget now."""
+        policy = self.policy
+        remaining, allowed = self.spawn_budget()
+        tools = ", ".join(owner.tool_objects) or "none"
+        return (
+            "Create a new sub-agent and start its first task in one step. Write its whole role "
+            "in instructions; it does not see your conversation. It works in this workspace "
+            "under your limits, with only the tools and bundles you hand down (tools: none "
+            "unless named; bundles: all of yours unless named). Returns the task id; continue "
+            "with the background_agents_* tools, and give it later tasks with "
+            "background_agents_start_task by name.\n"
+            f"Allowed models: {', '.join(policy.models)}. "
+            f"Default model: {policy.effective_default}.\n"
+            f"Sub-agent budget: {remaining} of {allowed} remaining in this conversation.\n"
+            f"Tools you can hand down: {tools}. "
+            f"Your bundles: {', '.join(owner.bundles) or 'none'}."
+        )
+
+    def _spawn_refusal(self, owner: AgentNode, *, name: Any, instructions: Any, task: Any,
+                       model: Any, tools: list[str], bundles: Any, message_to: Any,
+                       timeout_s: Any, max_round_trips: Any, max_subagents: Any,
+                       max_depth: Any) -> str | None:
+        """The first rule the call breaks, in the spec table's order (total cap last)."""
+        from .subagents import _NAME_PATTERN, _NAME_RE   # local: subagents imports this module
+
+        policy = self.policy
+        if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
+            return (f"Error: sub-agent name {_short(name)} is invalid: a name must match "
+                    f"{_NAME_PATTERN}.")
+        key = name.lower()
+        taken = self._nodes.get(key) or next(
+            (t for t in self._tops.values() if t.name.lower() == key), None)
+        if taken is not None or key in self._pending:
+            by = taken.name if taken is not None else name
+            return (f"Error: the name {name!r} is already used in this conversation (by "
+                    f"{by!r}); names must be unique ignoring case. Choose another name.")
+        if not isinstance(instructions, str) or not instructions.strip():
+            return ("Error: instructions must not be empty: they are the sub-agent's whole "
+                    "role prompt.")
+        if not isinstance(task, str) or not task.strip():
+            return "Error: task must not be empty: it is the sub-agent's first task."
+        if model is not None and model not in policy.models:
+            return (f"Error: model {_short(model)} is not allowed. Allowed models: "
+                    f"{', '.join(policy.models)} (default: {policy.effective_default}).")
+        unknown = [t for t in tools if t not in owner.tool_objects and t != "spawn_subagent"]
+        if unknown:
+            have = ", ".join(owner.tool_objects) or "none"
+            return (f"Error: unknown tool(s) {', '.join(_short(t) for t in unknown)}: you can "
+                    f"hand down only your own tools. Your tools: {have}.")
+        if "spawn_subagent" in tools:
+            return "Error: handing down spawn_subagent is not supported yet."
+        if bundles is not None:
+            if not bundles:
+                return ("Error: bundles must name at least one bundle; omit bundles to hand "
+                        f"down all of yours: {', '.join(owner.bundles) or 'none'}.")
+            outside = [b for b in bundles if b not in owner.bundles]
+            if outside:
+                return (f"Error: bundle(s) {', '.join(_short(b) for b in outside)} are not "
+                        f"yours to hand down. Your bundles: "
+                        f"{', '.join(owner.bundles) or 'none'}.")
+        if message_to:
+            return "Error: message_to is not supported yet."
+        for arg, value in (("timeout_s", timeout_s), ("max_round_trips", max_round_trips),
+                           ("max_subagents", max_subagents), ("max_depth", max_depth)):
+            if value is not None:
+                return f"Error: {arg} is not supported yet; omit it to inherit your own limit."
+        used = self.spawned_total + len(self._pending)
+        if used >= policy.max_subagents:
+            return (f"Error: sub-agent limit reached: {used} of {policy.max_subagents} "
+                    "spawned in this conversation (the host's max_subagents). Give an existing "
+                    "sub-agent another task with background_agents_start_task instead.")
+        return None
+
+    async def spawn(self, owner: AgentNode, *, name: Any, instructions: Any, task: Any,
+                    model: Any = None, tools: Any = None, bundles: Any = None,
+                    message_to: Any = None, description: str = "", timeout_s: Any = None,
+                    max_round_trips: Any = None, max_subagents: Any = None,
+                    max_depth: Any = None) -> str:
+        """Create a sub-agent of ``owner`` and start its first task: ``spawn_subagent``.
+
+        Every refusal is an ``Error: `` string, and a refused call creates nothing: no node,
+        task, folder, client use or count. The name and a place in the budget are reserved
+        before the first await, so concurrent calls cannot both take the last one."""
+        if self.closed:
+            return "Error: Session is being released; cannot spawn a sub-agent."
+        if self.policy is None or not owner.can_spawn:
+            return "Error: this agent may not spawn sub-agents."
+        tools = list(dict.fromkeys(tools or ()))
+        if bundles is not None:
+            bundles = list(dict.fromkeys(bundles))
+        refusal = self._spawn_refusal(
+            owner, name=name, instructions=instructions, task=task, model=model, tools=tools,
+            bundles=bundles, message_to=message_to, timeout_s=timeout_s,
+            max_round_trips=max_round_trips, max_subagents=max_subagents, max_depth=max_depth)
+        if refusal is not None:
+            return refusal
+        key = name.lower()
+        self._pending.add(key)
+        try:
+            return await self._build_spawned(
+                owner, name=name, instructions=instructions, task=task,
+                model=model if model is not None else self.policy.effective_default,
+                tools=tools, bundles=tuple(bundles) if bundles is not None else owner.bundles,
+                description=description if isinstance(description, str) else "")
+        finally:
+            self._pending.discard(key)
+
+    async def _build_spawned(self, owner: AgentNode, *, name: str, instructions: str,
+                             task: str, model: str, tools: list[str], bundles: tuple[str, ...],
+                             description: str) -> str:
+        from .bundles import SUBAGENT_INSTRUCTIONS
+        from .paths import safe_path
+        from .subagents import ConfinedSubagent, _ToolActivity, client_reuse
+
+        sess = self._session
+        try:
+            client = self.client_factory(model)   # type: ignore[misc]
+        except Exception as e:  # noqa: BLE001 - a tool error the agent can read; no message
+            return f"Error: could not create a client for model {model!r} ({type(e).__name__})."
+        reused = client_reuse(client, parent_client=owner.client, others=self._clients())
+        if reused is not None:
+            return (f"Error: the host's client_factory returned {reused} for model {model!r}; "
+                    "every sub-agent needs a client of its own, so none was created.")
+        handed = {t: owner.tool_objects[t] for t in tools}
+        try:
+            agent = await sess.create_agent(
+                client, agent_instructions=instructions, bundles=bundles, name=name,
+                _prebuilt_tools=list(handed.values()), _harness_extra=SUBAGENT_INSTRUCTIONS,
+                middleware=[_ToolActivity()])
+            _inherit_round_trips(client, owner.limits.max_round_trips)
+        except Exception as e:  # noqa: BLE001 - a tool error the agent can read; no message
+            return f"Error: could not build sub-agent {name!r} ({type(e).__name__})."
+        if self.closed:
+            return "Error: Session is being released; cannot spawn a sub-agent."
+        path = name if owner.depth == 0 else f"{owner.path}/{name}"
+        folder = f"agents/{path}"
+        try:
+            with sess.file_io():
+                safe_path(sess.root, folder).mkdir(parents=True, exist_ok=True)
+        except Exception as e:  # noqa: BLE001 - a tool error the agent can read; no message
+            return f"Error: could not create the folder {folder}/ ({type(e).__name__})."
+        node = AgentNode(
+            name=name, path=path, depth=owner.depth + 1, creator=owner,
+            description=description, bundles=bundles, tool_objects=handed, can_spawn=False,
+            limits=Limits(timeout_s=owner.limits.timeout_s,
+                          max_round_trips=owner.limits.max_round_trips, subtree_allowance=None,
+                          remaining_depth=max(owner.limits.remaining_depth - 1, 0)),
+            folder=folder, client=client)
+        node.agent = ConfinedSubagent(agent, node=node, session=sess)
+        self.add_node(node)
+        self.spawned_total += 1
+        return self.start_task(owner, name, task, description or name)
+
     async def cancel_all(self) -> None:
         """Cancel every running task and registered sub-agent run, and wait for them, bounded
         by ``CANCEL_WAIT_S``. A task still pending after that is logged and left.
@@ -544,6 +717,19 @@ class Delegation:
             _log.warning("%d sub-agent task(s) still running %.0fs after cancellation: %s",
                          len(pending), CANCEL_WAIT_S,
                          ", ".join(sorted(t.get_name() for t in pending)))
+
+
+def _short(value: Any, limit: int = 80) -> str:
+    """``repr`` of a model-supplied value, cut to ``limit`` characters for an error."""
+    text = repr(value)
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _inherit_round_trips(client: Any, max_round_trips: int | None) -> None:
+    """Give a spawned sub-agent's own client its creator's round-trip budget."""
+    settings = getattr(client, "function_invocation_configuration", None)
+    if max_round_trips is not None and isinstance(settings, dict):
+        settings["max_iterations"] = max_round_trips
 
 
 def _task_line(r: TaskRecord) -> str:
@@ -611,6 +797,39 @@ class DelegationProvider(ContextProvider):
             """Remove a completed or failed task and release its session to free memory."""
             return d.clear(node, task_id)
 
+        spawn_tools: list = []
+        if node.can_spawn and d.policy is not None:
+
+            @tool(name="spawn_subagent", description=d.spawn_description(node),
+                  approval_mode="never_require")
+            async def spawn_subagent(
+                name: Annotated[str, Field(description="New sub-agent's name, unique in "
+                                           "this conversation")],
+                instructions: Annotated[str, Field(description="Its whole role prompt")],
+                task: Annotated[str, Field(description="Its first task's input")],
+                model: Annotated[str | None, Field(description="An allowed model; omit for "
+                                                   "the default")] = None,
+                tools: Annotated[list[str] | None, Field(description="Names of your own "
+                                                         "tools to hand down")] = None,
+                bundles: Annotated[list[str] | None, Field(description="Your bundles to hand "
+                                                           "down; omit for all of "
+                                                           "yours")] = None,
+                message_to: list[str] | None = None,
+                description: Annotated[str, Field(description="One line shown in task "
+                                                  "listings")] = "",
+                timeout_s: float | None = None,
+                max_round_trips: int | None = None,
+                max_subagents: int | None = None,
+                max_depth: int | None = None,
+            ) -> str:
+                return await d.spawn(
+                    node, name=name, instructions=instructions, task=task, model=model,
+                    tools=tools, bundles=bundles, message_to=message_to,
+                    description=description, timeout_s=timeout_s,
+                    max_round_trips=max_round_trips, max_subagents=max_subagents,
+                    max_depth=max_depth)
+
+            spawn_tools.append(spawn_subagent)
         context.extend_instructions(
             self.source_id, [_PROVIDER_NOTE + "\n\n" + _listing(d.reachable(node))])
         sync_tools = [background_agents_start_task, background_agents_get_task_results,
@@ -627,6 +846,7 @@ class DelegationProvider(ContextProvider):
             background_agents_get_all_tasks,
             background_agents_continue_task,
             background_agents_clear_completed_task,
+            *spawn_tools,
         ])
         records = d._refresh(node)
         if records:
